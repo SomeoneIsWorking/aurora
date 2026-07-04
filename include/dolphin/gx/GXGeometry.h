@@ -43,4 +43,17 @@ static inline void GXSetTexCoordGen(GXTexCoordID dst_coord, GXTexGenType func, G
 }
 #endif
 
+#if defined(TARGET_PC) && defined(__cplusplus)
+// GC-original 3-arg GXSetArray signature — decomp code (SMS, SPM, etc.) calls
+// this form heavily. `extern "C++"` nested inside the enclosing extern "C" of
+// dolphin/gx.h so this can be a C++ overload of the 5-arg TARGET_PC form (C
+// linkage doesn't permit overloading). Forwards to the 5-arg form with size=0
+// (impl walks the buffer at draw time) and le=false (GC assets are big-endian).
+extern "C++" {
+inline void GXSetArray(GXAttr attr, const void* data, u8 stride) {
+    GXSetArray(attr, data, 0u, stride, false);
+}
+}
+#endif
+
 #endif

@@ -38,7 +38,7 @@ typedef enum {
 
 typedef enum { VI_XFBMODE_SF = 0, VI_XFBMODE_DF } VIXFBMode;
 
-typedef struct {
+typedef struct _GXRenderModeObj {
   /*0x00*/ VITVMode viTVmode;
   /*0x04*/ u16 fbWidth;
   /*0x06*/ u16 efbHeight;
@@ -54,14 +54,14 @@ typedef struct {
   u8 vfilter[7];
 } GXRenderModeObj;
 
-typedef struct {
+typedef struct _GXColor {
   u8 r;
   u8 g;
   u8 b;
   u8 a;
 } GXColor;
 
-typedef struct {
+typedef struct _GXTexObj {
 #ifdef TARGET_PC
   u32 dummy[16];
 #else
@@ -69,7 +69,7 @@ typedef struct {
 #endif
 } GXTexObj;
 
-typedef struct {
+typedef struct _GXTlutObj {
 #ifdef TARGET_PC
   u32 dummy[10];
 #else
@@ -77,23 +77,23 @@ typedef struct {
 #endif
 } GXTlutObj;
 
-typedef struct {
+typedef struct _GXLightObj {
   u32 dummy[16];
 } GXLightObj;
 
-typedef struct {
+typedef struct _GXVtxDescList {
   GXAttr attr;
   GXAttrType type;
 } GXVtxDescList;
 
-typedef struct {
+typedef struct _GXVtxAttrFmtList {
   GXAttr attr;
   GXCompCnt cnt;
   GXCompType type;
   u8 frac;
 } GXVtxAttrFmtList;
 
-typedef struct {
+typedef struct _GXColorS10 {
   s16 r;
   s16 g;
   s16 b;
