@@ -294,7 +294,7 @@ void GXGetLightDir(GXLightObj* light_, float* nx, float* ny, float* nz) {
   *nz = -light->nz;
 }
 
-void GXGetLightColor(GXLightObj* light_, GXColor* col) {
+void GXGetLightColor(const GXLightObj* light_, GXColor* col) {
   auto* light = reinterpret_cast<const GXLightObj_*>(light_);
   *col = light->color;
 }
