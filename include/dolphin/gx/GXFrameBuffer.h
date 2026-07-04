@@ -10,6 +10,13 @@ extern "C" {
 
 #define GX_MAX_Z24 0x00FFFFFF
 
+// Frame-to-field copy mode (GC SDK original enum).
+typedef enum _GXCopyMode {
+    GX_COPY_PROGRESSIVE = 0,
+    GX_COPY_INTLC_EVEN  = 2,
+    GX_COPY_INTLC_ODD   = 3,
+} GXCopyMode;
+
 extern GXRenderModeObj GXNtsc240Ds;
 extern GXRenderModeObj GXNtsc240DsAa;
 extern GXRenderModeObj GXNtsc240Int;
@@ -42,7 +49,9 @@ void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht);
 void GXSetDispCopyDst(u16 wd, u16 ht);
 void GXSetCopyClamp(GXFBClamp clamp);
 u32 GXSetDispCopyYScale(f32 vscale);
-void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]);
+void GXSetCopyFilter(GXBool aa, const u8 sample_pattern[12][2], GXBool vf, const u8 vfilter[7]);
+// GC SDK: pick copy mode for interlaced/progressive display.
+void GXSetDispCopyFrame2Field(GXCopyMode mode);
 void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt);
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht);
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap);
