@@ -79,7 +79,7 @@ typedef enum {
   GX_POINTS = 0xB8,
 } GXPrimitive;
 
-typedef enum {
+typedef enum _GXVtxFmt {
   GX_VTXFMT0,
   GX_VTXFMT1,
   GX_VTXFMT2,

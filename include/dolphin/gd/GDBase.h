@@ -158,6 +158,11 @@ static inline void GDSetCurrOffset(u32 offset) {
     __GDCurrentDL->ptr = __GDCurrentDL->start + offset;
 }
 
+// GC SDK — return the active GDL for save/restore around nested writes.
+static inline GDLObj* GDGetCurrent(void) {
+    return __GDCurrentDL;
+}
+
 // Original GC SDK returned u8* — decomp source assigns directly to u8*.
 static inline u8* GDGetCurrPointer(void) {
     return __GDCurrentDL->ptr;
