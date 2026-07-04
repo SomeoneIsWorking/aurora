@@ -4,6 +4,27 @@
 #include <dolphin/mtx/GeoTypes.h>
 #include <dolphin/types.h>
 
+// MSL/GC math macros — the original MWERKS build supplied these via
+// PowerPC_EABI_Support/Msl/MSL_C/MSL_Common/math.h. glibc's <math.h> doesn't
+// ship them. Decomp source uses DEG_TO_RAD/RAD_TO_DEG in gameplay logic
+// (camera angles, rotation to radians conversions), so make them ambient
+// wherever <dolphin/mtx.h> is transitively included.
+#ifndef DEG_TO_RAD
+#define DEG_TO_RAD(degrees) ((degrees) * (3.14159265358979323846f / 180.0f))
+#endif
+#ifndef RAD_TO_DEG
+#define RAD_TO_DEG(radians) ((radians) * (180.0f / 3.14159265358979323846f))
+#endif
+#ifndef TAU
+#define TAU 6.2831855f
+#endif
+#ifndef HALF_PI
+#define HALF_PI 1.5707964f
+#endif
+#ifndef QUARTER_PI
+#define QUARTER_PI 0.7853982f
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

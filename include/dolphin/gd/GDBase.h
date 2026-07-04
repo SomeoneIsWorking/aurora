@@ -158,10 +158,12 @@ static inline void GDSetCurrOffset(u32 offset) {
     __GDCurrentDL->ptr = __GDCurrentDL->start + offset;
 }
 
-static inline void* GDGetCurrPointer(void) {
-    return (void*)__GDCurrentDL->ptr;
+// Original GC SDK returned u8* — decomp source assigns directly to u8*.
+static inline u8* GDGetCurrPointer(void) {
+    return __GDCurrentDL->ptr;
 }
 
+// Legacy alias (some ports use this spelling).
 static inline u8* GDGetCurrPointer2(void) {
     return __GDCurrentDL->ptr;
 }

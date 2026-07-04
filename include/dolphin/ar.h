@@ -7,7 +7,10 @@
 extern "C" {
 #endif
 
-typedef void (*ARQCallback)(uintptr_t pointerToARQRequest);
+// GC SDK original signature: callback receives the ARQRequest*, not a raw
+// address. Decomp source registers callbacks with `void fn(ARQRequestRef)`.
+struct ARQRequest;
+typedef void (*ARQCallback)(struct ARQRequest*);
 
 struct ARQRequest {
     /* 0x00 */ struct ARQRequest *next;
@@ -31,6 +34,10 @@ struct ARQRequest {
     ARStartDMA(ARAM_DIR_MRAM_TO_ARAM, mmem, aram, len)
 
 typedef struct ARQRequest ARQRequest;
+
+// Legacy typedef used by GC decomp source (SMS, SPM, ...) that predates
+// Aurora's cleaner struct-only exposure.
+typedef ARQRequest* ARQRequestRef;
 
 #define ARQ_TYPE_MRAM_TO_ARAM ARAM_DIR_MRAM_TO_ARAM
 #define ARQ_TYPE_ARAM_TO_MRAM ARAM_DIR_ARAM_TO_MRAM
