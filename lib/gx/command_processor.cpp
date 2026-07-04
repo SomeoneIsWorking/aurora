@@ -483,8 +483,15 @@ void process(const u8* data, u32 size, bool bigEndian) {
     }
 
     default:
-      // Check if it's a draw command (0x80-0xBF range)
-      if (cmd >= 0x80) {
+      // Draw commands live in [0x80..0xBF]: opcode byte is (prim | vat), prim
+      // in {0x80,0x90,0x98,0xA0,0xA8,0xB0,0xB8}, vat in [0..7]. Anything at or
+      // above 0xC0 is garbage (probably a fifo desync — the previous handler
+      // over- or under-consumed its payload); do NOT coerce it into a draw,
+      // that just turns a real desync into "unsupported primitive 0xF8" from
+      // prepare_idx_buffer several layers deeper. Fall through to the unknown-
+      // opcode diagnostic path so the ring buffer + hex dump above surfaces
+      // the actual cause.
+      if (cmd >= 0x80 && cmd < 0xC0) {
         handle_draw(cmd, data, pos, size, bigEndian);
       } else {
         // Hex dump surrounding bytes for debugging
