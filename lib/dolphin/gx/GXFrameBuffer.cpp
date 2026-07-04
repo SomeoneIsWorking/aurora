@@ -203,7 +203,7 @@ void GXSetCopyClear(GXColor color, u32 depth) {
   __gx->bpSent = 1;
 }
 
-void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {}
+void GXSetCopyFilter(GXBool aa, const u8 sample_pattern[12][2], GXBool vf, const u8 vfilter[7]) {}
 
 void GXSetDispCopyGamma(GXGamma gamma) {}
 

@@ -102,7 +102,7 @@ void ARQPostRequest(ARQRequest* request, u32 owner, u32 type, u32 priority, uint
 
   // Immediately invoke the callback (synchronous on PC, no DMA latency)
   if (callback) {
-    callback((uintptr_t)request);
+    callback(request);
   }
 }
 
