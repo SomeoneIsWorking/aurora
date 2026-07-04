@@ -378,10 +378,30 @@ void process(const u8* data, u32 size, bool bigEndian) {
   ZoneScoped;
   u32 pos = 0;
 
+  // Small ring buffer of recent (opcode, pos) — dumped on unknown-opcode fatal
+  // so the caller can see what commands preceded the garbage. AURORA_FIFO_TRACE=1
+  // dumps every opcode as it's processed (very noisy; use only when the
+  // ring-buffer window is too narrow).
+  struct RecentCmd { u32 pos; u8 cmd; };
+  constexpr size_t kRecentN = 32;
+  static thread_local RecentCmd s_recent[kRecentN];
+  static thread_local size_t s_recentHead = 0;
+  static thread_local int s_traceEnabled = -1;
+  if (s_traceEnabled < 0) {
+    const char* env = std::getenv("AURORA_FIFO_TRACE");
+    s_traceEnabled = env && env[0] && env[0] != '0' ? 1 : 0;
+  }
+
   while (pos < size) {
+    u32 cmdPos = pos;
     u8 cmd = data[pos++];
     u8 opcode = cmd & CP_OPCODE_MASK;
-    // Log.warn("Processing opcode {:02x} at pos {} (size {})", opcode, pos - 1, size);
+    s_recent[s_recentHead].pos = cmdPos;
+    s_recent[s_recentHead].cmd = cmd;
+    s_recentHead = (s_recentHead + 1) % kRecentN;
+    if (s_traceEnabled) {
+      Log.warn("[fifo trace] pos={} cmd=0x{:02X} opcode=0x{:02X}", cmdPos, cmd, opcode);
+    }
 
     switch (opcode) {
     case CP_CMD_NOP:
@@ -469,8 +489,8 @@ void process(const u8* data, u32 size, bool bigEndian) {
       } else {
         // Hex dump surrounding bytes for debugging
         {
-          u32 dumpStart = (pos > 17) ? pos - 17 : 0;
-          u32 dumpEnd = (pos + 16 < size) ? pos + 16 : size;
+          u32 dumpStart = (pos > 33) ? pos - 33 : 0;
+          u32 dumpEnd = (pos + 32 < size) ? pos + 32 : size;
           std::string hex;
           for (u32 i = dumpStart; i < dumpEnd; i++) {
             if (i == pos - 1)
@@ -480,7 +500,18 @@ void process(const u8* data, u32 size, bool bigEndian) {
           }
           Log.error("  hex dump (pos {}-{}):{}", dumpStart, dumpEnd - 1, hex);
         }
-        FATAL("command_processor: unknown opcode 0x{:02X} at pos {}", cmd, pos - 1);
+        // Recent-command ring buffer — what was processed before the garbage.
+        {
+          std::string trail;
+          for (size_t i = 0; i < kRecentN; ++i) {
+            const auto& r = s_recent[(s_recentHead + i) % kRecentN];
+            if (r.pos == 0 && r.cmd == 0 && i == 0) continue;
+            trail += fmt::format(" [pos={} cmd=0x{:02X}]", r.pos, r.cmd);
+          }
+          Log.error("  recent opcodes (oldest first):{}", trail);
+        }
+        FATAL("command_processor: unknown opcode 0x{:02X} at pos {} (total fifo size {})",
+              cmd, pos - 1, size);
       }
       break;
     }
@@ -1254,7 +1285,10 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
     }
     // Array base addresses (0xA0-0xAF)
     else if (addr >= 0xA0 && addr <= 0xAF) {
-      Log.error("CP_REG_ARRAYBASE_ID is not supported on Aurora. Use GX_AURORA_LOAD_ARRAYBASE instead.");
+      Log.error("CP_REG_ARRAYBASE_ID (addr=0x{:02X}) is not supported on Aurora. "
+                "Use GX_AURORA_LOAD_ARRAYBASE instead. Attempted value=0x{:08X} "
+                "(attr={} -- 0=POS,1=NRM,2=CLR0,3=CLR1,4-11=TEX0-7).",
+                addr, value, addr - 0xA0);
     }
     // Array strides (0xB0-0xBF)
     else if (addr >= 0xB0 && addr <= 0xBF) {
@@ -1931,7 +1965,19 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
   }
 
   else {
-    Log.error("Unknown Aurora subcommand: {:04X}", subCmd);
+    u32 dumpStart = (pos > 33) ? pos - 33 : 0;
+    u32 dumpEnd = (pos + 32 < size) ? pos + 32 : size;
+    std::string hex;
+    for (u32 i = dumpStart; i < dumpEnd; i++) {
+      if (i == pos - 3 || i == pos - 2)
+        hex += fmt::format("[{:02x}]", data[i]);
+      else
+        hex += fmt::format(" {:02x}", data[i]);
+    }
+    Log.error("Unknown Aurora subcommand: 0x{:04X} at pos {} -- caller likely mis-encoded "
+              "the GX_AURORA (0x50) opcode payload or fell out of frame from an earlier "
+              "extension. Hex dump (pos {}-{}, [] marks the subCmd bytes):{}",
+              subCmd, pos - 2, dumpStart, dumpEnd - 1, hex);
   }
 }
 
