@@ -824,7 +824,7 @@ typedef enum {
   GX_CLAMP_BOTTOM = 2,
 } GXFBClamp;
 
-typedef enum {
+typedef enum _GXTlut {
   GX_TLUT0 = 0,
   GX_TLUT1 = 1,
   GX_TLUT2 = 2,
@@ -847,7 +847,7 @@ typedef enum {
   GX_BIGTLUT3 = 19,
 } GXTlut;
 
-typedef enum {
+typedef enum _GXTlutFmt {
   GX_TL_IA8,
   GX_TL_RGB565,
   GX_TL_RGB5A3,

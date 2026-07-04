@@ -23,6 +23,14 @@ void GXLoadPosMtxImm(f32 mtx[3][4], u32 id);
 void GXLoadNrmMtxImm(f32 mtx[3][4], u32 id);
 void GXLoadTexMtxImm(f32 mtx[][4], u32 id, GXTexMtxType type);
 #endif
+// Indexed matrix loads — emit a CP command to fetch matrix `mtx_idx` (from
+// the array registered via GXSetArray with GX_{POS,NRM}_MTX_ARRAY) into GX
+// hardware register slot `id`. Decomp source (SMS, SPM, etc.) drives skinned
+// models through these.
+void GXLoadPosMtxIndx(u16 mtx_idx, u32 id);
+void GXLoadNrmMtxIndx3x3(u16 mtx_idx, u32 id);
+void GXLoadTexMtxIndx(u16 mtx_idx, u32 id, GXTexMtxType type);
+
 void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz);
 void GXSetCurrentMtx(u32 id);
 void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz, u32 field);
