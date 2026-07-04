@@ -1,6 +1,7 @@
 #include "shader_info.hpp"
 
 #include <cmath>
+#include <cstdio>
 
 #include <tracy/Tracy.hpp>
 
@@ -55,10 +56,18 @@ void color_arg_reg_info(GXTevColorArg arg, const TevStage& stage, ShaderInfo& in
     break;
   case GX_CC_TEXC:
   case GX_CC_TEXA:
-    CHECK(stage.texCoordId != GX_TEXCOORD_NULL, "tex coord not bound");
-    CHECK(stage.texMapId != GX_TEXMAP_NULL, "tex map not bound");
-    info.sampledTexCoords.set(stage.texCoordId);
-    info.sampledTextures.set(stage.texMapId);
+    // A TEV stage may reference GX_CC_TEXC/A while its texCoord/texMap are
+    // unbound (GX_TEXCOORD_NULL / GX_TEXMAP_NULL). The upstream CHECK() is a
+    // no-op under NDEBUG, so in release the sentinel (255) leaked into
+    // std::bitset<8>::set() and threw std::out_of_range. Skip the .set()
+    // when either is unbound — the resulting shader samples nothing at this
+    // stage, matching the sentinel's intent, and no bitset bit is set.
+    if (stage.texCoordId != GX_TEXCOORD_NULL) {
+      info.sampledTexCoords.set(stage.texCoordId);
+    }
+    if (stage.texMapId != GX_TEXMAP_NULL) {
+      info.sampledTextures.set(stage.texMapId);
+    }
     break;
   case GX_CC_RASC:
   case GX_CC_RASA:
@@ -129,10 +138,15 @@ void alpha_arg_reg_info(GXTevAlphaArg arg, const TevStage& stage, ShaderInfo& in
     }
     break;
   case GX_CA_TEXA:
-    CHECK(stage.texCoordId != GX_TEXCOORD_NULL, "tex coord not bound");
-    CHECK(stage.texMapId != GX_TEXMAP_NULL, "tex map not bound");
-    info.sampledTexCoords.set(stage.texCoordId);
-    info.sampledTextures.set(stage.texMapId);
+    // See color_arg_reg_info: CHECK is a no-op under NDEBUG, so we must
+    // tolerate GX_TEXCOORD_NULL / GX_TEXMAP_NULL (255) here or bitset::set
+    // throws out_of_range in release.
+    if (stage.texCoordId != GX_TEXCOORD_NULL) {
+      info.sampledTexCoords.set(stage.texCoordId);
+    }
+    if (stage.texMapId != GX_TEXMAP_NULL) {
+      info.sampledTextures.set(stage.texMapId);
+    }
     break;
   case GX_CA_RASA:
     if (stage.channelId != GX_COLOR_NULL && stage.channelId != GX_COLOR_ZERO &&
