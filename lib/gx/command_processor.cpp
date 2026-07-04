@@ -1283,12 +1283,30 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
       g_gxState.stateDirty = true;
       g_gxState.clearVtxSizeCache();
     }
-    // Array base addresses (0xA0-0xAF)
+    // Array base addresses (0xA0-0xAF): the raw CP write can only carry a
+    // 32-bit truncated host pointer, so we cannot use `value` as a real base
+    // address on a 64-bit host. However display-list replay routinely contains
+    // these writes (baked by GDSetArray/J3D) and the CORRECT 64-bit pointer
+    // for the same attr will be supplied separately via GX_AURORA_LOAD_ARRAYBASE
+    // (from GXSetArray or J3DLoadArrayBasePtr under an Aurora build). Silently
+    // ignore the CP write so the DL can replay cleanly; log at debug for the
+    // curious. Callers who want strict rejection can rely on
+    // AURORA_ARRAYBASE_REJECT_RAW=1.
     else if (addr >= 0xA0 && addr <= 0xAF) {
-      Log.error("CP_REG_ARRAYBASE_ID (addr=0x{:02X}) is not supported on Aurora. "
-                "Use GX_AURORA_LOAD_ARRAYBASE instead. Attempted value=0x{:08X} "
-                "(attr={} -- 0=POS,1=NRM,2=CLR0,3=CLR1,4-11=TEX0-7).",
-                addr, value, addr - 0xA0);
+      static int s_reject = -1;
+      if (s_reject < 0) {
+        const char* env = std::getenv("AURORA_ARRAYBASE_REJECT_RAW");
+        s_reject = env && env[0] && env[0] != '0' ? 1 : 0;
+      }
+      if (s_reject) {
+        Log.error("CP_REG_ARRAYBASE_ID (addr=0x{:02X}, attr={}) rejected: raw 32-bit "
+                  "pointer 0x{:08X}. Emit GX_AURORA_LOAD_ARRAYBASE for the full 64-bit host pointer.",
+                  addr, addr - 0xA0, value);
+      } else {
+        Log.debug("CP_REG_ARRAYBASE_ID (addr=0x{:02X}, attr={}) ignored (raw=0x{:08X}); "
+                  "expect GX_AURORA_LOAD_ARRAYBASE for this attr.",
+                  addr, addr - 0xA0, value);
+      }
     }
     // Array strides (0xB0-0xBF)
     else if (addr >= 0xB0 && addr <= 0xBF) {
