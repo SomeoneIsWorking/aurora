@@ -81,6 +81,16 @@ static std::string alpha_bump_sel(size_t stageIdx, const ShaderConfig& config, c
 }
 
 static bool uses_texture_sample(const TevStage& stage) noexcept {
+  // A stage that references GX_CC_TEXC/A or GX_CA_TEXA but has no texture
+  // bound (texMapId == GX_TEXMAP_NULL) can't actually sample — treating it
+  // as if it does emits a `sampled{i} = textureSampleBias(tex255, ...)`
+  // reference into the shader, which then refers to a `tex255_size_bias`
+  // uniform that shader_info.cpp correctly declined to declare. Result:
+  // WGSL "struct member tex255_size_bias not found" at pipeline compile.
+  // Skip so downstream arg_reg emits vec3f(0.0) for the TEXC/A operands.
+  if (stage.texMapId == GX_TEXMAP_NULL) {
+    return false;
+  }
   const auto& c = stage.colorPass;
   const auto& a = stage.alphaPass;
   return c.a == GX_CC_TEXC || c.a == GX_CC_TEXA || c.b == GX_CC_TEXC || c.b == GX_CC_TEXA || c.c == GX_CC_TEXC ||
@@ -123,14 +133,21 @@ static std::string color_arg_reg(GXTevColorArg arg, size_t stageIdx, const Shade
   case GX_CC_A2:
     return "vec3f(tevreg2.a)";
   case GX_CC_TEXC: {
-    CHECK(stage.texMapId != GX_TEXMAP_NULL, "unmapped texture for stage {}", stageIdx);
+    // Paired with uses_texture_sample() guard: a stage referencing TEXC/A
+    // with no texMap bound emits no `sampled{}` var; return zero here so
+    // the WGSL identifier we would have produced doesn't dangle.
+    if (stage.texMapId == GX_TEXMAP_NULL) {
+      return "vec3f(0.0)";
+    }
     CHECK(stage.texMapId >= GX_TEXMAP0 && stage.texMapId <= GX_TEXMAP7, "invalid texture {} for stage {}",
           underlying(stage.texMapId), stageIdx);
     const auto& swap = config.tevSwapTable[stage.tevSwapTex];
     return fmt::format("sampled{}.{}{}{}", stageIdx, chan_comp(swap.red), chan_comp(swap.green), chan_comp(swap.blue));
   }
   case GX_CC_TEXA: {
-    CHECK(stage.texMapId != GX_TEXMAP_NULL, "unmapped texture for stage {}", stageIdx);
+    if (stage.texMapId == GX_TEXMAP_NULL) {
+      return "vec3f(0.0)";
+    }
     CHECK(stage.texMapId >= GX_TEXMAP0 && stage.texMapId <= GX_TEXMAP7, "invalid texture {} for stage {}",
           underlying(stage.texMapId), stageIdx);
     const auto& swap = config.tevSwapTable[stage.tevSwapTex];
@@ -251,7 +268,9 @@ static std::string alpha_arg_reg(GXTevAlphaArg arg, size_t stageIdx, const Shade
   case GX_CA_A2:
     return "tevreg2.a";
   case GX_CA_TEXA: {
-    CHECK(stage.texMapId != GX_TEXMAP_NULL, "unmapped texture for stage {}", stageIdx);
+    if (stage.texMapId == GX_TEXMAP_NULL) {
+      return "0.0";
+    }
     CHECK(stage.texMapId >= GX_TEXMAP0 && stage.texMapId <= GX_TEXMAP7, "invalid texture {} for stage {}",
           underlying(stage.texMapId), stageIdx);
     const auto& swap = config.tevSwapTable[stage.tevSwapTex];
@@ -1194,6 +1213,19 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, nbt_slice_local(NbtSlice::B));
     } else if (tcg.src == GX_TG_TANGENT) {
       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, nbt_slice_local(NbtSlice::T));
+    } else if (tcg.src == GX_MAX_TEXGENSRC) {
+      // Default-initialized tcg: shader_info marked texCoord[i] as sampled by
+      // a TEV stage, but tcg[i].src was never programmed. On real HW this is
+      // undefined-behavior land (garbage texcoord), typical because the game
+      // built a material referring to more texcoords than it actually
+      // configured. Emit a zero-vec so the shader compiles and the visible
+      // effect is a black sample rather than an abort, matching the "unbound
+      // texMap" tolerance already applied on the shader side.
+      Log.warn("tcg[{}] src not programmed (default GX_MAX_TEXGENSRC); "
+               "emitting vec4f(0). type={} mtx={} postMtx={}",
+               i, underlying(tcg.type), underlying(tcg.mtx),
+               underlying(tcg.postMtx));
+      vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f(0.0);", i);
     } else
       UNLIKELY FATAL("unhandled tcg src {}", underlying(tcg.src));
     if (tcg.type == GX_TG_MTX2x4 || tcg.type == GX_TG_MTX3x4) {

@@ -374,6 +374,14 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian);
 static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian);
 static void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
 
+// Ring buffer of recent draws — dumped alongside the opcode ring buffer at
+// unknown-opcode FATAL so a fifo desync's originating draw is visible without
+// enabling AURORA_DRAW_TRACE (which spams stderr fast enough to skew timing).
+struct RecentDraw { u32 pos; u8 cmd; u16 vtxCount; u32 vtxSize; };
+static constexpr size_t kRecentDrawN = 16;
+static thread_local RecentDraw s_recentDraws[kRecentDrawN];
+static thread_local size_t s_recentDrawHead = 0;
+
 void process(const u8* data, u32 size, bool bigEndian) {
   ZoneScoped;
   u32 pos = 0;
@@ -516,6 +524,21 @@ void process(const u8* data, u32 size, bool bigEndian) {
             trail += fmt::format(" [pos={} cmd=0x{:02X}]", r.pos, r.cmd);
           }
           Log.error("  recent opcodes (oldest first):{}", trail);
+        }
+        // Recent draws with their vtxCount/vtxSize — where fifo desyncs really
+        // originate (a bad vtxSize means the vertex payload was under- or
+        // over-consumed, leaving the next byte on a payload boundary).
+        {
+          std::string trail;
+          for (size_t i = 0; i < kRecentDrawN; ++i) {
+            const auto& r = s_recentDraws[(s_recentDrawHead + i) % kRecentDrawN];
+            if (r.pos == 0 && r.cmd == 0 && i == 0) continue;
+            trail += fmt::format(
+                " [pos={} cmd=0x{:02X} vtxCount={} vtxSize={} end={}]",
+                r.pos, r.cmd, r.vtxCount, r.vtxSize,
+                r.pos + 3 + r.vtxCount * r.vtxSize);
+          }
+          Log.error("  recent draws (oldest first):{}", trail);
         }
         FATAL("command_processor: unknown opcode 0x{:02X} at pos {} (total fifo size {})",
               cmd, pos - 1, size);
@@ -1677,10 +1700,29 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
 static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian) {
   GXVtxFmt fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
   GXPrimitive prim = static_cast<GXPrimitive>(cmd & CP_OPCODE_MASK);
+  const u32 cmdPos = pos - 1;
 
   CHECK(pos + 2 <= size, "draw vtxCount read overrun");
   u16 vtxCount = read_u16(data + pos, bigEndian);
   pos += 2;
+
+  u32 vtxSize;
+  if (g_gxState.lastVtxFmt == fmt) vtxSize = g_gxState.lastVtxSize;
+  else vtxSize = calculate_last_vtx_size(fmt);
+
+  s_recentDraws[s_recentDrawHead] = {cmdPos, cmd, vtxCount, vtxSize};
+  s_recentDrawHead = (s_recentDrawHead + 1) % kRecentDrawN;
+
+  static thread_local int s_traceEnabled = -1;
+  if (s_traceEnabled < 0) {
+    const char* env = std::getenv("AURORA_DRAW_TRACE");
+    s_traceEnabled = env && env[0] && env[0] != '0' ? 1 : 0;
+  }
+  if (s_traceEnabled) {
+    Log.warn("[draw trace] pos={} cmd=0x{:02X} prim=0x{:02X} fmt={} vtxCount={} vtxSize={} totalBytes={} nextPos={}",
+             cmdPos, cmd, static_cast<u32>(prim), static_cast<u32>(fmt),
+             vtxCount, vtxSize, vtxCount * vtxSize, pos + vtxCount * vtxSize);
+  }
 
   draw_prim(prim, fmt, vtxCount, data, pos, size);
 }
