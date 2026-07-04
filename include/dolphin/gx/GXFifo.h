@@ -7,6 +7,15 @@
 extern "C" {
 #endif
 
+// GC SDK — hardware FIFO breakpoint: pause CP when it reads `addr`, resume via
+// GXDisableBreakPt. Decomp's TDrawSyncManager uses this to gate draw-sync
+// tokens on the GPU.
+void GXEnableBreakPt(void* addr);
+void GXDisableBreakPt(void);
+// GC SDK — CPU-side barrier: block until GPU has processed all pending draw
+// commands. Callers use this on the CPU thread that owns the FIFO.
+void GXWaitDrawDone(void);
+
 typedef struct {
   u8 pad[128];
 } GXFifoObj;
