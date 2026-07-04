@@ -33,6 +33,10 @@ extern "C" {
 
   typedef f32 (*Mtx44Ptr)[4];
 
+  typedef f32 Mtx33[3][3];
+
+  typedef f32 (*Mtx33Ptr)[3];
+
 #ifdef __cplusplus
 }
 #endif

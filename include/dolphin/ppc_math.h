@@ -133,4 +133,8 @@ static inline float ppc_rsqrte(float x) {
     return nwork0 * nwork1;
 }
 
+// __frsqrte — MWERKS/CodeWarrior name for the Gekko PPC intrinsic; game decomp
+// source (SMS, SPM, etc.) uses this spelling directly. Forwarding alias.
+static inline double __frsqrte(double val) { return frsqrte(val); }
+
 #endif // DOLPHIN_PPC_MATH_H

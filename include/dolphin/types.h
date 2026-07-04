@@ -1,6 +1,13 @@
 #ifndef DOLPHIN_TYPES_H
 #define DOLPHIN_TYPES_H
 
+// PPC/Gekko intrinsic aliases (__frsqrte, etc.) — MWERKS made these builtins,
+// GCC needs them as inline forwards. Decomp source expects them ambient
+// wherever <dolphin/types.h> is seen, so pull them in here.
+#ifdef __cplusplus
+#include "ppc_math.h"
+#endif
+
 #if _WIN64 || __LP64__
 #define BIT_64 1
 #else
