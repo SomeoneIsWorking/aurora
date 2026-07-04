@@ -213,6 +213,11 @@ void OSSetSoundMode(u32 mode);
 DECL_WEAK void OSReport(const char* msg, ...);
 DECL_WEAK void OSVReport(const char* msg, va_list list);
 DECL_WEAK void OSPanic NORETURN(const char* file, int line, const char* msg, ...);
+
+// GC SDK-original convenience: print an error message including the caller's
+// file and the passed line number, then continue. Decomp source uses this
+// for non-fatal path failures (JKR archive close, etc.).
+#define OSErrorLine(line, ...) OSPanic(__FILE__, (line), __VA_ARGS__)
 void OSFatal NORETURN(GXColor fg, GXColor bg, const char* msg);
 
 #define OSRoundUp32B(x)   (((uintptr_t)(x) + 32 - 1) & ~(32 - 1))

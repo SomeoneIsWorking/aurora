@@ -23,7 +23,12 @@ GXTexWrapMode GXGetTexObjWrapT(GXTexObj* tex_obj);
 void* GXGetTexObjData(GXTexObj* tex_obj);
 void GXGetProjectionv(f32* p);
 void GXGetLightPos(GXLightObj* lt_obj, f32* x, f32* y, f32* z);
-void GXGetLightColor(GXLightObj* lt_obj, GXColor* color);
+void GXGetLightColor(const GXLightObj* lt_obj, GXColor* color);
+// Fetch a GXTexObj's full state — data ptr, dimensions, format, wrap modes,
+// mipmap flag — in one call. Decomp uses this to re-emit a texture.
+void GXGetTexObjAll(const GXTexObj* obj, void** image_ptr, u16* width, u16* height,
+                    GXTexFmt* format, GXTexWrapMode* wrap_s, GXTexWrapMode* wrap_t,
+                    GXBool* mipmap);
 void GXGetVtxAttrFmt(GXVtxFmt idx, GXAttr attr, GXCompCnt* compCnt, GXCompType* compType, u8* shift);
 u32 GXGetTexObjTlut(const GXTexObj* tex_obj);
 
