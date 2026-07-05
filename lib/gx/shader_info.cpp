@@ -55,8 +55,21 @@ void color_arg_reg_info(GXTevColorArg arg, const TevStage& stage, ShaderInfo& in
     break;
   case GX_CC_TEXC:
   case GX_CC_TEXA:
-    ASSERT(stage.texCoordId != GX_TEXCOORD_NULL, "tex coord not bound (color arg)");
-    ASSERT(stage.texMapId != GX_TEXMAP_NULL, "tex map not bound (color arg)");
+    // A stage may reference GX_CC_TEXC/A while its texMap is GX_TEXMAP_NULL:
+    // GXSetTevOrder explicitly encodes tmid==GX_TEXMAP_NULL as "sampling
+    // disabled" via the SU_TREF enable bit (see GXTev.cpp:158) and remaps the
+    // tmap field to TEXMAP0. On real HW the sample returns 0 for that stage.
+    // The downstream color/alpha arg_reg emits vec3f(0)/0.0 to match, and we
+    // must NOT set the sampledTextures/sampledTexCoords bit for the sentinel
+    // (255) -- bitset<8>::set(255) throws std::out_of_range unconditionally.
+    if (stage.texMapId == GX_TEXMAP_NULL) {
+      break;
+    }
+    ASSERT(stage.texCoordId != GX_TEXCOORD_NULL,
+           "tex coord not bound (color arg {}); texMapId={} channelId={} colorPass=({},{},{},{})",
+           static_cast<u32>(arg), underlying(stage.texMapId), underlying(stage.channelId),
+           underlying(stage.colorPass.a), underlying(stage.colorPass.b),
+           underlying(stage.colorPass.c), underlying(stage.colorPass.d));
     info.sampledTexCoords.set(stage.texCoordId);
     info.sampledTextures.set(stage.texMapId);
     break;
@@ -129,8 +142,13 @@ void alpha_arg_reg_info(GXTevAlphaArg arg, const TevStage& stage, ShaderInfo& in
     }
     break;
   case GX_CA_TEXA:
+    // Same GC HW pattern as color_arg_reg_info's TEXC/TEXA case: NULL texMap
+    // is HW-disabled sampling that returns 0. Skip bitset .set() for the
+    // sentinel to avoid the bitset<8>::set(255) out_of_range throw.
+    if (stage.texMapId == GX_TEXMAP_NULL) {
+      break;
+    }
     ASSERT(stage.texCoordId != GX_TEXCOORD_NULL, "tex coord not bound (alpha arg)");
-    ASSERT(stage.texMapId != GX_TEXMAP_NULL, "tex map not bound (alpha arg)");
     info.sampledTexCoords.set(stage.texCoordId);
     info.sampledTextures.set(stage.texMapId);
     break;
