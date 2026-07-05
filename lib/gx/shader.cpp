@@ -1578,7 +1578,10 @@ fn bswap32(v: u32, le: bool) -> u32 {{
 }}
 
 fn bswap16(v: u32, le: bool) -> u32 {{
-  return select(((v & 0xFFu) << 8u) | (v >> 8u), v, le);
+  if (le) {{
+    return v;
+  }}
+  return ((v & 0xFFu) << 8u) | (v >> 8u);
 }}
 
 fn load_word(p: ptr<storage, array<u32>>, word_idx: u32) -> u32 {{
