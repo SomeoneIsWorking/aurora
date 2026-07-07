@@ -386,6 +386,20 @@ static void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
 struct RecentDraw { u32 pos; u8 cmd; u16 vtxCount; u32 vtxSize; };
 static constexpr size_t kRecentDrawN = 16;
 static thread_local RecentDraw s_recentDraws[kRecentDrawN];
+struct RecentCmd { u32 pos; u8 cmd; };
+static constexpr size_t kRecentN = 32;
+static thread_local RecentCmd s_recent[kRecentN];
+static thread_local size_t s_recentHead = 0;
+// Dump the recent-command ring to stderr (diagnostics outside the drain fn).
+static void sb_dump_recent_cmds(const char* why) {
+  std::string trail;
+  for (size_t i = 0; i < kRecentN; ++i) {
+    const auto& r = s_recent[(s_recentHead + i) % kRecentN];
+    trail += fmt::format(" {}:{:02x}", r.pos, r.cmd);
+  }
+  std::fprintf(stderr, "[recent-cmds] (%s, oldest first pos:cmd)%s\n", why, trail.c_str());
+}
+
 static thread_local size_t s_recentDrawHead = 0;
 
 void process(const u8* data, u32 size, bool bigEndian) {
@@ -396,15 +410,22 @@ void process(const u8* data, u32 size, bool bigEndian) {
   // so the caller can see what commands preceded the garbage. AURORA_FIFO_TRACE=1
   // dumps every opcode as it's processed (very noisy; use only when the
   // ring-buffer window is too narrow).
-  struct RecentCmd { u32 pos; u8 cmd; };
-  constexpr size_t kRecentN = 32;
-  static thread_local RecentCmd s_recent[kRecentN];
-  static thread_local size_t s_recentHead = 0;
   static thread_local int s_traceEnabled = -1;
   if (s_traceEnabled < 0) {
     const char* env = std::getenv("AURORA_FIFO_TRACE");
     s_traceEnabled = env && env[0] && env[0] != '0' ? 1 : 0;
   }
+
+  // SB_FIFO_TRACE_MARK=<substr>: per-opcode trace of the drain, but only while
+  // the last debug marker (draw identity) matches — small enough to read for a
+  // single J3D buffer's draw window, unlike the global AURORA_FIFO_TRACE.
+  static thread_local const char* s_traceMark = nullptr;
+  static thread_local int s_traceMarkInit = 0;
+  if (!s_traceMarkInit) {
+    s_traceMarkInit = 1;
+    s_traceMark = std::getenv("SB_FIFO_TRACE_MARK");
+  }
+  static thread_local long s_traceMarkBudget = 4000;
 
   while (pos < size) {
     u32 cmdPos = pos;
@@ -415,6 +436,22 @@ void process(const u8* data, u32 size, bool bigEndian) {
     s_recentHead = (s_recentHead + 1) % kRecentN;
     if (s_traceEnabled) {
       Log.warn("[fifo trace] pos={} cmd=0x{:02X} opcode=0x{:02X}", cmdPos, cmd, opcode);
+    }
+    if (s_traceMark != nullptr && s_traceMarkBudget > 0 &&
+        g_sbLastMarker.find(s_traceMark) != std::string::npos) {
+      --s_traceMarkBudget;
+      if (opcode >= 0x80 && opcode < 0xC0) {
+        const u16 vc = pos + 2 <= size ? read_u16(data + pos, bigEndian) : 0;
+        std::fprintf(stderr, "[fifo-mark] pos=%u cmd=%02x DRAW verts=%u vtxSize=%u fmt=%u\n", cmdPos, cmd, vc,
+                     g_gxState.lastVtxFmt == (cmd & CP_VAT_MASK) ? g_gxState.lastVtxSize : 0u,
+                     cmd & CP_VAT_MASK);
+      } else {
+        std::fprintf(stderr, "[fifo-mark] pos=%u cmd=%02x next=[%02x %02x %02x %02x %02x %02x %02x %02x]\n", cmdPos,
+                     cmd, pos + 0 < size ? data[pos + 0] : 0, pos + 1 < size ? data[pos + 1] : 0,
+                     pos + 2 < size ? data[pos + 2] : 0, pos + 3 < size ? data[pos + 3] : 0,
+                     pos + 4 < size ? data[pos + 4] : 0, pos + 5 < size ? data[pos + 5] : 0,
+                     pos + 6 < size ? data[pos + 6] : 0, pos + 7 < size ? data[pos + 7] : 0);
+      }
     }
 
     switch (opcode) {
@@ -514,9 +551,10 @@ void process(const u8* data, u32 size, bool bigEndian) {
       if (cmd >= 0x80 && cmd < 0xC0) {
         handle_draw(cmd, data, pos, size, bigEndian);
       } else {
+        Log.error("  last draw-identity marker: '{}'", g_sbLastMarker);
         // Hex dump surrounding bytes for debugging
         {
-          u32 dumpStart = (pos > 33) ? pos - 33 : 0;
+          u32 dumpStart = (pos > 161) ? pos - 161 : 0;
           u32 dumpEnd = (pos + 32 < size) ? pos + 32 : size;
           std::string hex;
           for (u32 i = dumpStart; i < dumpEnd; i++) {
@@ -564,8 +602,14 @@ void process(const u8* data, u32 size, bool bigEndian) {
 inline static u32 bp_get(u32 reg, u32 size, u32 shift) { return reg >> shift & (1u << size) - 1; }
 
 // BP register handler - decodes BP (RAS/pixel engine) register writes and updates g_gxState
+static constexpr size_t kRecentBpN = 12;
+static thread_local u32 s_recentBp[kRecentBpN];
+static thread_local size_t s_recentBpHead = 0;
+
 static void handle_bp(u32 value, bool bigEndian) {
   u32 regId = (value >> 24) & 0xFF;
+  s_recentBp[s_recentBpHead] = value;
+  s_recentBpHead = (s_recentBpHead + 1) % kRecentBpN;
   // Mask off the register ID from the value for field extraction
   // (the regId is stored in bits 24-31, data is in bits 0-23)
 
@@ -1152,6 +1196,10 @@ static void handle_bp(u32 value, bool bigEndian) {
     u8 a = bp_get(value, 8, 8);
     g_gxState.clearColor[0] = static_cast<float>(r) / 255.f;
     g_gxState.clearColor[3] = static_cast<float>(a) / 255.f;
+    if (std::getenv("SB_COPY_DBG") != nullptr) {
+      static long n = 0;
+      std::fprintf(stderr, "[bp-clear] n=%ld reg=4F r=%u a=%u mark='%s'\n", ++n, r, a, g_sbLastMarker.c_str());
+    }
     g_gxState.stateDirty = true;
     break;
   }
@@ -1160,6 +1208,18 @@ static void handle_bp(u32 value, bool bigEndian) {
     u8 g = bp_get(value, 8, 8);
     g_gxState.clearColor[2] = static_cast<float>(b) / 255.f;
     g_gxState.clearColor[1] = static_cast<float>(g) / 255.f;
+    if (std::getenv("SB_COPY_DBG") != nullptr) {
+      static long n = 0;
+      std::fprintf(stderr, "[bp-clear] n=%ld reg=50 b=%u g=%u val=%08x mark='%s'\n", ++n, b, g, value,
+                   g_sbLastMarker.c_str());
+      if (n <= 6) {
+        sb_dump_recent_cmds("bp-0x50");
+        std::string bps;
+        for (size_t i = 0; i < kRecentBpN; ++i)
+          bps += fmt::format(" {:08x}", s_recentBp[(s_recentBpHead + i) % kRecentBpN]);
+        std::fprintf(stderr, "[recent-bp] (oldest first)%s\n", bps.c_str());
+      }
+    }
     g_gxState.stateDirty = true;
     break;
   }
@@ -1702,6 +1762,103 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     }
   }
 
+  // SB_NDC_PROBE=<minVerts> [+ SB_NDC_MARK=<marker substring>]: CPU-side
+  // replication of the vertex shader transform for indexed-position draws —
+  // projects EVERY vertex through the exact matrices the GPU will use
+  // (per-vertex PNMTXIDX honored, same row-dot convention as the WGSL) and
+  // histograms the clip results. Distinguishes "strip lands off-screen due to
+  // a transform bug" from "strip genuinely tiny / genuinely missing".
+  {
+    static int s_minVerts = -2;
+    static const char* s_markFilter = nullptr;
+    if (s_minVerts == -2) {
+      const char* e = std::getenv("SB_NDC_PROBE");
+      s_minVerts = (e != nullptr && e[0] != '\0') ? std::atoi(e) : -1;
+      if (s_minVerts == 0) s_minVerts = 1;
+      s_markFilter = std::getenv("SB_NDC_MARK");
+    }
+    static int s_printed = 0;
+    const auto posDesc = g_gxState.vtxDesc[GX_VA_POS];
+    const auto& posFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
+    const auto& arr = g_gxState.arrays[GX_VA_POS];
+    if (s_minVerts > 0 && s_printed < 400 && vtxCount >= static_cast<u16>(s_minVerts) &&
+        (posDesc == GX_INDEX16 || posDesc == GX_INDEX8) &&
+        (posFmt.type == GX_F32 || posFmt.type == GX_S16) && arr.data != nullptr &&
+        (s_markFilter == nullptr || g_sbLastMarker.find(s_markFilter) != std::string::npos)) {
+      ++s_printed;
+      // Per-vertex offsets: attrs before POS are u8 matrix indices when DIRECT.
+      u32 posOff = 0;
+      int pnOff = -1;
+      for (int a = GX_VA_PNMTXIDX; a < GX_VA_POS; ++a) {
+        if (g_gxState.vtxDesc[a] == GX_DIRECT) {
+          if (a == GX_VA_PNMTXIDX) pnOff = static_cast<int>(posOff);
+          posOff += 1;
+        }
+      }
+      const float invFrac = 1.f / static_cast<float>(1u << posFmt.frac);
+      const bool le = arr.le;
+      const float* P = reinterpret_cast<const float*>(&g_gxState.proj);
+      u32 in = 0, zin = 0, wneg = 0;
+      float xmin = 1e30f, xmax = -1e30f, ymin = 1e30f, ymax = -1e30f, zmin = 1e30f, zmax = -1e30f;
+      u32 firstMtx = g_gxState.currentPnMtx;
+      for (u32 v = 0; v < vtxCount; ++v) {
+        const u8* vp = data + pos + v * vtxSize;
+        u32 mtxIdx = g_gxState.currentPnMtx;
+        if (pnOff >= 0) mtxIdx = vp[pnOff] / 3u;
+        if (v == 0) firstMtx = mtxIdx;
+        u32 idx = posDesc == GX_INDEX16 ? read_u16(vp + posOff, true) : vp[posOff];
+        const u8* pd = static_cast<const u8*>(arr.data) + idx * arr.stride;
+        float x, y, z;
+        if (posFmt.type == GX_F32) {
+          auto rf = [le](const u8* p) {
+            u32 u;
+            std::memcpy(&u, p, 4);
+            if (!le) u = __builtin_bswap32(u);
+            float f;
+            std::memcpy(&f, &u, 4);
+            return f;
+          };
+          x = rf(pd); y = rf(pd + 4); z = posFmt.cnt == GX_POS_XYZ ? rf(pd + 8) : 0.f;
+        } else {
+          auto rs = [le](const u8* p) {
+            u16 u;
+            std::memcpy(&u, p, 2);
+            if (!le) u = static_cast<u16>((u << 8) | (u >> 8));
+            return static_cast<float>(static_cast<s16>(u));
+          };
+          x = rs(pd) * invFrac; y = rs(pd + 2) * invFrac;
+          z = posFmt.cnt == GX_POS_XYZ ? rs(pd + 4) * invFrac : 0.f;
+        }
+        const float* M = reinterpret_cast<const float*>(&g_gxState.pnMtx[mtxIdx % MaxPnMtx].pos);
+        float mv[3];
+        for (int c = 0; c < 3; ++c) mv[c] = M[4 * c] * x + M[4 * c + 1] * y + M[4 * c + 2] * z + M[4 * c + 3];
+        float clip[4];
+        for (int c = 0; c < 4; ++c)
+          clip[c] = P[4 * c] * mv[0] + P[4 * c + 1] * mv[1] + P[4 * c + 2] * mv[2] + P[4 * c + 3];
+        if (clip[3] <= 0.f) {
+          ++wneg;
+          continue;
+        }
+        const float nx = clip[0] / clip[3], ny = clip[1] / clip[3], nz = clip[2] / clip[3];
+        xmin = std::min(xmin, nx); xmax = std::max(xmax, nx);
+        ymin = std::min(ymin, ny); ymax = std::max(ymax, ny);
+        zmin = std::min(zmin, nz); zmax = std::max(zmax, nz);
+        // GC clip z convention: visible depth is z/w in [-1, 0]. Aurora runs
+        // with unclippedDepth, so XY containment alone decides rasterization.
+        if (nx >= -1.f && nx <= 1.f && ny >= -1.f && ny <= 1.f) ++in;
+        if (nz >= -1.f && nz <= 0.f) ++zin;
+        if (s_printed <= 6 && v < 4)
+          std::fprintf(stderr, "[ndc-probe]   v%u idx=%u pos=(%.1f,%.1f,%.1f) mv=(%.1f,%.1f,%.1f) ndc=(%.3f,%.3f,%.4f) w=%.1f mtx=%u\n",
+                       v, idx, x, y, z, mv[0], mv[1], mv[2], nx, ny, nz, clip[3]);
+      }
+      std::fprintf(stderr,
+                   "[ndc-probe] #%d verts=%u inXY=%u inZ=%u wneg=%u proj=%c ndcX=[%.2f..%.2f] ndcY=[%.2f..%.2f] "
+                   "ndcZ=[%.4f..%.4f] mtx0=%u mark='%s'\n",
+                   s_printed, vtxCount, in, zin, wneg, g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', xmin, xmax,
+                   ymin, ymax, zmin, zmax, firstMtx, g_sbLastMarker.c_str());
+    }
+  }
+
   auto* lastDraw = !g_gxState.stateDirty ? gfx::get_last_draw_command<DrawData>() : nullptr;
   const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
                         lastDraw->instanceCount == 1;
@@ -2165,3 +2322,78 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
 }
 
 } // namespace aurora::gx::fifo
+
+// Structural display-list scanner for build-time validation (SB_DL_VALIDATE):
+// walks the same opcode grammar as the drain WITHOUT executing anything and
+// returns the offset of the first invalid byte, or 0xFFFFFFFF if the stream
+// is well-formed. allowDraws=0 is for J3D MATERIAL DLs, which must never
+// contain geometry; a draw opcode there means the buffer is corrupt/stale.
+// Draw opcodes can't be validated structurally anyway (their payload size
+// depends on live VCD/VAT state), so allowDraws=1 stops the scan (returns
+// clean) at the first draw instead.
+extern "C" uint32_t aurora_gx_scan_dl(const uint8_t* data, uint32_t size, uint32_t allowDraws) {
+  using namespace aurora::gx::fifo;
+  u32 pos = 0;
+  auto rd16 = [&](u32 p) { return static_cast<u32>(data[p]) << 8 | data[p + 1]; };
+  while (pos < size) {
+    const u8 cmd = data[pos];
+    const u8 opcode = cmd & 0xF8; // CP_OPCODE_MASK
+    if (cmd == 0x00) { // NOP
+      pos += 1;
+      continue;
+    }
+    if (cmd == 0x08) { // CP reg: opcode + addr + u32
+      if (pos + 6 > size) return pos;
+      pos += 6;
+      continue;
+    }
+    if (cmd == 0x10) { // XF: opcode + u32 header + count*4
+      if (pos + 5 > size) return pos;
+      const u32 count = (rd16(pos + 1) & 0xFFFF) + 1;
+      if (pos + 5 + count * 4 > size) return pos;
+      pos += 5 + count * 4;
+      continue;
+    }
+    if (cmd == 0x61) { // BP: opcode + u32
+      if (pos + 5 > size) return pos;
+      pos += 5;
+      continue;
+    }
+    if (opcode == 0x20 || opcode == 0x28 || opcode == 0x30 || opcode == 0x38) { // indexed XF
+      if (pos + 5 > size) return pos;
+      pos += 5;
+      continue;
+    }
+    if (cmd == 0x40) { // CALL_DL
+      if (pos + 9 > size) return pos;
+      pos += 9;
+      continue;
+    }
+    if (cmd == 0x48) { // INVAL_VTX
+      pos += 1;
+      continue;
+    }
+    if (cmd == 0x50) { // GX_AURORA extension
+      if (pos + 3 > size) return pos;
+      const u32 sub = rd16(pos + 1);
+      u32 payload;
+      if (sub == 0x0001) payload = 24;                       // LOAD_VIEWPORT_RENDER
+      else if (sub == 0x0002) payload = 16;                  // LOAD_SCISSOR_RENDER
+      else if (sub >= 0x0010 && sub <= 0x001F) payload = 13; // LOAD_ARRAYBASE
+      else if (sub == 0x0020 || sub == 0x0022) {             // debug group push / marker
+        if (pos + 5 > size) return pos;
+        payload = 2 + rd16(pos + 3);
+      } else if (sub == 0x0021) payload = 0;                 // debug group pop
+      else if (sub == 0x0030) payload = 34;                  // LOAD_TEXOBJ
+      else return pos;                                       // DRAW_SIZED/INDEXED etc: not in material DLs
+      if (pos + 3 + payload > size) return pos;
+      pos += 3 + payload;
+      continue;
+    }
+    if (opcode >= 0x80 && opcode < 0xC0) { // draw
+      return allowDraws != 0 ? 0xFFFFFFFFu : pos;
+    }
+    return pos;
+  }
+  return 0xFFFFFFFFu;
+}

@@ -1229,6 +1229,27 @@ bool begin_frame() {
   set_efb_targets(pass);
   pass.clearColorValue = gx::g_gxState.clearColor;
   pass.clearDepthValue = gx::clear_depth_value();
+  // SB_CLEAR_OVERRIDE=RRGGBB (hex, diagnostic): force the frame-start clear
+  // to a known color — separates "what value is cleared" from "how the clear
+  // reaches the screen" when chasing channel-order/stale-color defects.
+  {
+    static int s_ovr = -2;
+    static Vec4<float> s_ovrColor{};
+    if (s_ovr == -2) {
+      const char* e = std::getenv("SB_CLEAR_OVERRIDE");
+      if (e != nullptr && e[0] != '\0') {
+        const uint32_t v = static_cast<uint32_t>(std::strtoul(e, nullptr, 16));
+        s_ovrColor = {static_cast<float>((v >> 16) & 0xff) / 255.f, static_cast<float>((v >> 8) & 0xff) / 255.f,
+                      static_cast<float>(v & 0xff) / 255.f, 1.f};
+        s_ovr = 1;
+      } else {
+        s_ovr = 0;
+      }
+    }
+    if (s_ovr == 1) {
+      pass.clearColorValue = s_ovrColor;
+    }
+  }
   // DEFERRED COPY-CLEAR MODEL (acknowledged middle ground, 2026-07-07):
   // On GC the EFB persists across frames and is erased only by an explicit
   // copy-clear (GXCopyTex/GXCopyDisp clear=true); SMS then repaints the

@@ -556,7 +556,23 @@ static inline std::string vtx_attr(const ShaderConfig& config, GXAttr attr) {
     if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) {
       return "vec4f(0.0, 0.0, 0.0, 0.0)"s;
     }
-    UNLIKELY FATAL("unmapped vtx attr {}", underlying(attr));
+    if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) {
+      // A texgen sources a UV set the draw's VCD doesn't supply. GC XF reads
+      // a default input row in that case; Dolphin substitutes zeros — same.
+      return "vec2f(0.0, 0.0)"s;
+    }
+    UNLIKELY {
+      // Context dump before dying: which texgens are configured and which
+      // vertex attributes the draw's VCD actually supplies.
+      for (int i = 0; i < MaxTexCoord; ++i)
+        Log.error("  tcg[{}]: type={} src={} mtx={}", i, underlying(config.tcgs[i].type),
+                  underlying(config.tcgs[i].src), underlying(config.tcgs[i].mtx));
+      for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i)
+        Log.error("  attr[{}]: attrType={} cnt={} type={} frac={}", i,
+                  static_cast<int>(config.attrs[i].attrType), static_cast<int>(config.attrs[i].cnt),
+                  static_cast<int>(config.attrs[i].compType), static_cast<int>(config.attrs[i].frac));
+      FATAL("unmapped vtx attr {}", underlying(attr));
+    }
   }
   if (attr == GX_VA_POS) {
     return "in_pos"s;

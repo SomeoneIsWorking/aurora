@@ -200,6 +200,14 @@ void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
 u32 GXSetDispCopyYScale(f32 vscale) { return 0; }
 
 void GXSetCopyClear(GXColor color, u32 depth) {
+  // SB_COPY_DBG=1: log every copy-clear color change — the deferred-clear
+  // model clears next-frame-start with the LAST color set, which is wrong if
+  // the game sets different colors for different copies within a frame.
+  if (std::getenv("SB_COPY_DBG") != nullptr) {
+    static long n = 0;
+    std::fprintf(stderr, "[copy-clear-set] n=%ld rgba=(%u,%u,%u,%u) z=%06x\n", ++n, color.r, color.g, color.b,
+                 color.a, depth);
+  }
   // BP 0x4F: clear color R + A
   u32 reg0 = 0;
   SET_REG_FIELD(0, reg0, 8, 0, color.r);
