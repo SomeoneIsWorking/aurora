@@ -643,6 +643,17 @@ static inline wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
   case GX_CULL_NONE:
     break;
   }
+  // SB_NO_CULL=1 (diagnostic): disable face culling on every pipeline —
+  // isolates per-material cull-orientation bugs (a culled-away sky dome is
+  // viewed from INSIDE; convex models look right under either orientation).
+  static int s_noCull = -1;
+  if (s_noCull < 0) {
+    const char* e = std::getenv("SB_NO_CULL");
+    s_noCull = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  if (s_noCull == 1) {
+    cullMode = wgpu::CullMode::None;
+  }
   return {
       .topology = wgpu::PrimitiveTopology::TriangleList,
       .stripIndexFormat = wgpu::IndexFormat::Undefined,

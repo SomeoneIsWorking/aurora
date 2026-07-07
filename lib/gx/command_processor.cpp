@@ -22,6 +22,10 @@
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
 
+// Last debug marker seen in the stream — names the draw-buffer/pass each
+// subsequent draw belongs to (printed by SB_DRAW_DUMP).
+static thread_local std::string g_sbLastMarker;
+
 static u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) {
   u16 numIndices = 0;
   if (prim == GX_QUADS) {
@@ -1519,6 +1523,11 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           f32 p5 = read_f32(xfData + 20, bigEndian);
           u32 projType = read_u32(xfData + 24, bigEndian);
           g_gxState.projType = static_cast<GXProjectionType>(projType);
+          if (std::getenv("SB_DRAW_DUMP") != nullptr) {
+            std::fprintf(stderr, "[proj-set] type=%c p=(%.4f %.4f %.4f %.4f %.4f %.4f) mark='%s'\n",
+                         projType == GX_ORTHOGRAPHIC ? 'O' : 'P', p0, p1, p2, p3, p4, p5,
+                         g_sbLastMarker.c_str());
+          }
           // Reconstruct 4x4 projection matrix from 6 params
           auto& proj = g_gxState.proj;
           proj = {};
@@ -1659,6 +1668,40 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   if (pos + totalVtxBytes > size)
     UNLIKELY { handle_draw_overrun(totalVtxBytes, data, pos, size); }
 
+  // SB_POS_PROBE=1: for INDEX16 + F32 position draws, decode the first
+  // vertex's position index and fetch the XYZ it references — shows whether
+  // the GPU-visible position data is sane or garbage.
+  {
+    static int s_probe = -1;
+    if (s_probe < 0) {
+      const char* e = std::getenv("SB_POS_PROBE");
+      s_probe = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    }
+    if (s_probe == 1) {
+      const auto& posFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
+      if (g_gxState.vtxDesc[GX_VA_POS] == GX_INDEX16 && posFmt.type == GX_F32 && vtxCount > 0) {
+        static int n = 0;
+        if (n < 40) {
+          ++n;
+          // Offset of the POS index within a vertex: sum of preceding attr sizes
+          // (matrix-index attrs are u8 DIRECT).
+          u32 off = 0;
+          for (int a = GX_VA_PNMTXIDX; a < GX_VA_POS; ++a)
+            if (g_gxState.vtxDesc[a] == GX_DIRECT) off += 1;
+          const u16 idx = read_u16(data + pos + off, true);
+          const auto& arr = g_gxState.arrays[GX_VA_POS];
+          const float* p = arr.data != nullptr
+                               ? reinterpret_cast<const float*>(static_cast<const u8*>(arr.data) + idx * arr.stride)
+                               : nullptr;
+          std::fprintf(stderr,
+                       "[pos-probe] n=%d verts=%u idx=%u stride=%u arr=%p le=%d xyz=(%g, %g, %g)\n", n,
+                       vtxCount, idx, arr.stride, arr.data, static_cast<int>(arr.le),
+                       p ? p[0] : 0.f, p ? p[1] : 0.f, p ? p[2] : 0.f);
+        }
+      }
+    }
+  }
+
   auto* lastDraw = !g_gxState.stateDirty ? gfx::get_last_draw_command<DrawData>() : nullptr;
   const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
                         lastDraw->instanceCount == 1;
@@ -1778,11 +1821,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       const auto& sc = g_gxState.logicalScissor;
       const auto& cc = g_gxState.colorChannelConfig[0];
       const auto& cs = g_gxState.colorChannelState[0];
+      const auto& posFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
+      const auto posDesc = g_gxState.vtxDesc[GX_VA_POS];
       std::fprintf(stderr,
                    "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
                    "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
                    "tev=%u ch0[light=%d matSrc=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
-                   "prj=[%.4f %.4f %.4f %.4f]\n",
+                   "prj=[%.4f %.4f %.4f %.4f] pos[desc=%d cnt=%d type=%d frac=%u] mark='%s'\n",
                    s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(),
                    static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
                    pn[3], pn[7], pn[11], g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
@@ -1794,7 +1839,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                    reinterpret_cast<const float*>(&g_gxState.proj)[0],
                    reinterpret_cast<const float*>(&g_gxState.proj)[5],
                    reinterpret_cast<const float*>(&g_gxState.proj)[10],
-                   reinterpret_cast<const float*>(&g_gxState.proj)[11]);
+                   reinterpret_cast<const float*>(&g_gxState.proj)[11], static_cast<int>(posDesc),
+                   static_cast<int>(posFmt.cnt), static_cast<int>(posFmt.type), posFmt.frac,
+                   g_sbLastMarker.c_str());
     }
     ++s_dumped;
   }
@@ -2091,6 +2138,7 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     pop_debug_group();
   } else if (subCmd == GX_AURORA_DEBUG_MARKER_INSERT) {
     auto label = read_string(data, pos, size, bigEndian);
+    g_sbLastMarker = label; // draw-identity for SB_DRAW_DUMP
     gfx::insert_debug_marker(std::move(label));
   }
 

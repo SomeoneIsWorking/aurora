@@ -1,4 +1,8 @@
 #include "gx.hpp"
+
+#include <cstdio>
+#include <cstdlib>
+#include <execinfo.h>
 #include "__gx.h"
 #include "dolphin/mtx/GeoTypes.h"
 
@@ -12,6 +16,23 @@ static inline void CacheProjectionVector(const f32* ptr, GXProjectionType type) 
 extern "C" {
 
 void GXSetProjection(const void* mtx_, GXProjectionType type) {
+  // SB_PROJ_BT=1: sequence-numbered caller backtrace per projection set.
+  // Fifo order is FIFO, so call #N here == the Nth [proj-set] at drain.
+  {
+    static int dbg = -1;
+    if (dbg < 0) {
+      const char* e = std::getenv("SB_PROJ_BT");
+      dbg = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    }
+    if (dbg == 1) {
+      static long n = 0;
+      ++n;
+      std::fprintf(stderr, "[proj-call] n=%ld type=%c\n", n, type == GX_ORTHOGRAPHIC ? 'O' : 'P');
+      void* fr[8];
+      int nf = backtrace(fr, 8);
+      backtrace_symbols_fd(fr, nf, 2);
+    }
+  }
   const auto& mtx = *reinterpret_cast<const aurora::Mat4x4<float>*>(mtx_);
   const f32 projVec[] = {
       static_cast<f32>(type == GX_ORTHOGRAPHIC),
@@ -41,6 +62,21 @@ void GXSetProjectionv(const f32* ptr) {
   CHECK(ptr != nullptr, "null projection vector");
 
   const GXProjectionType type = ptr[0] == 0.0f ? GX_PERSPECTIVE : GX_ORTHOGRAPHIC;
+  {
+    static int dbg = -1;
+    if (dbg < 0) {
+      const char* e = std::getenv("SB_PROJ_BT");
+      dbg = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    }
+    if (dbg == 1) {
+      static long n = 0;
+      ++n;
+      std::fprintf(stderr, "[proj-callv] n=%ld type=%c\n", n, type == GX_ORTHOGRAPHIC ? 'O' : 'P');
+      void* fr[8];
+      int nf = backtrace(fr, 8);
+      backtrace_symbols_fd(fr, nf, 2);
+    }
+  }
   CacheProjectionVector(ptr, type);
 
   // XF bulk write: 6 params + projection type at 0x1020-0x1026
