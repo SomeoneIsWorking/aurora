@@ -440,6 +440,8 @@ void evict_copy_texture(const void* dest) noexcept {
   }
 }
 
+bool g_sbDrawSamplesCopy = false;
+
 void resolve_sampled_textures(const ShaderInfo& info) noexcept {
   ZoneScoped;
 
@@ -480,6 +482,7 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
       }
     } else if (copyRef != nullptr) {
       handle = copyRef->handle;
+      g_sbDrawSamplesCopy = true; // SB_SKIP_COPY_QUAD diagnostic (see push_gx_draw)
       if (std::getenv("SB_COPY_DBG") != nullptr) {
         static long n = 0;
         if ((++n % 200) == 0 || n <= 4)
