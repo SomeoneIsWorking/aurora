@@ -1853,9 +1853,72 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       }
       std::fprintf(stderr,
                    "[ndc-probe] #%d verts=%u inXY=%u inZ=%u wneg=%u proj=%c ndcX=[%.2f..%.2f] ndcY=[%.2f..%.2f] "
-                   "ndcZ=[%.4f..%.4f] mtx0=%u mark='%s'\n",
+                   "ndcZ=[%.4f..%.4f] mtx0=%u cull=%d aComp=%d/%u,%d/%u zc=%d zu=%d mark='%s'\n",
                    s_printed, vtxCount, in, zin, wneg, g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', xmin, xmax,
-                   ymin, ymax, zmin, zmax, firstMtx, g_sbLastMarker.c_str());
+                   ymin, ymax, zmin, zmax, firstMtx, static_cast<int>(g_gxState.cullMode),
+                   static_cast<int>(g_gxState.alphaCompare.comp0), g_gxState.alphaCompare.ref0,
+                   static_cast<int>(g_gxState.alphaCompare.comp1), g_gxState.alphaCompare.ref1,
+                   static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
+                   g_sbLastMarker.c_str());
+    }
+  }
+
+  // AUTO ARRAY SIZING: arrays registered with size 0 (J3D's "trust" contract)
+  // previously uploaded ZERO bytes — no indexed vertex attribute data ever
+  // reached the GPU, so every INDEX8/INDEX16 J3D model rendered from an empty
+  // storage buffer (invisible sky/map/sea at title). GC hardware reads guest
+  // RAM directly; wgpu needs an explicit upload, so derive the required size
+  // from the maximum index this draw actually references and grow the
+  // per-array upload budget. A growth invalidates the cached upload and
+  // blocks merging (the merge head's uniform holds the old storage offset).
+  {
+    const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+    struct IdxField {
+      u16 off;
+      u8 wide; // index width in bytes (1 or 2)
+      u8 n;    // consecutive indices (3 for NBT3)
+      u8 attr;
+    };
+    IdxField fields[GX_VA_TEX7 + 1];
+    int nFields = 0;
+    u32 off = 0;
+    for (int a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7; ++a) {
+      const auto desc = g_gxState.vtxDesc[a];
+      if (desc == GX_NONE) continue;
+      if (desc == GX_DIRECT) {
+        off += comp_type_size(static_cast<GXAttr>(a), vtxFmt.attrs[a].type) *
+               comp_cnt_count(static_cast<GXAttr>(a), vtxFmt.attrs[a].cnt);
+        continue;
+      }
+      const bool nbt3 = a == GX_VA_NRM && vtxFmt.attrs[a].cnt == GX_NRM_NBT3;
+      const u8 wide = desc == GX_INDEX16 ? 2 : 1;
+      const u8 cnt = nbt3 ? 3 : 1;
+      if (g_gxState.arrays[a].size == 0 && g_gxState.arrays[a].data != nullptr) {
+        fields[nFields++] = {static_cast<u16>(off), wide, cnt, static_cast<u8>(a)};
+      }
+      off += static_cast<u32>(wide) * cnt;
+    }
+    if (nFields > 0) {
+      u32 maxIdx[GX_VA_TEX7 + 1] = {};
+      for (u32 v = 0; v < vtxCount; ++v) {
+        const u8* vp = data + pos + v * vtxSize;
+        for (int f = 0; f < nFields; ++f) {
+          const auto& fl = fields[f];
+          for (u8 k = 0; k < fl.n; ++k) {
+            const u32 idx = fl.wide == 2 ? read_u16(vp + fl.off + k * 2, true) : vp[fl.off + k];
+            if (idx > maxIdx[fl.attr]) maxIdx[fl.attr] = idx;
+          }
+        }
+      }
+      for (int f = 0; f < nFields; ++f) {
+        auto& arr = g_gxState.arrays[fields[f].attr];
+        const u32 need = (maxIdx[fields[f].attr] + 1) * arr.stride;
+        if (need > arr.sizeAuto) arr.sizeAuto = need;
+        if (arr.cachedRange.size < arr.sizeAuto) {
+          arr.cachedRange = {};
+          g_gxState.stateDirty = true;
+        }
+      }
     }
   }
 
@@ -2009,17 +2072,44 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   }
   // Build pipeline, bind groups, and push draw command
   BindGroupRanges ranges{};
+  static int s_arrDbg = -1;
+  if (s_arrDbg < 0) {
+    const char* e = std::getenv("SB_ARR_DBG");
+    s_arrDbg = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
   for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
     if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) {
       continue;
     }
     auto& array = g_gxState.arrays[i];
-    if (array.cachedRange.size > 0) {
+    bool cached = array.cachedRange.size > 0;
+    if (cached) {
       ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
     } else {
-      const auto range = gfx::push_storage(static_cast<const uint8_t*>(array.data), array.size);
+      // size 0 = "trust" registration (J3D): upload the auto-derived extent
+      // (max referenced index, maintained in draw_prim).
+      const u32 effSize = array.size != 0 ? array.size : array.sizeAuto;
+      const auto range = gfx::push_storage(static_cast<const uint8_t*>(array.data), effSize);
       ranges.vaRanges[i - GX_VA_POS] = range;
       array.cachedRange = range;
+    }
+    // SB_ARR_DBG=1: per-draw indexed-array binding trace — the shader reads
+    // the shared storage buffer at vaRange.offset, so a zero-size push means
+    // the array DATA never reached the GPU for this frame.
+    if (s_arrDbg == 1) {
+      static long nZero = 0, nReal = 0, nCached = 0;
+      static long n = 0;
+      if (cached) ++nCached;
+      else if (array.size == 0) ++nZero;
+      else ++nReal;
+      ++n;
+      if ((array.size > 0 && !cached && nReal <= 40) || (n % 2000) == 0)
+        std::fprintf(stderr,
+                     "[arr-dbg] n=%ld zero=%ld real=%ld cached=%ld | attr=%d data=%p size=%u le=%d cached=%d "
+                     "range=(%u+%u) mark='%s'\n",
+                     n, nZero, nReal, nCached, i, array.data, array.size, static_cast<int>(array.le), cached ? 1 : 0,
+                     ranges.vaRanges[i - GX_VA_POS].offset, ranges.vaRanges[i - GX_VA_POS].size,
+                     g_sbLastMarker.c_str());
     }
   }
 
@@ -2128,11 +2218,15 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     auto& array = g_gxState.arrays[attrIdx];
     const auto newData = reinterpret_cast<void*>(arrayAddr);
     if (array.data != newData || array.size != arraySize || array.le != le) {
+      const bool sameBacking = array.data == newData;
       array.data = newData;
       array.size = arraySize;
       array.le = le;
       // Only drop the cached upload when the backing array actually changes.
       array.cachedRange = {};
+      // The auto-derived extent belongs to the backing memory, not the slot:
+      // keep it when only flags change, reset it when the pointer moves.
+      if (!sameBacking) array.sizeAuto = 0;
       g_gxState.stateDirty = true;
     }
   } else if (subCmd == GX_AURORA_LOAD_TEXOBJ) {
