@@ -1,5 +1,7 @@
 #include "command_processor.hpp"
 
+#include "fifo.hpp"
+
 #include "../gfx/common.hpp"
 #include "../gfx/depth_peek.hpp"
 #include "dolphin/gx/GXAurora.h"
@@ -442,21 +444,27 @@ void process(const u8* data, u32 size, bool bigEndian) {
     case CP_CMD_LOAD_INDX_C:
     case CP_CMD_LOAD_INDX_D: {
       ZoneScopedN("LOAD_INDX");
-      // Indexed XF load: 4 bytes of data
+      // Indexed XF load, GC encoding: one u32 = index<<16 | (len-1)<<12 | xfAddr.
+      // INDX_A..D select the POS_MTX / NRM_MTX / TEX_MTX / LIGHT arrays.
       CHECK(pos + 4 <= size, "indexed XF read overrun");
-      u32 arrayType = GX_POS_MTX_ARRAY + (opcode - (CP_CMD_LOAD_INDX_A / 0x08));
-      u8 srcArrayIdx = data[pos++];
+      const u32 word = read_u32(data + pos, bigEndian);
+      pos += 4;
+      const u32 arrayType = GX_POS_MTX_ARRAY + ((opcode - CP_CMD_LOAD_INDX_A) >> 3);
+      const u16 srcArrayIdx = static_cast<u16>(word >> 16);
+      const u16 len = static_cast<u16>(((word >> 12) & 0xF) + 1);
+      const u16 dstAddr = word & 0x0FFF;
       auto const& array = g_gxState.arrays[arrayType];
-      u8* srcData = ((u8*)array.data) + srcArrayIdx * array.stride;
-      u16 addrLen = read_u16(data + pos, bigEndian);
-      u16 len = (addrLen >> 12) + 1;
-      u16 dstAddr = addrLen & 0x0FFF;
-      if (!copy_xf_data(dstAddr, srcData, len, bigEndian)) {
+      ASSERT(array.data != nullptr, "indexed XF load (opcode 0x{:02X}) with no array base for attr {}", opcode,
+             arrayType);
+      const u8* srcData = ((const u8*)array.data) + srcArrayIdx * array.stride;
+      // The source endianness is the ARRAY's, not the command stream's:
+      // runtime-computed pools (J3D draw/normal matrices) are host-endian
+      // even when referenced from a big-endian display list.
+      if (!copy_xf_data(dstAddr, srcData, len, !array.le)) {
 #ifndef NDEBUG
-        Log.debug("Unimplemented indexed XF load (opcode 0x{:02X}, dstAddr=%04x)", opcode, dstAddr);
+        Log.debug("Unimplemented indexed XF load (opcode 0x{:02X}, dstAddr={:04x})", opcode, dstAddr);
 #endif
       }
-      pos += 4;
       break;
     }
 
@@ -1747,6 +1755,27 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
 
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices) {
+  // Per-drain draw/vertex tally for SB_DRAW_STATS (reported from fifo::drain).
+  detail::sDrainDraws += 1;
+  detail::sDrainVerts += vtxCount;
+  // SB_DRAW_DUMP=1: one-shot per-draw identity dump for the first drain past
+  // draw #200 — prim/verts/texture/position-matrix translation, enough to
+  // recognize which shapes the frame contains (e.g. the 752-vert sky dome).
+  if (std::getenv("SB_DRAW_DUMP") != nullptr) {
+    static int s_dumped = 0;
+    if (s_dumped >= 200 && s_dumped < 400) {
+      const auto& obj = g_gxState.textures[0].texObj;
+      const auto* pn = reinterpret_cast<const float*>(&g_gxState.pnMtx[g_gxState.currentPnMtx].pos);
+      std::fprintf(stderr,
+                   "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
+                   "proj=%c blend=%u\n",
+                   s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(),
+                   static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
+                   pn[3], pn[7], pn[11], g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
+                   static_cast<unsigned>(g_gxState.blendMode));
+    }
+    ++s_dumped;
+  }
   // Build pipeline, bind groups, and push draw command
   BindGroupRanges ranges{};
   for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {

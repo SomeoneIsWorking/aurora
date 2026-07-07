@@ -48,10 +48,14 @@ static inline void GXSetTexCoordGen(GXTexCoordID dst_coord, GXTexGenType func, G
 // this form heavily. `extern "C++"` nested inside the enclosing extern "C" of
 // dolphin/gx.h so this can be a C++ overload of the 5-arg TARGET_PC form (C
 // linkage doesn't permit overloading). Forwards to the 5-arg form with size=0
-// (impl walks the buffer at draw time) and le=false (GC assets are big-endian).
+// (impl walks the buffer at draw time). Endianness by array kind: the vertex
+// attribute arrays (POS..TEX7) carry file-origin GC assets = big-endian; the
+// matrix/light arrays (POS_MTX_ARRAY..LIGHT_ARRAY) are runtime-COMPUTED pools
+// (J3D draw/normal matrices, light objects) = host-endian on any host.
 extern "C++" {
 inline void GXSetArray(GXAttr attr, const void* data, u8 stride) {
-    GXSetArray(attr, data, 0u, stride, false);
+    const bool le = attr >= GX_POS_MTX_ARRAY && attr <= GX_LIGHT_ARRAY;
+    GXSetArray(attr, data, 0u, stride, le);
 }
 }
 #endif

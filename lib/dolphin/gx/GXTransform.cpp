@@ -184,9 +184,24 @@ void GXProject(f32 x, f32 y, f32 z, const f32 mtx[3][4], const f32* pm, const f3
   *sz = vp[5] + (wc * (zc * (vp[5] - vp[4])));
 }
 
-// TODO GXLoadPosMtxIndx
+// Indexed matrix loads: emit the GC CP LOAD_INDX commands; the fifo processor
+// fetches from the bound GX_POS_MTX_ARRAY / GX_NRM_MTX_ARRAY at drain time —
+// the same deferred-fetch semantics as the GC command processor, so callers
+// may keep mutating the pool between call and drain, and only the final
+// values are consumed. Encoding: u32 = index<<16 | (len-1)<<12 | xfAddr.
+void GXLoadPosMtxIndx(u16 mtx_indx, u32 id) {
+  CHECK(id >= GX_PNMTX0 && id <= GX_PNMTX9, "invalid pn mtx {}", static_cast<int>(id));
+  GX_WRITE_U8(GX_LOAD_INDX_A);
+  GX_WRITE_U32((static_cast<u32>(mtx_indx) << 16) | (11u << 12) | (id * 4));
+}
+
+void GXLoadNrmMtxIndx3x3(u16 mtx_indx, u32 id) {
+  CHECK(id >= GX_PNMTX0 && id <= GX_PNMTX9, "invalid pn mtx {}", static_cast<int>(id));
+  GX_WRITE_U8(GX_LOAD_INDX_B);
+  GX_WRITE_U32((static_cast<u32>(mtx_indx) << 16) | (8u << 12) | (id * 3 + 0x400));
+}
+
 // TODO GXLoadNrmMtxImm3x3
-// TODO GXLoadNrmMtxIndx3x3
 // TODO GXLoadTexMtxIndx
 // TODO GXSetZScaleOffset
 }

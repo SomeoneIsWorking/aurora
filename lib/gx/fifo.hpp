@@ -14,6 +14,9 @@ extern bool sInDisplayList;
 extern uint8_t* sDlBuffer;
 extern uint32_t sDlSize;
 extern uint32_t sDlWritePos;
+// SB_DRAW_STATS tallies (incremented by push_gx_draw, reported+reset by drain)
+extern uint32_t sDrainDraws;
+extern uint32_t sDrainVerts;
 } // namespace detail
 
 void init();
