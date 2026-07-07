@@ -21,6 +21,9 @@
 #include <SDL3/SDL_filesystem.h>
 #include <magic_enum.hpp>
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "system_info.hpp"
 #include "tracy/Tracy.hpp"
 
@@ -269,6 +272,86 @@ void end_frame() noexcept {
 
   gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
                   imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder) {
+    // SB_DUMP_FRAME=/path/to.rgba : one-shot raw-RGBA dump of the framebuffer,
+    // taken SB_DUMP_FRAME_AFTER frames in (default 60). Convert with:
+    //   magick -size WxH -depth 8 rgba:path.rgba out.png
+    static int s_dumpFramesLeft = -2;
+    static uint32_t s_dumpWidth = 0, s_dumpHeight = 0;
+    static wgpu::Buffer s_dumpBuffer;
+    static const char* s_dumpPath = nullptr;
+    if (s_dumpFramesLeft == -2) {
+      s_dumpPath = std::getenv("SB_DUMP_FRAME");
+      if (s_dumpPath && s_dumpPath[0]) {
+        const char* wait = std::getenv("SB_DUMP_FRAME_AFTER");
+        s_dumpFramesLeft = wait ? std::atoi(wait) : 60;
+        Log.info("SB_DUMP_FRAME armed: dumping after {} more frames to {}",
+                 s_dumpFramesLeft, s_dumpPath);
+      } else {
+        s_dumpFramesLeft = -1;
+      }
+    }
+    if (s_dumpFramesLeft > 0) {
+      --s_dumpFramesLeft;
+    } else if (s_dumpFramesLeft == 0) {
+      const auto& src = webgpu::present_source();
+      s_dumpWidth = src.size.width;
+      s_dumpHeight = src.size.height;
+      const uint32_t bytesPerRow = ((s_dumpWidth * 4 + 255) / 256) * 256;
+      const wgpu::BufferDescriptor bd{
+          .label = "framebuffer dump",
+          .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead,
+          .size = static_cast<uint64_t>(bytesPerRow) * s_dumpHeight,
+      };
+      s_dumpBuffer = webgpu::g_device.CreateBuffer(&bd);
+      const wgpu::TexelCopyTextureInfo srcInfo{
+          .texture = src.texture,
+          .mipLevel = 0,
+          .origin = {0, 0, 0},
+          .aspect = wgpu::TextureAspect::All,
+      };
+      const wgpu::TexelCopyBufferInfo dstInfo{
+          .layout = {.offset = 0, .bytesPerRow = bytesPerRow, .rowsPerImage = s_dumpHeight},
+          .buffer = s_dumpBuffer,
+      };
+      const wgpu::Extent3D copySize{s_dumpWidth, s_dumpHeight, 1};
+      encoder.CopyTextureToBuffer(&srcInfo, &dstInfo, &copySize);
+      s_dumpFramesLeft = -3;
+      Log.info("SB_DUMP_FRAME: queued dump ({}x{}, bytesPerRow={}) -> {}",
+               s_dumpWidth, s_dumpHeight, bytesPerRow, s_dumpPath);
+    } else if (s_dumpFramesLeft == -3) {
+      s_dumpFramesLeft = -4;
+      const uint32_t bytesPerRow = ((s_dumpWidth * 4 + 255) / 256) * 256;
+      const uint64_t totalBytes = static_cast<uint64_t>(bytesPerRow) * s_dumpHeight;
+      s_dumpBuffer.MapAsync(
+          wgpu::MapMode::Read, 0, totalBytes, wgpu::CallbackMode::AllowSpontaneous,
+          [](wgpu::MapAsyncStatus status, wgpu::StringView) {
+            if (status != wgpu::MapAsyncStatus::Success) {
+              Log.error("SB_DUMP_FRAME map failed status={}", static_cast<int>(status));
+              return;
+            }
+            const uint32_t bpr = ((s_dumpWidth * 4 + 255) / 256) * 256;
+            const auto* mapped = static_cast<const uint8_t*>(
+                s_dumpBuffer.GetConstMappedRange(0, static_cast<uint64_t>(bpr) * s_dumpHeight));
+            if (!mapped) {
+              Log.error("SB_DUMP_FRAME: GetConstMappedRange returned null");
+              return;
+            }
+            FILE* f = std::fopen(s_dumpPath, "wb");
+            if (!f) {
+              Log.error("SB_DUMP_FRAME: fopen failed {}", s_dumpPath);
+            } else {
+              for (uint32_t y = 0; y < s_dumpHeight; ++y) {
+                std::fwrite(mapped + static_cast<size_t>(y) * bpr, 1,
+                            static_cast<size_t>(s_dumpWidth) * 4, f);
+              }
+              std::fclose(f);
+              Log.info("SB_DUMP_FRAME: wrote {}x{} RGBA to {} ({} bytes)",
+                       s_dumpWidth, s_dumpHeight, s_dumpPath,
+                       static_cast<size_t>(s_dumpWidth) * s_dumpHeight * 4);
+            }
+            s_dumpBuffer.Unmap();
+          });
+    }
     wgpu::Texture currentTexture;
     wgpu::TextureView currentView;
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
@@ -429,6 +512,11 @@ void aurora_shutdown() { aurora::shutdown(); }
 const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(); }
 void aurora_end_frame() { aurora::end_frame(); }
+void aurora_discard_frame() {
+#ifdef AURORA_ENABLE_GX
+  aurora::gx::fifo::clear_buffer();
+#endif
+}
 AuroraBackend aurora_get_backend() { return aurora::g_config.desiredBackend; }
 const AuroraBackend* aurora_get_available_backends(size_t* count) {
   if (count != nullptr) {

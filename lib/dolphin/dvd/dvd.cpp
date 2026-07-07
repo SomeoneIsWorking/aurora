@@ -8,16 +8,13 @@
 #include <tracy/Tracy.hpp>
 
 #include <atomic>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <deque>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,6 +23,23 @@
 #include "../../internal.hpp"
 
 using namespace aurora::dvd::impl;
+
+// Weak host-allocation scope hooks. Hosts that replace the global operator
+// new with a guest-heap router (sms-boot's JKRHeap) override these so DVD-
+// internal C++ allocations — file handles, FST path strings — go to the host
+// allocator instead of whatever guest heap is current at call time. Same
+// weak-override pattern as OSReport.
+extern "C" void aurora_host_alloc_push(void) __attribute__((weak));
+extern "C" void aurora_host_alloc_pop(void) __attribute__((weak));
+extern "C" void aurora_host_alloc_push(void) {}
+extern "C" void aurora_host_alloc_pop(void) {}
+
+namespace {
+struct HostAllocScope {
+  HostAllocScope() { aurora_host_alloc_push(); }
+  ~HostAllocScope() { aurora_host_alloc_pop(); }
+};
+} // namespace
 
 namespace aurora::dvd::impl {
   NodHandle* s_partition = nullptr;
@@ -335,274 +349,33 @@ void finishCommand(DVDCommandBlock* block, s32 result, u32 transferred) {
   setCommandResult(block, stateForResult(result), transferred);
 }
 
-class DvdWorker {
-public:
-  ~DvdWorker() { stop(); }
-
-  void start() {
-    std::lock_guard lk{m_mutex};
-    if (m_running) {
-      return;
-    }
-    m_shutdown = false;
-    m_thread = std::thread([this] { run(); });
-    m_running = true;
+// Synchronous command execution. There is no DVD worker thread, no command
+// queue, and no simulated transfer timing: every command performs its host
+// read inline and fires its completion callback before the issuing call
+// returns. The "Async" APIs keep their signatures for the GC SDK contract,
+// but a block is never observable in BUSY/WAITING state after the call.
+std::pair<s32, u32> perform_command(DVDCommandBlock* block) {
+  s32 result;
+  u32 transferred = 0;
+  if (block->command == DVD_COMMAND_SEEK) {
+    auto* handle = getCommandHandle(block);
+    const int64_t seek = handle != nullptr ? handle->seek(block->offset, 0) : -1;
+    result = seek < 0 ? DVD_RESULT_FATAL_ERROR : DVD_RESULT_GOOD;
+  } else {
+    result = readFromHandle(getCommandHandle(block), block->addr, static_cast<s32>(block->length),
+                            static_cast<s32>(block->offset), &transferred);
   }
+  return {result, transferred};
+}
 
-  void stop() {
-    std::vector<DVDCommandBlock*> canceledBlocks;
-    bool stoppedFromWorker = false;
-    {
-      std::lock_guard lk{m_mutex};
-      if (!m_running) {
-        return;
-      }
-      m_shutdown = true;
-      canceledBlocks = discard_pending_commands_locked();
-      if (std::this_thread::get_id() == m_thread.get_id()) {
-        m_running = false;
-        m_thread.detach();
-        stoppedFromWorker = true;
-      } else if (m_activeBlock != nullptr) {
-        m_cancelActiveBlock = m_activeBlock;
-      }
-    }
-    complete_canceled_commands(canceledBlocks);
-    m_doneCv.notify_all();
-    if (stoppedFromWorker) {
-      return;
-    }
-    m_cv.notify_all();
-    m_thread.join();
-    {
-      std::lock_guard lk{m_mutex};
-      m_running = false;
-    }
-    m_doneCv.notify_all();
+void execute_command(DVDCommandBlock* block) {
+  atomic_store_release(block->state, DVD_STATE_BUSY);
+  auto [result, transferred] = perform_command(block);
+  finishCommand(block, result, transferred);
+  if (block->callback != nullptr) {
+    block->callback(result, block);
   }
-
-  void enqueue(DVDCommandBlock* block) {
-    bool executeNow = false;
-    {
-      std::lock_guard lk(m_mutex);
-      if (!m_running || m_shutdown) {
-        executeNow = true;
-      } else {
-        atomic_store_release(block->state, DVD_STATE_WAITING);
-        m_queue.push_back(block);
-      }
-    }
-    if (executeNow) {
-      execute(block);
-      return;
-    }
-    m_cv.notify_one();
-  }
-
-  void retire_command(DVDCommandBlock* block) {
-    if (block == nullptr) {
-      return;
-    }
-
-    DVDCommandBlock* canceledBlock = nullptr;
-    std::unique_lock lk{m_mutex};
-    for (auto it = m_queue.begin(); it != m_queue.end(); ++it) {
-      if (*it == block) {
-        m_queue.erase(it);
-        canceledBlock = block;
-        lk.unlock();
-        complete_canceled_command(canceledBlock);
-        m_doneCv.notify_all();
-        return;
-      }
-    }
-
-    if (m_activeBlock == block && std::this_thread::get_id() != m_thread.get_id()) {
-      m_cancelActiveBlock = block;
-      m_doneCv.wait(lk, [&] { return !m_running || m_activeBlock != block; });
-    } else {
-      atomic_store_release(block->state, DVD_STATE_CANCELED);
-      lk.unlock();
-      m_doneCv.notify_all();
-      return;
-    }
-  }
-
-  void cancel_all() {
-    std::vector<DVDCommandBlock*> canceledBlocks;
-    bool waitForActive = false;
-    {
-      std::lock_guard lk{m_mutex};
-      canceledBlocks = discard_pending_commands_locked();
-      if (m_activeBlock != nullptr && std::this_thread::get_id() != m_thread.get_id()) {
-        m_cancelActiveBlock = m_activeBlock;
-        waitForActive = true;
-      }
-    }
-
-    complete_canceled_commands(canceledBlocks);
-    m_doneCv.notify_all();
-
-    if (waitForActive) {
-      std::unique_lock lk{m_mutex};
-      m_doneCv.wait(lk, [&] { return !m_running || m_activeBlock == nullptr; });
-    }
-  }
-
-  void drain_command(DVDCommandBlock* block) {
-    if (block == nullptr) {
-      return;
-    }
-
-    DVDCommandBlock* canceledBlock = nullptr;
-    std::unique_lock lk{m_mutex};
-    for (auto it = m_queue.begin(); it != m_queue.end(); ++it) {
-      if (*it == block) {
-        m_queue.erase(it);
-        canceledBlock = block;
-        lk.unlock();
-        complete_canceled_command(canceledBlock);
-        m_doneCv.notify_all();
-        return;
-      }
-    }
-
-    if (m_activeBlock == block && std::this_thread::get_id() != m_thread.get_id()) {
-      m_cancelActiveBlock = block;
-      m_doneCv.wait(lk, [&] { return !m_running || m_activeBlock != block; });
-    }
-  }
-
-  void wait(const DVDCommandBlock* block) {
-    if (block == nullptr) {
-      return;
-    }
-    std::unique_lock lk{m_mutex};
-    m_doneCv.wait(lk, [&] {
-      const s32 state = atomic_load_acquire(block->state);
-      return !m_running || (m_activeBlock != block && state != DVD_STATE_BUSY && state != DVD_STATE_WAITING);
-    });
-  }
-
-private:
-  void run() {
-#ifdef TRACY_ENABLE
-    tracy::SetThreadName("Aurora DVD worker");
-#endif
-
-    std::unique_lock lk{m_mutex};
-    while (true) {
-      m_cv.wait(lk, [&] { return m_shutdown || !m_queue.empty(); });
-      if (m_shutdown) {
-        return;
-      }
-      DVDCommandBlock* block = m_queue.front();
-      m_queue.pop_front();
-      m_activeBlock = block;
-      atomic_store_release(block->state, DVD_STATE_BUSY);
-      lk.unlock();
-      process_command(block);
-      lk.lock();
-      m_activeBlock = nullptr;
-      if (m_cancelActiveBlock == block) {
-        m_cancelActiveBlock = nullptr;
-      }
-      lk.unlock();
-      m_doneCv.notify_all();
-      lk.lock();
-    }
-  }
-
-  static std::pair<s32, u32> perform_command(DVDCommandBlock* block) {
-    s32 result;
-    u32 transferred = 0;
-    if (block->command == DVD_COMMAND_SEEK) {
-      auto* handle = getCommandHandle(block);
-      const int64_t seek = handle != nullptr ? handle->seek(block->offset, 0) : -1;
-      result = seek < 0 ? DVD_RESULT_FATAL_ERROR : DVD_RESULT_GOOD;
-    } else {
-      result = readFromHandle(getCommandHandle(block), block->addr, static_cast<s32>(block->length),
-                              static_cast<s32>(block->offset), &transferred);
-    }
-    return {result, transferred};
-  }
-
-  void process_command(DVDCommandBlock* block) {
-    auto [result, transferred] = perform_command(block);
-    if (consume_active_cancel(block)) {
-      result = DVD_RESULT_CANCELED;
-      transferred = 0;
-    }
-    finishCommand(block, result, transferred);
-    if (block->callback != nullptr) {
-      block->callback(result, block);
-    }
-  }
-
-  void execute(DVDCommandBlock* block) {
-    {
-      std::lock_guard lk{m_mutex};
-      m_activeBlock = block;
-      atomic_store_release(block->state, DVD_STATE_BUSY);
-    }
-    process_command(block);
-    {
-      std::lock_guard lk{m_mutex};
-      m_activeBlock = nullptr;
-      if (m_cancelActiveBlock == block) {
-        m_cancelActiveBlock = nullptr;
-      }
-    }
-    m_doneCv.notify_all();
-  }
-
-  bool consume_active_cancel(DVDCommandBlock* block) {
-    std::lock_guard lk{m_mutex};
-    if (m_cancelActiveBlock != block) {
-      return false;
-    }
-    m_cancelActiveBlock = nullptr;
-    return true;
-  }
-
-  static void complete_canceled_command(DVDCommandBlock* block) {
-    if (block == nullptr) {
-      return;
-    }
-    finishCommand(block, DVD_RESULT_CANCELED, 0);
-    if (block->callback != nullptr) {
-      block->callback(DVD_RESULT_CANCELED, block);
-    }
-  }
-
-  static void complete_canceled_commands(const std::vector<DVDCommandBlock*>& blocks) {
-    for (auto* block : blocks) {
-      complete_canceled_command(block);
-    }
-  }
-
-  std::vector<DVDCommandBlock*> discard_pending_commands_locked() {
-    std::vector<DVDCommandBlock*> blocks;
-    blocks.reserve(m_queue.size());
-    for (auto* block : m_queue) {
-      blocks.push_back(block);
-    }
-    m_queue.clear();
-    return blocks;
-  }
-
-  std::thread m_thread;
-  std::mutex m_mutex;
-  std::condition_variable m_cv;
-  std::condition_variable m_doneCv;
-  std::deque<DVDCommandBlock*> m_queue;
-  DVDCommandBlock* m_activeBlock = nullptr;
-  DVDCommandBlock* m_cancelActiveBlock = nullptr;
-  bool m_running = false;
-  bool m_shutdown = false;
-};
-
-DvdWorker s_worker;
+}
 
 int completeImmediateCommand(DVDCommandBlock* block, u32 command, s32 result, u32 transferred, DVDCBCallback callback) {
   beginCommand(block, command, nullptr, 0, 0, callback);
@@ -646,7 +419,6 @@ bool aurora_dvd_open(const char* disc_path) {
     return false;
   }
 
-  s_worker.stop();
   clearState();
 
   SDL_IOStream* io = SDL_IOFromFile(disc_path, "rb");
@@ -661,7 +433,9 @@ bool aurora_dvd_open(const char* disc_path) {
       .close = sdlStreamClose,
   };
   const NodDiscOptions options{
-      .preloader_threads = 1,
+      // Single-threaded runtime: no nod preloader thread; reads decompress
+      // inline on the calling thread.
+      .preloader_threads = 0,
   };
 
   NodHandle* discHandle;
@@ -699,12 +473,10 @@ bool aurora_dvd_open(const char* disc_path) {
   s_currentDir = 0;
   s_currentPath = "/";
   s_initialized = true;
-  s_worker.start();
   return true;
 }
 
 void aurora_dvd_close(void) {
-  s_worker.stop();
   clearState();
 }
 
@@ -740,7 +512,7 @@ static int DVDReadAbsAsyncPrioInternal(DVDCommandBlock* block, u32 command, void
                 "DVDReadAbsAsync(): command block is used for processing previous request.");
 
   beginCommand(block, command, addr, static_cast<u32>(length), static_cast<u32>(offset), callback);
-  s_worker.enqueue(block);
+  execute_command(block);
   return TRUE;
 }
 
@@ -756,7 +528,7 @@ int DVDSeekAbsAsyncPrio(DVDCommandBlock* block, s32 offset, DVDCBCallback callba
                 "DVDSeekAbs(): command block is used for processing previous request.");
 
   beginCommand(block, DVD_COMMAND_SEEK, nullptr, 0, static_cast<u32>(offset), callback);
-  s_worker.enqueue(block);
+  execute_command(block);
   return TRUE;
 }
 
@@ -950,7 +722,6 @@ void DVDPause(void) {}
 void DVDResume(void) {}
 
 int DVDCancelAsync(DVDCommandBlock* block, DVDCBCallback callback) {
-  s_worker.retire_command(block);
   if (callback != nullptr) {
     callback(DVD_RESULT_GOOD, block);
   }
@@ -958,13 +729,11 @@ int DVDCancelAsync(DVDCommandBlock* block, DVDCBCallback callback) {
 }
 
 s32 DVDCancel(volatile DVDCommandBlock* block) {
-  auto* mutableBlock = const_cast<DVDCommandBlock*>(block);
-  s_worker.retire_command(mutableBlock);
+  (void)block;
   return DVD_RESULT_GOOD;
 }
 
 int DVDCancelAllAsync(DVDCBCallback callback) {
-  s_worker.cancel_all();
   if (callback != nullptr) {
     callback(DVD_RESULT_CANCELED, nullptr);
   }
@@ -972,7 +741,6 @@ int DVDCancelAllAsync(DVDCBCallback callback) {
 }
 
 s32 DVDCancelAll(void) {
-  s_worker.cancel_all();
   return DVD_RESULT_GOOD;
 }
 
@@ -1038,6 +806,7 @@ s32 DVDConvertPathToEntrynum(const char* pathPtr) {
 }
 
 BOOL DVDFastOpen(s32 entrynum, DVDFileInfo* fileInfo) {
+  HostAllocScope hostAlloc;
   std::lock_guard lock(s_fstLock);
 
   if (!s_initialized || fileInfo == nullptr || !isValidEntryNum(entrynum) || s_partition == nullptr) {
@@ -1086,10 +855,10 @@ BOOL DVDOpen(const char* fileName, DVDFileInfo* fileInfo) {
 }
 
 BOOL DVDClose(DVDFileInfo* fileInfo) {
+  HostAllocScope hostAlloc;
   if (fileInfo == nullptr) {
     return FALSE;
   }
-  s_worker.drain_command(&fileInfo->cb);
   if (fileInfo->cb.userData != nullptr) {
     delete static_cast<CommandDataBase*>(fileInfo->cb.userData);
     fileInfo->cb.userData = nullptr;
@@ -1110,6 +879,7 @@ BOOL DVDGetCurrentDir(char* path, u32 maxlen) {
 }
 
 BOOL DVDChangeDir(const char* dirName) {
+  HostAllocScope hostAlloc;
   s32 entry = DVDConvertPathToEntrynum(dirName);
 
   std::lock_guard lock(s_fstLock);
@@ -1146,7 +916,6 @@ s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32 p
   if (!DVDReadAsyncPrio(fileInfo, addr, length, offset, nullptr, prio)) {
     return DVD_RESULT_FATAL_ERROR;
   }
-  s_worker.wait(&fileInfo->cb);
   const s32 state = atomic_load_acquire(fileInfo->cb.state);
   if (state == DVD_STATE_END) {
     return static_cast<s32>(atomic_load_relaxed(fileInfo->cb.transferredSize));
@@ -1173,7 +942,6 @@ s32 DVDSeekPrio(DVDFileInfo* fileInfo, s32 offset, s32 prio) {
   if (!DVDSeekAsyncPrio(fileInfo, offset, nullptr, prio)) {
     return DVD_RESULT_FATAL_ERROR;
   }
-  s_worker.wait(&fileInfo->cb);
   const s32 state = atomic_load_acquire(fileInfo->cb.state);
   if (state == DVD_STATE_END) {
     return DVD_RESULT_GOOD;
