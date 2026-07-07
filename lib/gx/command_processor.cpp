@@ -1761,21 +1761,40 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // SB_DRAW_DUMP=1: one-shot per-draw identity dump for the first drain past
   // draw #200 — prim/verts/texture/position-matrix translation, enough to
   // recognize which shapes the frame contains (e.g. the 752-vert sky dome).
-  if (std::getenv("SB_DRAW_DUMP") != nullptr) {
+  if (const char* e = std::getenv("SB_DRAW_DUMP"); e != nullptr) {
+    // SB_DRAW_DUMP=<startDraw>: dump 200 draws starting at that global draw
+    // index (draw counts run ~160/frame at title; pick start = frame*160).
+    // SB_DRAW_DUMP=1 keeps the old early-boot window.
     static int s_dumped = 0;
-    if (s_dumped >= 200 && s_dumped < 400) {
+    static int s_start = -1;
+    if (s_start < 0) {
+      s_start = std::atoi(e);
+      if (s_start < 200) s_start = 200;
+    }
+    if (s_dumped >= s_start && s_dumped < s_start + 200) {
       const auto& obj = g_gxState.textures[0].texObj;
       const auto* pn = reinterpret_cast<const float*>(&g_gxState.pnMtx[g_gxState.currentPnMtx].pos);
       const auto& vp = g_gxState.logicalViewport;
       const auto& sc = g_gxState.logicalScissor;
+      const auto& cc = g_gxState.colorChannelConfig[0];
+      const auto& cs = g_gxState.colorChannelState[0];
       std::fprintf(stderr,
                    "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
-                   "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u)\n",
+                   "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
+                   "tev=%u ch0[light=%d matSrc=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
+                   "prj=[%.4f %.4f %.4f %.4f]\n",
                    s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(),
                    static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
                    pn[3], pn[7], pn[11], g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
                    static_cast<unsigned>(g_gxState.blendMode), vp.left, vp.top, vp.width, vp.height,
-                   sc.x, sc.y, sc.width, sc.height);
+                   sc.x, sc.y, sc.width, sc.height, g_gxState.numTevStages,
+                   static_cast<int>(cc.lightingEnabled), static_cast<int>(cc.matSrc), cs.matColor.x(),
+                   cs.matColor.y(), cs.matColor.z(), cs.matColor.w(), cs.ambColor.x(), cs.ambColor.y(),
+                   cs.ambColor.z(), static_cast<unsigned>(cs.lightMask.to_ulong() & 0xff),
+                   reinterpret_cast<const float*>(&g_gxState.proj)[0],
+                   reinterpret_cast<const float*>(&g_gxState.proj)[5],
+                   reinterpret_cast<const float*>(&g_gxState.proj)[10],
+                   reinterpret_cast<const float*>(&g_gxState.proj)[11]);
     }
     ++s_dumped;
   }
@@ -1798,7 +1817,19 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   PipelineConfig config{};
   populate_pipeline_config(config, prim, fmt);
   const auto info = build_shader_info(config.shaderConfig);
+  g_sbDrawSamplesCopy = false;
   resolve_sampled_textures(info);
+  // SB_SKIP_COPY_QUAD=1 (diagnostic): drop draws that sample an EFB-copy
+  // texture (the screen-texture repaint quads) — separates "scene hidden
+  // under the quad overdraw" from "scene never rendered".
+  static int s_skipCopyQuad = -1;
+  if (s_skipCopyQuad < 0) {
+    const char* e = std::getenv("SB_SKIP_COPY_QUAD");
+    s_skipCopyQuad = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  if (s_skipCopyQuad == 1 && g_sbDrawSamplesCopy) {
+    return;
+  }
   const auto bindGroups = build_bind_groups(info);
   const auto pipeline = gfx::pipeline_ref(config);
 

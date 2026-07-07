@@ -409,6 +409,9 @@ void set_render_viewport(const gfx::Viewport& viewport) noexcept;
 void set_logical_scissor(const gfx::ClipRect& scissor) noexcept;
 void set_render_scissor(const gfx::ClipRect& scissor) noexcept;
 void copy_tex(const void* dest, GXBool clear) noexcept;
+// SB_SKIP_COPY_QUAD diagnostic: set by resolve_sampled_textures when the
+// pending draw samples an EFB-copy texture; consumed by push_gx_draw.
+extern bool g_sbDrawSamplesCopy;
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept;
 void resolve_sampled_textures(const ShaderInfo& info) noexcept;
 

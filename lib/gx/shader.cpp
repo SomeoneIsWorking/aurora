@@ -1945,11 +1945,16 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
-    return prev;
+    return {9}prev;
 }}
 )""",
                                         uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
-                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre);
+                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre,
+                                        // SB_FORCE_COLOR=1 (diagnostic): every fragment returns magenta —
+                                        // bisects "TEV/texture outputs invisible" vs "geometry never rasterized".
+                                        std::getenv("SB_FORCE_COLOR") != nullptr
+                                            ? "vec4f(1.0, 0.0, 1.0, 1.0); // "
+                                            : "");
   if (EnableDebugPrints) {
     Log.info("Generated shader (hash {:x}): {}", hash, shaderSource);
   }
