@@ -450,15 +450,22 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
 
     GXTexObj_ obj = g_gxState.loadedTextures[i];
     auto& textureBind = g_gxState.textures[i];
+    const auto copyIt = g_gxState.copyTextures.find(obj.data);
+    const GXState::CopyTextureRef* copyRef = copyIt != g_gxState.copyTextures.end() ? &copyIt->second : nullptr;
     if (obj.texObjId != 0 && obj.texObjId == textureBind.texObj.texObjId &&
         obj.texDataVersion == textureBind.texObj.texDataVersion) {
-      // Texture bind unchanged
-      continue;
+      // Texture bind unchanged — unless an EFB copy to this address now
+      // exists and the bind still holds an older resolve. A texobj sampled
+      // BEFORE the first GXCopyTex to its data pointer (e.g. a screen-texture
+      // quad drawn on an early frame) resolves as a STATIC texture of raw RAM
+      // garbage; without this check the id/version match pins that stale
+      // handle forever and every later frame's scene copy is never sampled.
+      if (copyRef == nullptr || textureBind.ref == copyRef->handle) {
+        continue;
+      }
     }
 
     gfx::TextureHandle handle;
-    const auto copyIt = g_gxState.copyTextures.find(obj.data);
-    const GXState::CopyTextureRef* copyRef = copyIt != g_gxState.copyTextures.end() ? &copyIt->second : nullptr;
     if (is_palette_format(obj.format())) {
       const auto tlutIdx = static_cast<size_t>(obj.tlut);
       if (tlutIdx < g_gxState.loadedTluts.size()) {
@@ -473,6 +480,12 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
       }
     } else if (copyRef != nullptr) {
       handle = copyRef->handle;
+      if (std::getenv("SB_COPY_DBG") != nullptr) {
+        static long n = 0;
+        if ((++n % 200) == 0 || n <= 4)
+          std::fprintf(stderr, "[copy-bind] n=%ld texmap=%u data=%p %ux%u\n", n, i, obj.data, obj.width(),
+                       obj.height());
+      }
     } else if (obj.has_data()) {
       handle = resolve_static_texture(obj);
     }

@@ -82,6 +82,13 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
                     texCopyFmt);
   ++handle.revision;
   g_gxState.copyTextures[dest] = handle;
+  if (std::getenv("SB_COPY_DBG") != nullptr) {
+    static long n = 0;
+    if ((++n % 200) == 0 || n <= 4)
+      std::fprintf(stderr, "[copy-tex] n=%ld dest=%p %ux%u fmt=%u clear=%d rect=(%d,%d %ux%u)\n", n, dest, dstWidth,
+                   dstHeight, static_cast<unsigned>(texCopyFmt), static_cast<int>(clear), rect.x, rect.y, rect.width,
+                   rect.height);
+  }
 }
 } // namespace aurora::gx
 
