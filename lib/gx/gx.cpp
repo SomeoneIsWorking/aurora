@@ -182,6 +182,11 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
 #else
     const auto nameStr = "GX Static Texture";
 #endif
+    if (std::getenv("SB_TEX_DBG") != nullptr) {
+      std::fprintf(stderr, "[tex] static %ux%u mips=%u fmt=%u data=%p\n", obj.width(), obj.height(),
+                   obj.mip_count(), static_cast<unsigned>(obj.format()), obj.data);
+      std::fflush(stderr);
+    }
     handle = gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), obj.format(),
                                         {static_cast<const uint8_t*>(obj.data), UINT32_MAX}, false, nameStr);
   }
