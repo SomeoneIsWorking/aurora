@@ -659,6 +659,11 @@ static inline wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
       .stripIndexFormat = wgpu::IndexFormat::Undefined,
       .frontFace = wgpu::FrontFace::CW,
       .cullMode = cullMode,
+      // GC hardware does not clip at the near/far planes the way wgpu does —
+      // skyboxes and sun billboards legitimately live beyond the projection
+      // far plane (title sky sits at z~-222k with far~30k). Disable depth
+      // clipping when the device supports it; fragments still depth-test.
+      .unclippedDepth = webgpu::g_depthClipControlSupported,
   };
 }
 

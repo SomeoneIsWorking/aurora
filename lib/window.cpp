@@ -432,7 +432,16 @@ bool is_paused() noexcept {
   }
   const auto flags = SDL_GetWindowFlags(g_window);
   if ((flags & SDL_WINDOW_HIDDEN) != 0u) {
-    return true;
+    // SB_HEADLESS runs render with the window intentionally hidden — a hidden
+    // window must not pause the frame loop there.
+    static int s_headless = -1;
+    if (s_headless < 0) {
+      const char* e = std::getenv("SB_HEADLESS");
+      s_headless = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    }
+    if (s_headless == 0) {
+      return true;
+    }
   }
   // Wait until the window has received focus before respecting pauseOnFocusLost
   if (!g_gotFocus) {
