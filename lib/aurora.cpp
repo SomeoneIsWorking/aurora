@@ -272,9 +272,12 @@ void end_frame() noexcept {
 
   gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
                   imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder) {
-    // SB_DUMP_FRAME=/path/to.rgba : one-shot raw-RGBA dump of the framebuffer,
-    // taken SB_DUMP_FRAME_AFTER frames in (default 60). Convert with:
-    //   magick -size WxH -depth 8 rgba:path.rgba out.png
+    // SB_DUMP_FRAME=/path/to.raw : one-shot raw dump of the framebuffer in the
+    // SURFACE format — typically BGRA8 — taken SB_DUMP_FRAME_AFTER frames in
+    // (default 60). Convert with:
+    //   magick -size WxH -depth 8 bgra:path.raw out.png
+    // (using rgba: swaps red/blue and has already caused one false "wrong
+    // colors" diagnosis — the render was correct, the conversion wasn't).
     static int s_dumpFramesLeft = -2;
     static uint32_t s_dumpWidth = 0, s_dumpHeight = 0;
     static wgpu::Buffer s_dumpBuffer;

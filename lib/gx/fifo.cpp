@@ -16,6 +16,8 @@ bool sInDisplayList = false;
 uint8_t* sDlBuffer = nullptr;
 uint32_t sDlSize = 0;
 uint32_t sDlWritePos = 0;
+uint32_t sDrainDraws = 0;
+uint32_t sDrainVerts = 0;
 } // namespace detail
 
 void init() {
@@ -73,6 +75,17 @@ void drain() {
     return;
   }
   process(detail::sBufferData, detail::sBufferSize, true);
+  // SB_DRAW_STATS=1: one line per drain (== one presented frame) with the
+  // draw/vertex count — the cheap triage between "scene not drawn" (count
+  // too low) and "drawn but invisible" (counts present; chase state).
+  if (std::getenv("SB_DRAW_STATS") != nullptr) {
+    static uint32_t s_frame = 0;
+    std::fprintf(stderr, "[draw-stats] frame=%u bytes=%u draws=%u verts=%u\n",
+                 s_frame++, detail::sBufferSize, detail::sDrainDraws, detail::sDrainVerts);
+    std::fflush(stderr);
+  }
+  detail::sDrainDraws = 0;
+  detail::sDrainVerts = 0;
   detail::sBufferSize = 0;
 }
 
