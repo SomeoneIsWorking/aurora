@@ -675,10 +675,20 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
   const float depthBiasClamp = webgpu::g_hasCoreFeatures
                                    ? std::bit_cast<float>(config.polygonOffsetClampBits)
                                    : 0.0f;
+  // SB_NO_DEPTH=1 (diagnostic): force depth test Always / no depth writes on
+  // every pipeline — isolates "fragments killed by the depth test" (stale or
+  // mis-cleared depth buffer) from raster/shading causes.
+  static int s_noDepth = -1;
+  if (s_noDepth < 0) {
+    const char* e = std::getenv("SB_NO_DEPTH");
+    s_noDepth = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
   const wgpu::DepthStencilState depthStencil{
       .format = g_graphicsConfig.depthFormat,
-      .depthWriteEnabled = config.depthCompare && config.depthUpdate,
-      .depthCompare = config.depthCompare ? to_compare_function(config.depthFunc) : wgpu::CompareFunction::Always,
+      .depthWriteEnabled = s_noDepth == 0 && config.depthCompare && config.depthUpdate,
+      .depthCompare = s_noDepth == 1        ? wgpu::CompareFunction::Always
+                      : config.depthCompare ? to_compare_function(config.depthFunc)
+                                            : wgpu::CompareFunction::Always,
       .depthBias = round_away_from_zero<int32_t>(depthBias),
       .depthBiasSlopeScale = depthBiasSlopeScale,
       .depthBiasClamp = depthBiasClamp,

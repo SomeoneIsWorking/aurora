@@ -276,6 +276,11 @@ struct AttrArray {
   u8 stride;
   bool le = true;
   gfx::Range cachedRange;
+  // Auto-computed upload size for arrays registered with size 0 ("trust",
+  // J3D's J3DLoadArrayBasePtr): grown at draw time from the max vertex index
+  // actually referenced, so the data reaches the GPU without the caller
+  // knowing the array extent (GC HW reads raw RAM; wgpu needs an upload).
+  u32 sizeAuto = 0;
 };
 inline bool operator==(const AttrArray& lhs, const AttrArray& rhs) {
   return lhs.data == rhs.data && lhs.size == rhs.size && lhs.stride == rhs.stride && lhs.le == rhs.le;
