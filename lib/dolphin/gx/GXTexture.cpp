@@ -49,6 +49,13 @@ int __cntlzw(unsigned int val) {
 
 void init_texobj_common(GXTexObj_& obj, const void* data, u16 width, u16 height, u32 format, GXTexWrapMode wrapS,
                         GXTexWrapMode wrapT, GXBool mipmap) {
+  // GC hardware caps texture dimensions at 1024. Anything larger is corrupt
+  // caller data (classic: an unswapped big-endian header, e.g. 460 (0x01CC)
+  // read as 0xCC01 = 52225) and would read far past the image buffer at
+  // conversion time. Crash at the creator, where the backtrace names it.
+  ASSERT(width >= 1 && width <= 1024 && height >= 1 && height <= 1024,
+         "GXInitTexObj: dimensions {}x{} exceed GC hardware limits (byte-swapped: {}x{}) fmt={} data={}", width,
+         height, ((width & 0xFFu) << 8) | (width >> 8), ((height & 0xFFu) << 8) | (height >> 8), format, data);
   obj = {};
   obj.mWidth = width;
   obj.mHeight = height;
