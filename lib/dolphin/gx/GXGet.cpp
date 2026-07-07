@@ -317,7 +317,32 @@ GXTexWrapMode GXGetTexObjWrapT(GXTexObj* tex_obj) { return reinterpret_cast<cons
 
 GXBool GXGetTexObjMipMap(GXTexObj* tex_obj) { return reinterpret_cast<const GXTexObj_*>(tex_obj)->has_mips(); }
 
-// TODO GXGetTexObjAll
+void GXGetTexObjAll(const GXTexObj* tex_obj, void** image_ptr, u16* width, u16* height, GXTexFmt* fmt,
+                    GXTexWrapMode* wrap_s, GXTexWrapMode* wrap_t, GXBool* mip_map) {
+  const auto* obj = reinterpret_cast<const GXTexObj_*>(tex_obj);
+  if (image_ptr != nullptr) {
+    *image_ptr = const_cast<void*>(obj->data);
+  }
+  if (width != nullptr) {
+    *width = static_cast<u16>(obj->width());
+  }
+  if (height != nullptr) {
+    *height = static_cast<u16>(obj->height());
+  }
+  if (fmt != nullptr) {
+    *fmt = static_cast<GXTexFmt>(obj->format());
+  }
+  if (wrap_s != nullptr) {
+    *wrap_s = obj->wrap_s();
+  }
+  if (wrap_t != nullptr) {
+    *wrap_t = obj->wrap_t();
+  }
+  if (mip_map != nullptr) {
+    *mip_map = obj->has_mips();
+  }
+}
+
 // TODO GXGetTexObjMinFilt
 // TODO GXGetTexObjMagFilt
 // TODO GXGetTexObjMinLOD
