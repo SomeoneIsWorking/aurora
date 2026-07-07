@@ -167,7 +167,14 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   ASSERT(window::create_renderer(), "Failed to initialize SDL renderer: {}", SDL_GetError());
 #endif
 
-  window::show_window();
+  // SB_HEADLESS=1: keep the window hidden — diagnostic/CI runs render and
+  // dump frames without ever mapping an X11 window.
+  {
+    const char* e = std::getenv("SB_HEADLESS");
+    if (e == nullptr || e[0] == '\0' || e[0] == '0') {
+      window::show_window();
+    }
+  }
 
 #ifdef AURORA_ENABLE_GX
   gfx::initialize();

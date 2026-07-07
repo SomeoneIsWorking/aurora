@@ -1827,7 +1827,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                    "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
                    "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
                    "tev=%u ch0[light=%d matSrc=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
-                   "prj=[%.4f %.4f %.4f %.4f] pos[desc=%d cnt=%d type=%d frac=%u] mark='%s'\n",
+                   "prj=[%.4f %.4f %.4f %.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] mtxIdx=%u "
+                   "posmtx=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] mark='%s'\n",
                    s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(),
                    static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
                    pn[3], pn[7], pn[11], g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
@@ -1839,9 +1840,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                    reinterpret_cast<const float*>(&g_gxState.proj)[0],
                    reinterpret_cast<const float*>(&g_gxState.proj)[5],
                    reinterpret_cast<const float*>(&g_gxState.proj)[10],
-                   reinterpret_cast<const float*>(&g_gxState.proj)[11], static_cast<int>(posDesc),
+                   reinterpret_cast<const float*>(&g_gxState.proj)[11],
+                   g_gxState.colorUpdate ? 1 : 0, g_gxState.alphaUpdate ? 1 : 0,
+                   static_cast<int>(g_gxState.blendMode), static_cast<int>(g_gxState.blendFacSrc),
+                   static_cast<int>(g_gxState.blendFacDst), static_cast<int>(posDesc),
                    static_cast<int>(posFmt.cnt), static_cast<int>(posFmt.type), posFmt.frac,
-                   g_sbLastMarker.c_str());
+                   g_gxState.currentPnMtx, pn[0], pn[1], pn[2], pn[3], pn[4], pn[5], pn[6], pn[7],
+                   pn[8], pn[9], pn[10], pn[11], g_sbLastMarker.c_str());
     }
     ++s_dumped;
   }
