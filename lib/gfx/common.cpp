@@ -1201,6 +1201,15 @@ bool begin_frame() {
   set_efb_targets(pass);
   pass.clearColorValue = gx::g_gxState.clearColor;
   pass.clearDepthValue = gx::clear_depth_value();
+  // GC-faithful EFB persistence: a frame boundary never clears the EFB —
+  // only an explicit copy-clear (GXCopyTex/GXCopyDisp with clear=true)
+  // erases it. Games pipeline across frames relying on this (SMS draws its
+  // scene late in frame N and EFB-copies it early in frame N+1, before that
+  // copy's own clear). g_frameBuffer is a single shared texture and frames
+  // are submitted in order, so loading is well-defined; a freshly created
+  // texture lazy-clears to zero.
+  pass.clearColor = false;
+  pass.clearDepth = false;
   g_currentRenderPass = 0;
   // Refresh render viewport/scissor from logical in case FB size changed
   g_cachedViewport = gx::map_logical_viewport(gx::g_gxState.logicalViewport);
