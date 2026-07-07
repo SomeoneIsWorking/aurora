@@ -131,6 +131,11 @@ void aurora_shutdown();
 const AuroraEvent* aurora_update();
 bool aurora_begin_frame();
 void aurora_end_frame();
+/* Drop GX commands queued since the last frame without rendering them. For
+ * frames produced while the surface was unpresentable (minimized window):
+ * begin_frame returned false, end_frame must not run, but the fifo still has
+ * to be emptied or it grows without bound. */
+void aurora_discard_frame();
 
 void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);
