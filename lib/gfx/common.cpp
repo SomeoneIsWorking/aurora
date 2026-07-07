@@ -156,6 +156,11 @@ uint32_t g_drawCallCount = 0;
 uint32_t g_mergedDrawCallCount = 0;
 
 using CommandList = std::vector<Command>;
+// SB_PASS_DBG=1: log each render-pass boundary with the finished pass's
+// draw count and the new pass's clear flags — makes the per-frame pass
+// structure readable (who clears, where the scene draws land).
+static void sb_log_pass_boundary(const char* kind);
+
 struct RenderPass {
   std::string label;
   wgpu::TextureView colorView;
@@ -416,6 +421,27 @@ static FramePacket& current_frame_packet() {
 
 static RenderPassList& current_render_passes() { return current_frame_packet().renderPasses; }
 
+static void sb_log_pass_boundary(const char* kind) {
+  static int s_dbg = -1;
+  if (s_dbg < 0) {
+    const char* e = std::getenv("SB_PASS_DBG");
+    s_dbg = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  if (s_dbg == 0) {
+    return;
+  }
+  static long n = 0;
+  ++n;
+  if (g_currentRenderPass != UINT32_MAX && g_currentRenderPass < current_render_passes().size()) {
+    const auto& p = current_render_passes()[g_currentRenderPass];
+    std::fprintf(stderr, "[pass] n=%ld end '%s' cmds=%zu clearC=%d clearD=%d clr=(%.2f,%.2f,%.2f) -> new %s\n", n,
+                 p.label.c_str(), p.commands.size(), p.clearColor ? 1 : 0, p.clearDepth ? 1 : 0,
+                 p.clearColorValue.x(), p.clearColorValue.y(), p.clearColorValue.z(), kind);
+  } else {
+    std::fprintf(stderr, "[pass] n=%ld begin frame -> new %s\n", n, kind);
+  }
+}
+
 static StagingHighWater current_high_water(const FramePacket& frame) noexcept {
   return {
       .verts = static_cast<uint32_t>(frame.verts.size()),
@@ -555,6 +581,7 @@ void begin_color_pass(const ColorPassDescriptor& desc) {
   if (g_currentRenderPass != UINT32_MAX) {
     enqueue_pass(frame, g_recordingFrameSlot, g_currentRenderPass);
   }
+  sb_log_pass_boundary("color");
 
   RenderPass pass{
       .label = desc.label != nullptr ? desc.label : "",
@@ -674,6 +701,7 @@ PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
 
 void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
                   Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat) {
+  sb_log_pass_boundary("resolve");
   // Resolve current render pass
   auto& prevPass = current_render_passes()[g_currentRenderPass];
   prevPass.resolveTarget = std::move(texture);

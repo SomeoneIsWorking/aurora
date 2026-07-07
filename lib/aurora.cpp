@@ -300,6 +300,22 @@ void end_frame() noexcept {
         s_dumpFramesLeft = -1;
       }
     }
+    // SB_DUMP_FRAME_EVERY=N: instead of a one-shot, dump every N presents to
+    // <path>.<seq>.rgba — turbo timing varies run-to-run, so one fixed frame
+    // index samples a different game moment each run; a periodic series shows
+    // the whole boot/title progression from a single run.
+    static int s_dumpEvery = -1;
+    static int s_dumpSeq = 0;
+    static std::string s_dumpPathBuf;
+    if (s_dumpEvery < 0) {
+      const char* e = std::getenv("SB_DUMP_FRAME_EVERY");
+      s_dumpEvery = (e != nullptr && e[0] != '\0') ? std::atoi(e) : 0;
+    }
+    if (s_dumpFramesLeft == -4 && s_dumpEvery > 0 && s_dumpPath != nullptr) {
+      // previous dump finished; re-arm for the next periodic capture
+      s_dumpFramesLeft = s_dumpEvery;
+      ++s_dumpSeq;
+    }
     if (s_dumpFramesLeft > 0) {
       --s_dumpFramesLeft;
     } else if (s_dumpFramesLeft == 0) {
@@ -346,9 +362,14 @@ void end_frame() noexcept {
               Log.error("SB_DUMP_FRAME: GetConstMappedRange returned null");
               return;
             }
-            FILE* f = std::fopen(s_dumpPath, "wb");
+            const char* outPath = s_dumpPath;
+            if (s_dumpEvery > 0) {
+              s_dumpPathBuf = std::string(s_dumpPath) + "." + std::to_string(s_dumpSeq);
+              outPath = s_dumpPathBuf.c_str();
+            }
+            FILE* f = std::fopen(outPath, "wb");
             if (!f) {
-              Log.error("SB_DUMP_FRAME: fopen failed {}", s_dumpPath);
+              Log.error("SB_DUMP_FRAME: fopen failed {}", outPath);
             } else {
               for (uint32_t y = 0; y < s_dumpHeight; ++y) {
                 std::fwrite(mapped + static_cast<size_t>(y) * bpr, 1,
@@ -356,7 +377,7 @@ void end_frame() noexcept {
               }
               std::fclose(f);
               Log.info("SB_DUMP_FRAME: wrote {}x{} RGBA to {} ({} bytes)",
-                       s_dumpWidth, s_dumpHeight, s_dumpPath,
+                       s_dumpWidth, s_dumpHeight, outPath,
                        static_cast<size_t>(s_dumpWidth) * s_dumpHeight * 4);
             }
             s_dumpBuffer.Unmap();
