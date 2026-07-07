@@ -1201,15 +1201,18 @@ bool begin_frame() {
   set_efb_targets(pass);
   pass.clearColorValue = gx::g_gxState.clearColor;
   pass.clearDepthValue = gx::clear_depth_value();
-  // GC-faithful EFB persistence: a frame boundary never clears the EFB —
-  // only an explicit copy-clear (GXCopyTex/GXCopyDisp with clear=true)
-  // erases it. Games pipeline across frames relying on this (SMS draws its
-  // scene late in frame N and EFB-copies it early in frame N+1, before that
-  // copy's own clear). g_frameBuffer is a single shared texture and frames
-  // are submitted in order, so loading is well-defined; a freshly created
-  // texture lazy-clears to zero.
-  pass.clearColor = false;
-  pass.clearDepth = false;
+  // DEFERRED COPY-CLEAR MODEL (acknowledged middle ground, 2026-07-07):
+  // On GC the EFB persists across frames and is erased only by an explicit
+  // copy-clear (GXCopyTex/GXCopyDisp clear=true); SMS then repaints the
+  // copied scene from a screen texture. Reproducing that roundtrip
+  // pixel-faithfully is deep, still-uncharted machinery. Instead the
+  // copy-clear is DEFERRED to the next frame start: copy_tex() skips its
+  // clear and this first pass clears with the game's copy-clear color
+  // (g_gxState.clearColor, set by GXSetCopyClear). Net per frame:
+  // clear -> scene -> copy(no clear, correct content for samplers) -> 2D
+  // over the LIVE scene. Visually identical to GC when the screen-texture
+  // repaint is an identity repaint — and converges to fully faithful if a
+  // working repaint later covers the live scene with the same image.
   g_currentRenderPass = 0;
   // Refresh render viewport/scissor from logical in case FB size changed
   g_cachedViewport = gx::map_logical_viewport(gx::g_gxState.logicalViewport);
