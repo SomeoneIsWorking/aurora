@@ -75,15 +75,18 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
         .color = wgpu::Color{0.f, 0.f, 0.f, g_gxState.dstAlpha / 255.f},
     });
   }
-  // SB_NO_COPY_CLEAR=1 (diagnostic): suppress the copy's EFB clear so the
-  // scene content stays visible at present — separates "scene renders but is
-  // copy-cleared before present" from "scene draws emit no pixels at all".
-  static int s_noClear = -1;
-  if (s_noClear < 0) {
-    const char* e = std::getenv("SB_NO_COPY_CLEAR");
-    s_noClear = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  // DEFERRED COPY-CLEAR (see gfx::begin_frame): the copy resolves the live
+  // EFB (correct content for whoever samples it) but its clear is deferred
+  // to the next frame start, which clears with the same GXSetCopyClear
+  // color. Keeps the scene visible through the 2D pass instead of relying
+  // on the screen-texture repaint roundtrip. SB_COPY_CLEAR=1 restores the
+  // immediate GC-faithful clear for A/B diagnosis.
+  static int s_immediateClear = -1;
+  if (s_immediateClear < 0) {
+    const char* e = std::getenv("SB_COPY_CLEAR");
+    s_immediateClear = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
   }
-  const bool effClear = clear && s_noClear == 0;
+  const bool effClear = clear && s_immediateClear == 1;
   const auto clearColor = effClear && g_gxState.colorUpdate;
   const auto clearAlpha = effClear && g_gxState.alphaUpdate;
   const auto clearDepth = effClear && g_gxState.depthUpdate;

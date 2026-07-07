@@ -1766,13 +1766,16 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     if (s_dumped >= 200 && s_dumped < 400) {
       const auto& obj = g_gxState.textures[0].texObj;
       const auto* pn = reinterpret_cast<const float*>(&g_gxState.pnMtx[g_gxState.currentPnMtx].pos);
+      const auto& vp = g_gxState.logicalViewport;
+      const auto& sc = g_gxState.logicalScissor;
       std::fprintf(stderr,
                    "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
-                   "proj=%c blend=%u\n",
+                   "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u)\n",
                    s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(),
                    static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
                    pn[3], pn[7], pn[11], g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
-                   static_cast<unsigned>(g_gxState.blendMode));
+                   static_cast<unsigned>(g_gxState.blendMode), vp.left, vp.top, vp.width, vp.height,
+                   sc.x, sc.y, sc.width, sc.height);
     }
     ++s_dumped;
   }
