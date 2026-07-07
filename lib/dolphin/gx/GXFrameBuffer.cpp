@@ -75,9 +75,18 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
         .color = wgpu::Color{0.f, 0.f, 0.f, g_gxState.dstAlpha / 255.f},
     });
   }
-  const auto clearColor = clear && g_gxState.colorUpdate;
-  const auto clearAlpha = clear && g_gxState.alphaUpdate;
-  const auto clearDepth = clear && g_gxState.depthUpdate;
+  // SB_NO_COPY_CLEAR=1 (diagnostic): suppress the copy's EFB clear so the
+  // scene content stays visible at present — separates "scene renders but is
+  // copy-cleared before present" from "scene draws emit no pixels at all".
+  static int s_noClear = -1;
+  if (s_noClear < 0) {
+    const char* e = std::getenv("SB_NO_COPY_CLEAR");
+    s_noClear = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  const bool effClear = clear && s_noClear == 0;
+  const auto clearColor = effClear && g_gxState.colorUpdate;
+  const auto clearAlpha = effClear && g_gxState.alphaUpdate;
+  const auto clearDepth = effClear && g_gxState.depthUpdate;
   gfx::resolve_pass(handle.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor, clear_depth_value(),
                     texCopyFmt);
   ++handle.revision;
