@@ -1182,6 +1182,15 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
       vtxOutAttrs += fmt::format("\n    @location({}) cc{}: vec4f,", vtxOutIdx++, i);
       vtxXfrAttrs += lighting_func(config, cc, i, false);
       vtxXfrAttrs += lighting_func(config, cca, i, true);
+      // SB_DBG_IDX=1 (diagnostic, use with SB_FORCE_RAS): encode the fetched
+      // CLR0 vertex INDEX and vtx_start into the cc0 varying to visualize
+      // whether the vertex-stage vbuf index fetch is sane.
+      if (i == 0 && std::getenv("SB_DBG_IDX") != nullptr && config.attrs[GX_VA_CLR0].attrType == GX_INDEX16) {
+        vtxXfrAttrs += fmt::format(
+            "\n    out.cc0 = vec4f(f32(raw_fetch_u16_1(&vbuf, ubuf.vtx_start + vidx * {0}u + {1}u, false)) / "
+            "1024.0, f32(ubuf.vtx_start) / 16777216.0, f32(ubuf.array_start[2]) / 16777216.0, 1.0);",
+            config.vtxStride, config.attrs[GX_VA_CLR0].offset);
+      }
       fragmentFnPre += fmt::format("\n    var rast{0} = in.cc{0};", i);
     }
   }
@@ -1968,10 +1977,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
                                         fragmentFnPre, vtxXfrAttrsPre, uniformPre,
                                         // SB_FORCE_COLOR=1 (diagnostic): every fragment returns magenta —
                                         // bisects "TEV/texture outputs invisible" vs "geometry never rasterized".
-                                        std::getenv("SB_FORCE_COLOR") != nullptr
-                                            ? "vec4f(1.0, 0.0, 1.0, 1.0); // "
+                                        // SB_FORCE_RAS=1 (diagnostic): fragments return raster channel 0
+                                        // directly (alpha 1) — bisects "channel calc broken" vs "TEV broken".
+                                        std::getenv("SB_FORCE_COLOR") != nullptr ? "vec4f(1.0, 0.0, 1.0, 1.0); // "
+                                        : std::getenv("SB_FORCE_RAS") != nullptr &&
+                                                fragmentFnPre.find("var rast0") != std::string::npos
+                                            ? "vec4f(rast0.rgb, 1.0); // "
+                                        // SB_FORCE_ABUF=1: render the raw first word of the CLR0 array as
+                                        // seen by the GPU -- verifies the storage upload/copy end-to-end.
+                                        : std::getenv("SB_FORCE_ABUF") != nullptr
+                                            ? "vec4f(f32(abuf[(ubuf.array_start[2] >> 2u)] & 0xffu) / 255.0, "
+                                              "f32((abuf[(ubuf.array_start[2] >> 2u)] >> 8u) & 0xffu) / 255.0, "
+                                              "f32((abuf[(ubuf.array_start[2] >> 2u)] >> 16u) & 0xffu) / 255.0, "
+                                              "1.0); // "
                                             : "");
-  if (EnableDebugPrints) {
+  // SB_SHADER_DUMP=1: print every generated WGSL shader (hash-tagged).
+  if (EnableDebugPrints || std::getenv("SB_SHADER_DUMP") != nullptr) {
     Log.info("Generated shader (hash {:x}): {}", hash, shaderSource);
   }
 
