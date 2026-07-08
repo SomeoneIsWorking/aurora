@@ -1940,6 +1940,134 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     }
   }
 
+  // SB_LENS_UV_DBG=1 (diagnostic, title lens-flare-ghost crosshatch investigation):
+  // dump the raw per-vertex TEX0 UV (as actually read from the vertex attribute
+  // stream, direct or indexed) plus stage-0 texgen + bound texture size/wrap, for
+  // every draw marked "LensFlare" (TDrawBufObj name, set synchronously by
+  // J3DDrawBuffer::draw via GXInsertDebugMarker). Answers: do the big on-screen
+  // ghosts (#9-11) sample their sprite atlas with 0..1 (single map) or 0..N
+  // (tiling) UVs?
+  if (std::getenv("SB_LENS_UV_DBG") != nullptr && g_sbLastMarker.find("LensFlare") != std::string::npos) {
+    static long s_n = 0;
+    static long s_hit = 0;
+    if (s_hit < 40) {
+      ++s_hit;
+      const auto& hstage0 = g_gxState.tevStages[0];
+      int htexW = -1, htexH = -1, hwrapS = -1, hwrapT = -1;
+      if (hstage0.texMapId >= 0 && static_cast<unsigned>(hstage0.texMapId) < aurora::gx::MaxTextures) {
+        const auto& htobj = g_gxState.textures[hstage0.texMapId].texObj;
+        htexW = htobj.width();
+        htexH = htobj.height();
+        hwrapS = static_cast<int>(htobj.wrap_s());
+        hwrapT = static_cast<int>(htobj.wrap_t());
+      }
+      std::fprintf(stderr,
+                   "[lens-uv-hit] #%ld prim=%u verts=%u fmt=%d t0desc=%d t0type=%d t0cnt=%d t0frac=%u "
+                   "arrData=%p arrStride=%u numTevStages=%u tev0[texCoordId=%d texMapId=%d chanId=%d] "
+                   "tex=%dx%d wrap=(%d,%d) mark='%s'\n",
+                   s_hit, static_cast<unsigned>(prim), vtxCount, static_cast<int>(fmt),
+                   static_cast<int>(g_gxState.vtxDesc[GX_VA_TEX0]),
+                   static_cast<int>(g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0].type),
+                   static_cast<int>(g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0].cnt),
+                   g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0].frac, g_gxState.arrays[GX_VA_TEX0].data,
+                   g_gxState.arrays[GX_VA_TEX0].stride, g_gxState.numTevStages,
+                   static_cast<int>(hstage0.texCoordId), static_cast<int>(hstage0.texMapId),
+                   static_cast<int>(hstage0.channelId), htexW, htexH, hwrapS, hwrapT, g_sbLastMarker.c_str());
+    }
+    if (s_n < 400) {
+      const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+      const auto t0Desc = g_gxState.vtxDesc[GX_VA_TEX0];
+      // Offset of TEX0 within a vertex (same accumulation pattern as the CLR0
+      // probe above, extended up to GX_VA_TEX0).
+      u32 off = 0;
+      for (int a = GX_VA_PNMTXIDX; a < GX_VA_TEX0; ++a) {
+        switch (g_gxState.vtxDesc[a]) {
+        case GX_NONE:
+          break;
+        case GX_DIRECT:
+          off += (a < GX_VA_POS) ? 1
+                                  : comp_type_size(static_cast<GXAttr>(a), vtxFmt.attrs[a].type) *
+                                        comp_cnt_count(static_cast<GXAttr>(a), vtxFmt.attrs[a].cnt);
+          break;
+        case GX_INDEX8:
+          off += (a == GX_VA_NRM && vtxFmt.attrs[a].cnt == GX_NRM_NBT3) ? 3 : 1;
+          break;
+        case GX_INDEX16:
+          off += (a == GX_VA_NRM && vtxFmt.attrs[a].cnt == GX_NRM_NBT3) ? 6 : 2;
+          break;
+        }
+      }
+      const auto& t0Fmt = vtxFmt.attrs[GX_VA_TEX0];
+      const auto& tcg = g_gxState.tcgs[0];
+      const auto& t0Stage = g_gxState.tevStages[0];
+      int texW = -1, texH = -1, wrapS = -1, wrapT = -1;
+      if (t0Stage.texMapId >= 0 && static_cast<unsigned>(t0Stage.texMapId) < aurora::gx::MaxTextures) {
+        const auto& tobj = g_gxState.textures[t0Stage.texMapId].texObj;
+        texW = tobj.width();
+        texH = tobj.height();
+        wrapS = static_cast<int>(tobj.wrap_s());
+        wrapT = static_cast<int>(tobj.wrap_t());
+      }
+      const u8 csz = comp_type_size(GX_VA_TEX0, t0Fmt.type);
+      const bool has2 = comp_cnt_count(GX_VA_TEX0, t0Fmt.cnt) > 1;
+      for (u32 v = 0; v < std::min<u32>(vtxCount, 4); ++v) {
+        const u8* vp = data + pos + v * vtxSize;
+        const u8* src = nullptr;
+        bool le = true;
+        if (t0Desc == GX_DIRECT) {
+          src = vp + off;
+        } else if ((t0Desc == GX_INDEX8 || t0Desc == GX_INDEX16) && g_gxState.arrays[GX_VA_TEX0].data != nullptr) {
+          const u32 idx = t0Desc == GX_INDEX16 ? read_u16(vp + off, true) : vp[off];
+          const auto& arr = g_gxState.arrays[GX_VA_TEX0];
+          src = static_cast<const u8*>(arr.data) + idx * arr.stride;
+          le = arr.le;
+        }
+        if (src == nullptr) continue;
+        auto readComp = [&](const u8* p) -> float {
+          switch (t0Fmt.type) {
+          case GX_U8:
+            return static_cast<float>(p[0]);
+          case GX_S8:
+            return static_cast<float>(static_cast<s8>(p[0]));
+          case GX_U16: {
+            u16 x;
+            std::memcpy(&x, p, 2);
+            if (!le) x = static_cast<u16>((x << 8) | (x >> 8));
+            return static_cast<float>(x);
+          }
+          case GX_S16: {
+            u16 x;
+            std::memcpy(&x, p, 2);
+            if (!le) x = static_cast<u16>((x << 8) | (x >> 8));
+            return static_cast<float>(static_cast<s16>(x));
+          }
+          case GX_F32: {
+            u32 xi;
+            std::memcpy(&xi, p, 4);
+            if (!le) xi = __builtin_bswap32(xi);
+            float f;
+            std::memcpy(&f, &xi, 4);
+            return f;
+          }
+          default:
+            return 0.f;
+          }
+        };
+        const float invFrac = 1.f / static_cast<float>(1u << t0Fmt.frac);
+        const float u = readComp(src) * invFrac;
+        const float w = has2 ? readComp(src + csz) * invFrac : 0.f;
+        ++s_n;
+        std::fprintf(stderr,
+                     "[lens-uv] #%ld v=%u desc=%d type=%d cnt=%d frac=%u uv=(%.4f,%.4f) tex=%dx%d wrap=(%d,%d) "
+                     "tcg[src=%d mtx=%d type=%d] verts=%u proj=%c mark='%s'\n",
+                     s_n, v, static_cast<int>(t0Desc), static_cast<int>(t0Fmt.type), static_cast<int>(t0Fmt.cnt),
+                     t0Fmt.frac, u, w, texW, texH, wrapS, wrapT, static_cast<int>(tcg.src), static_cast<int>(tcg.mtx),
+                     static_cast<int>(tcg.type), vtxCount, g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
+                     g_sbLastMarker.c_str());
+      }
+    }
+  }
+
   // AUTO ARRAY SIZING: arrays registered with size 0 (J3D's "trust" contract)
   // previously uploaded ZERO bytes — no indexed vertex attribute data ever
   // reached the GPU, so every INDEX8/INDEX16 J3D model rendered from an empty
