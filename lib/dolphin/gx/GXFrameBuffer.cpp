@@ -32,6 +32,8 @@ aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
 } // namespace
 
 namespace aurora::gx {
+extern "C" const char* sb_gx_last_marker();
+
 void copy_tex(const void* dest, GXBool clear) noexcept {
   const auto rect = map_logical_scissor(g_gxState.texCopySrc);
   const auto [dstWidth, dstHeight] = scale_copy_dst(g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight);
@@ -96,10 +98,12 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   g_gxState.copyTextures[dest] = handle;
   if (std::getenv("SB_COPY_DBG") != nullptr) {
     static long n = 0;
-    if ((++n % 200) == 0 || n <= 4)
-      std::fprintf(stderr, "[copy-tex] n=%ld dest=%p %ux%u fmt=%u clear=%d rect=(%d,%d %ux%u)\n", n, dest, dstWidth,
-                   dstHeight, static_cast<unsigned>(texCopyFmt), static_cast<int>(clear), rect.x, rect.y, rect.width,
-                   rect.height);
+    if (n < 40)
+      std::fprintf(stderr, "[copy-tex] n=%ld dest=%p %ux%u fmt=%u clear=%d rect=(%d,%d %ux%u) mark='%s'\n", ++n, dest,
+                   dstWidth, dstHeight, static_cast<unsigned>(texCopyFmt), static_cast<int>(clear), rect.x, rect.y,
+                   rect.width, rect.height, sb_gx_last_marker());
+    else
+      ++n;
   }
 }
 } // namespace aurora::gx

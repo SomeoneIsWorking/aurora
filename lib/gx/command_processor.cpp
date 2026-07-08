@@ -25,6 +25,9 @@ static Module Log("aurora::gx::fifo");
 // Last debug marker seen in the stream — names the draw-buffer/pass each
 // subsequent draw belongs to (printed by SB_DRAW_DUMP).
 static thread_local std::string g_sbLastMarker;
+// Exposed for cross-TU diagnostics (e.g. copy_tex logging which J3D buffer/2D
+// element a GXCopyTex follows).
+extern "C" const char* sb_gx_last_marker() { return g_sbLastMarker.c_str(); }
 
 static u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) {
   u16 numIndices = 0;
@@ -2195,6 +2198,49 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   }
   if (s_skipOrtho == 1 && g_gxState.projType == GX_ORTHOGRAPHIC) {
     return;
+  }
+  // SB_SKIP_PERSP=1: complement of SKIP_ORTHO — drop perspective draws to see
+  // ONLY the 2D/ortho layer's contribution.
+  static int s_skipPersp = -1;
+  if (s_skipPersp < 0) {
+    const char* e = std::getenv("SB_SKIP_PERSP");
+    s_skipPersp = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  if (s_skipPersp == 1 && g_gxState.projType != GX_ORTHOGRAPHIC) {
+    return;
+  }
+  // SB_SKIP_MARK=<substr>[,<substr>...]: drop every draw whose current
+  // draw-identity marker contains any listed substring — isolate which J3D
+  // buffer (Mirror / LensFlare / MapOpa / Sky...) causes an artifact by
+  // removing it. SB_SKIP_ADD=1: drop additive draws (src=SRCALPHA dst=ONE),
+  // the glow/flare accumulation class.
+  {
+    static int s_init = 0;
+    static const char* s_skipMark = nullptr;
+    static int s_skipAdd = 0;
+    if (!s_init) {
+      s_init = 1;
+      s_skipMark = std::getenv("SB_SKIP_MARK");
+      const char* a = std::getenv("SB_SKIP_ADD");
+      s_skipAdd = (a != nullptr && a[0] != '\0' && a[0] != '0') ? 1 : 0;
+    }
+    if (s_skipMark != nullptr && !g_sbLastMarker.empty()) {
+      const std::string_view marks(s_skipMark);
+      size_t start = 0;
+      while (start <= marks.size()) {
+        size_t comma = marks.find(',', start);
+        const auto tok = marks.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
+        if (!tok.empty() && g_sbLastMarker.find(tok) != std::string::npos) {
+          return;
+        }
+        if (comma == std::string_view::npos) break;
+        start = comma + 1;
+      }
+    }
+    if (s_skipAdd == 1 && g_gxState.blendMode == GX_BM_BLEND &&
+        g_gxState.blendFacSrc == GX_BL_SRCALPHA && g_gxState.blendFacDst == GX_BL_ONE) {
+      return;
+    }
   }
   // SB_ORTHO_DBG=1: per ORTHO draw, log verts + tex dims + TEV/blend/channel
   // + whether it samples a copy — to identify the fullscreen white 2D quad
