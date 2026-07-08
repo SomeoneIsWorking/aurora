@@ -554,7 +554,21 @@ static inline std::string vtx_attr(const ShaderConfig& config, GXAttr attr) {
       return "vec3f(1.0, 0.0, 0.0)"s;
     }
     if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) {
-      return "vec4f(0.0, 0.0, 0.0, 0.0)"s;
+      // GC XF channel-color default when the VCD doesn't supply CLR0/CLR1 is
+      // opaque WHITE (1,1,1,1), not black -- see GX hardware/Dolphin
+      // (VertexLoaderManager default channel color). This feeds directly
+      // into the lit-material ambSrc/matSrc==GX_SRC_VTX path (lighting_func,
+      // ~line 792/801 below): a lit map/sea/logo material that has no baked
+      // vertex-color stream (dynamic-light-only shading, common for BG
+      // geometry) used to get ambSrc/matSrc == vec4f(0) here, zeroing the
+      // whole `lighting = ambSrc + sum(light diffuse)` accumulator before
+      // the final clamp(0,1)*mat -- i.e. every such material rendered
+      // black regardless of correct light data. Unlit vertex-colored shapes
+      // (e.g. the title sky dome, matSrc=VTX with a REAL CLR0 stream) were
+      // unaffected, which is why only lit materials without vertex colors
+      // went dark. Was previously wrongly zeroed to match the (correct, but
+      // different) texcoord-default case just below.
+      return "vec4f(1.0, 1.0, 1.0, 1.0)"s;
     }
     if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) {
       // A texgen sources a UV set the draw's VCD doesn't supply. GC XF reads

@@ -2419,7 +2419,22 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     pos += 4;
     slot.tlut = static_cast<GXTlut>(read_u32(data + pos, bigEndian));
     pos += 4;
-    if (data[pos] != 0) {
+    // Real mip level count (1 == base level only). GXTexObj_::mip_count()
+    // gates entirely on flags-bit0 (has_mips); slot.mode1's max_lod field
+    // (bits [8:15], Q4.4) is populated separately and earlier in this same
+    // command stream by the real TexMode1 BP register write that
+    // J3DGDSetTexLookupMode already emits per bind (decode_tex_bp_reg's
+    // Kind::Mode1 case above does `slot.mode1 = value` verbatim from actual
+    // hardware register state) -- this opcode must not clobber it, only
+    // gate whether it's honored. Previously this byte was hardcoded to 0
+    // ("no mips") for every GD-context texture bind regardless of the
+    // source asset's real mip chain, so mip_count() always collapsed to 1
+    // even when mode1's max_lod was already correct. Minifying a repeating
+    // pattern with no mip filtering aliases into a fine regular
+    // moire/crosshatch; the sky's 8x8 I4 cloud texture (tiled many times
+    // across the dome) is the worst-case instance of this general gap.
+    const u8 mipCount = data[pos];
+    if (mipCount > 1) {
       slot.flags |= 1u;
     } else {
       slot.flags &= ~1u;
