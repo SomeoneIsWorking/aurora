@@ -2010,6 +2010,36 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
       .nextInChain = &wgslDescriptor,
       .label = label.c_str(),
   };
-  return webgpu::g_device.CreateShaderModule(&shaderDescriptor);
+  auto module = webgpu::g_device.CreateShaderModule(&shaderDescriptor);
+  // SB_SHADER_CHECK=1: synchronously pull the WGSL->backend compilation info
+  // for THIS module and, on any error/warning, print the hash + message +
+  // the full offending WGSL. The device error callback prints Dawn's SPIRV
+  // text but not which shader it belongs to; this closes that gap.
+  {
+    static int s_chk = -1;
+    if (s_chk < 0) {
+      const char* e = std::getenv("SB_SHADER_CHECK");
+      s_chk = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    }
+    if (s_chk == 1) {
+      const auto future = module.GetCompilationInfo(
+          wgpu::CallbackMode::WaitAnyOnly,
+          [&](wgpu::CompilationInfoRequestStatus status, const wgpu::CompilationInfo* info) {
+            if (info == nullptr) return;
+            for (size_t i = 0; i < info->messageCount; ++i) {
+              const auto& m = info->messages[i];
+              if (m.type == wgpu::CompilationMessageType::Error ||
+                  m.type == wgpu::CompilationMessageType::Warning) {
+                std::fprintf(stderr, "[shader-check] hash=%zx type=%d line=%llu: %.*s\n",
+                             static_cast<size_t>(hash), static_cast<int>(m.type),
+                             static_cast<unsigned long long>(m.lineNum), static_cast<int>(m.message.length),
+                             m.message.data);
+              }
+            }
+          });
+      webgpu::g_instance.WaitAny(future, 5000000000);
+    }
+  }
+  return module;
 }
 } // namespace aurora::gx
