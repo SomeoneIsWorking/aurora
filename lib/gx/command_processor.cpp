@@ -2236,6 +2236,35 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
     }
   }
+  // TEMP crosshatch-hunt: dump EVERY texture bound on EVERY draw marked
+  // "Sky Xlu" (not just 8x8) so we can see the 16x16/64x64 phantom texobjs
+  // directly at draw time (bake-time inspection at the CPU J3DTevs.cpp side
+  // proved TSky's OWN materials bind the correct sky.bmt textures, so
+  // whatever draws the crosshatch must be a DIFFERENT material entering the
+  // same shared "DrawBuf Sky Xlu" — this dump identifies it by its GPU-side
+  // texture binding, independent of which CPU material baked it).
+  if (std::getenv("SB_XH_GPU_DBG") != nullptr
+      && g_sbLastMarker.find("Sky Xlu") != std::string::npos) {
+    static long s_n = 0;
+    if (s_n < 200) {
+      for (unsigned st = 0; st < g_gxState.numTevStages; ++st) {
+        const auto& s = g_gxState.tevStages[st];
+        if (s.texMapId < 0 || static_cast<unsigned>(s.texMapId) >= aurora::gx::MaxTextures)
+          continue;
+        const auto& tobj = g_gxState.textures[s.texMapId].texObj;
+        ++s_n;
+        const auto& vp = g_gxState.logicalViewport;
+        std::fprintf(stderr,
+                     "[xh-gpu] #%ld prim=%u verts=%u stage=%u texMap=%d fmt=%d %ux%u "
+                     "wrapS=%d wrapT=%d proj=%c vp=(%.0f,%.0f %.0fx%.0f) numTexGens=%u\n",
+                     s_n, static_cast<unsigned>(prim), vtxCount, st,
+                     static_cast<int>(s.texMapId), static_cast<int>(tobj.format()), tobj.width(),
+                     tobj.height(), static_cast<int>(tobj.wrap_s()), static_cast<int>(tobj.wrap_t()),
+                     g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', vp.left, vp.top, vp.width,
+                     vp.height, g_gxState.numTexGens);
+      }
+    }
+  }
   // SB_SKIP_TEV3=1 (diagnostic, title-logo wash investigation): drop any draw
   // configured with >=3 TEV stages. Isolates whether the J2DPicture
   // black/white "duotone" recolor stage (title_parts_NN.bti overlay quads,
