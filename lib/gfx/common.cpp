@@ -31,6 +31,9 @@
 
 #include "tracy/Tracy.hpp"
 
+extern "C" void sb_timeline_frame();
+extern "C" void sb_timeline_log(const char* fmt, ...);
+
 namespace aurora::gfx {
 static Module Log("aurora::gfx");
 
@@ -1229,6 +1232,9 @@ bool begin_frame() {
   set_efb_targets(pass);
   pass.clearColorValue = gx::g_gxState.clearColor;
   pass.clearDepthValue = gx::clear_depth_value();
+  sb_timeline_frame();
+  sb_timeline_log("begin_frame CLEAR efb color=(%.2f,%.2f,%.2f)", pass.clearColorValue.x(),
+                  pass.clearColorValue.y(), pass.clearColorValue.z());
   // SB_CLEAR_OVERRIDE=RRGGBB (hex, diagnostic): force the frame-start clear
   // to a known color — separates "what value is cleared" from "how the clear
   // reaches the screen" when chasing channel-order/stale-color defects.

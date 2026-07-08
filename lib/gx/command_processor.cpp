@@ -1,4 +1,5 @@
 #include "command_processor.hpp"
+#include <cstdarg>
 
 #include "fifo.hpp"
 
@@ -28,6 +29,38 @@ static thread_local std::string g_sbLastMarker;
 // Exposed for cross-TU diagnostics (e.g. copy_tex logging which J3D buffer/2D
 // element a GXCopyTex follows).
 extern "C" const char* sb_gx_last_marker() { return g_sbLastMarker.c_str(); }
+
+// SB_TIMELINE: ordered per-frame event log shared across TUs (marker changes,
+// copies, clears, present) to reconstruct the GC multi-pass frame sequence.
+static long g_sbTimelineStart = -1;
+extern "C" int sb_timeline_enabled() {
+  static int s = -1;
+  if (s < 0) {
+    const char* e = std::getenv("SB_TIMELINE");
+    s = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    // SB_TIMELINE=<startFrame> captures a 3-frame window from that frame.
+    g_sbTimelineStart = (s == 1 && e != nullptr) ? std::atol(e) : 0;
+    if (g_sbTimelineStart < 1) g_sbTimelineStart = 0;
+  }
+  return s;
+}
+static thread_local long g_sbTimelineFrame = 0;
+static thread_local long g_sbTimelineSeq = 0;
+extern "C" void sb_timeline_log(const char* fmt, ...) {
+  if (!sb_timeline_enabled()) return;
+  if (g_sbTimelineFrame < g_sbTimelineStart || g_sbTimelineFrame > g_sbTimelineStart + 2) return;
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  std::vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  std::fprintf(stderr, "[timeline] f%ld #%ld %s\n", g_sbTimelineFrame, g_sbTimelineSeq++, buf);
+}
+extern "C" void sb_timeline_frame() {
+  if (sb_timeline_enabled() && g_sbTimelineFrame >= g_sbTimelineStart && g_sbTimelineFrame <= g_sbTimelineStart + 2)
+    std::fprintf(stderr, "[timeline] ===== FRAME %ld =====\n", g_sbTimelineFrame);
+  ++g_sbTimelineFrame;
+}
 
 static u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) {
   u16 numIndices = 0;
@@ -2535,6 +2568,11 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     pop_debug_group();
   } else if (subCmd == GX_AURORA_DEBUG_MARKER_INSERT) {
     auto label = read_string(data, pos, size, bigEndian);
+    // SB_TIMELINE: ordered per-frame event log (marker changes + copies +
+    // clears) to reconstruct the exact GC multi-pass sequence.
+    if (sb_timeline_enabled() && label != g_sbLastMarker) {
+      sb_timeline_log("draws '%s'", label.c_str());
+    }
     g_sbLastMarker = label; // draw-identity for SB_DRAW_DUMP
     gfx::insert_debug_marker(std::move(label));
   }

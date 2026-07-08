@@ -33,6 +33,8 @@ aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
 
 namespace aurora::gx {
 extern "C" const char* sb_gx_last_marker();
+extern "C" int sb_timeline_enabled();
+extern "C" void sb_timeline_log(const char* fmt, ...);
 
 void copy_tex(const void* dest, GXBool clear) noexcept {
   const auto rect = map_logical_scissor(g_gxState.texCopySrc);
@@ -77,21 +79,31 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
         .color = wgpu::Color{0.f, 0.f, 0.f, g_gxState.dstAlpha / 255.f},
     });
   }
-  // DEFERRED COPY-CLEAR (see gfx::begin_frame): the copy resolves the live
-  // EFB (correct content for whoever samples it) but its clear is deferred
-  // to the next frame start, which clears with the same GXSetCopyClear
-  // color. Keeps the scene visible through the 2D pass instead of relying
-  // on the screen-texture repaint roundtrip. SB_COPY_CLEAR=1 restores the
-  // immediate GC-faithful clear for A/B diagnosis.
-  static int s_immediateClear = -1;
-  if (s_immediateClear < 0) {
-    const char* e = std::getenv("SB_COPY_CLEAR");
-    s_immediateClear = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  // GC-FAITHFUL IMMEDIATE COPY-CLEAR (default). A GXCopyTex/GXCopyDisp with
+  // clear=true resolves the EFB to the destination texture AND clears the EFB,
+  // so a subsequent render pass starts fresh. The SMS title (and any scene
+  // using TEfbCtrlTex reflection/capture passes) renders: Pass 1 (capture
+  // source) -> GXCopyTex(clear=true) -> Pass 2 (main scene, samples the
+  // capture) -> display copy. Honoring the clear keeps Pass 1 out of the
+  // displayed EFB. The OLD deferred-clear model (SB_DEFER_COPY_CLEAR=1)
+  // deferred this to the next frame start, which — once textures actually
+  // rendered — let Pass 1's fullscreen capture-source render accumulate under
+  // Pass 2 and saturate the frame white. Deferred is kept only as an A/B
+  // escape hatch; do not rely on it (it converges to wrong).
+  static int s_deferClear = -1;
+  if (s_deferClear < 0) {
+    const char* e = std::getenv("SB_DEFER_COPY_CLEAR");
+    s_deferClear = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
   }
-  const bool effClear = clear && s_immediateClear == 1;
+  const bool effClear = clear && s_deferClear == 0;
   const auto clearColor = effClear && g_gxState.colorUpdate;
   const auto clearAlpha = effClear && g_gxState.alphaUpdate;
   const auto clearDepth = effClear && g_gxState.depthUpdate;
+  if (sb_timeline_enabled()) {
+    sb_timeline_log("COPY %ux%u fmt=%u clear=%d (deferred=%d) after '%s'", dstWidth, dstHeight,
+                    static_cast<unsigned>(texCopyFmt), static_cast<int>(clear), effClear ? 0 : (clear ? 1 : 0),
+                    sb_gx_last_marker());
+  }
   gfx::resolve_pass(handle.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor, clear_depth_value(),
                     texCopyFmt);
   ++handle.revision;
