@@ -886,7 +886,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
   ZoneScoped;
   const auto hash = xxh3_hash(config);
   const auto info = build_shader_info(config);
-  if (EnableDebugPrints && !g_seenShaders.contains(hash)) {
+  if ((EnableDebugPrints || std::getenv("SB_SHADER_DUMP") != nullptr) && !g_seenShaders.contains(hash)) {
     g_seenShaders.insert(hash);
 
     Log.info("Shader config (hash {:x}):", hash);

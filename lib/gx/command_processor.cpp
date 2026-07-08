@@ -2203,6 +2203,38 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
     ++s_dumped;
   }
+  // SB_CLOUD_TC_DBG=1 (diagnostic, title sky crosshatch investigation): fire
+  // whenever ANY bound texture in ANY tev stage is 8x8 (the cloud-puff
+  // texture per scratch/oracle/cloud_ground_truth.txt), regardless of which
+  // TDrawBufObj marker is active. Dumps that stage's texgen (src/mtx/type)
+  // and the texture's actual wrap mode, to compare against the oracle's
+  // "identity texgen, raw-UV passthrough, wrap Clamp/Clamp" ground truth.
+  if (std::getenv("SB_CLOUD_TC_DBG") != nullptr) {
+    static long s_nSky = 0, s_nOther = 0;
+    bool isSky = g_sbLastMarker.find("Sky") != std::string::npos;
+    if (isSky ? s_nSky < 4000 : s_nOther < 5) {
+    for (unsigned st = 0; st < g_gxState.numTevStages; ++st) {
+      const auto& s = g_gxState.tevStages[st];
+      if (s.texMapId < 0 || static_cast<unsigned>(s.texMapId) >= aurora::gx::MaxTextures)
+        continue;
+      const auto& tobj = g_gxState.textures[s.texMapId].texObj;
+      if (tobj.width() == 8 && tobj.height() == 8) {
+        long& s_n = isSky ? s_nSky : s_nOther;
+        ++s_n;
+        unsigned tc = static_cast<unsigned>(s.texCoordId);
+        const auto& tcg = (tc < aurora::gx::MaxTexCoord) ? g_gxState.tcgs[tc] : g_gxState.tcgs[0];
+        std::fprintf(stderr,
+                     "[cloud-tc] #%ld mark='%s' stage=%u texMap=%d texCoord=%u fmt=%d wrapS=%d wrapT=%d "
+                     "numTexGens=%u tcg[src=%d mtx=%d type=%d post=%d norm=%d]\n",
+                     s_n, g_sbLastMarker.c_str(), st, static_cast<int>(s.texMapId), tc,
+                     static_cast<int>(tobj.format()), static_cast<int>(tobj.wrap_s()),
+                     static_cast<int>(tobj.wrap_t()), g_gxState.numTexGens,
+                     static_cast<int>(tcg.src), static_cast<int>(tcg.mtx), static_cast<int>(tcg.type),
+                     static_cast<int>(tcg.postMtx), static_cast<int>(tcg.normalize));
+      }
+    }
+    }
+  }
   // SB_SKIP_TEV3=1 (diagnostic, title-logo wash investigation): drop any draw
   // configured with >=3 TEV stages. Isolates whether the J2DPicture
   // black/white "duotone" recolor stage (title_parts_NN.bti overlay quads,
@@ -2274,7 +2306,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
     if (s_shHash == 1) {
       static long n = 0;
-      if (++n <= 3000)
+      if (++n <= 30000)
         std::fprintf(stderr, "[draw-shader] n=%ld hash=%zx proj=%c verts=%u mark='%s'\n", n,
                      static_cast<size_t>(xxh3_hash(config.shaderConfig)),
                      g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', vtxCount, g_sbLastMarker.c_str());
