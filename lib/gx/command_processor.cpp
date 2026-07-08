@@ -26,6 +26,7 @@ static Module Log("aurora::gx::fifo");
 // Last debug marker seen in the stream — names the draw-buffer/pass each
 // subsequent draw belongs to (printed by SB_DRAW_DUMP).
 static thread_local std::string g_sbLastMarker;
+static thread_local int g_sbMarkerDrawIdx = 0; // Nth draw since the current marker began (SB_SKIP_SKY_IDX)
 // Exposed for cross-TU diagnostics (e.g. copy_tex logging which J3D buffer/2D
 // element a GXCopyTex follows).
 extern "C" const char* sb_gx_last_marker() { return g_sbLastMarker.c_str(); }
@@ -2379,6 +2380,106 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       return;
     }
   }
+  // SB_SKIP_TEXDIM=WxH[,WxH...] (diagnostic, title sky crosshatch isolation):
+  // drop any draw whose tex0 dims match one of the listed sizes, regardless
+  // of marker. Used to bisect which of the small Sky-Xlu quads (16x16,
+  // 64x64, 128x128, 16x64, 256x256) produces the moire.
+  {
+    static int s_init = 0;
+    static const char* s_skipTexDim = nullptr;
+    if (!s_init) {
+      s_init = 1;
+      s_skipTexDim = std::getenv("SB_SKIP_TEXDIM");
+    }
+    if (std::getenv("SB_SKY_DIM_DBG") != nullptr && g_sbLastMarker.find("Sky") != std::string::npos) {
+      static long n = 0;
+      const auto& obj0 = g_gxState.textures[0].texObj;
+      if (++n <= 4000000)
+        std::fprintf(stderr, "[sky-dim] n=%ld tex0=%ux%u mark='%s'\n", n, obj0.width(), obj0.height(),
+                     g_sbLastMarker.c_str());
+    }
+    if (s_skipTexDim != nullptr && g_sbLastMarker.find("Sky") != std::string::npos) {
+      const auto& obj0 = g_gxState.textures[0].texObj;
+      char buf[16];
+      std::snprintf(buf, sizeof(buf), "%ux%u", obj0.width(), obj0.height());
+      const std::string_view dims(s_skipTexDim);
+      size_t start = 0;
+      while (start <= dims.size()) {
+        size_t comma = dims.find(',', start);
+        const auto tok = dims.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
+        if (!tok.empty() && tok == buf) {
+          if (std::getenv("SB_SKIP_TEXDIM_DBG")) {
+            static long n = 0;
+            if (++n <= 50)
+              std::fprintf(stderr, "[skip-texdim] matched %s mark='%s'\n", buf, g_sbLastMarker.c_str());
+          }
+          return;
+        }
+        if (comma == std::string_view::npos) break;
+        start = comma + 1;
+      }
+    }
+  }
+  // SB_SKIP_SKY_IDX=<n>[,<n>...] (diagnostic, title sky crosshatch
+  // bisection): skip the Nth draw (0-based) since 'DrawBuf Sky Xlu' began as
+  // a marker group, regardless of texture dims/wrap — texture dims reported
+  // here can diverge from the dims at draw-dump time (resolve_sampled_textures
+  // may rebind/resize the slot), so counting draws within the marker is the
+  // only reliable way to name a specific quad. The Sky Xlu group is 9 draws:
+  // 0=16x16(far,Mirror) 1,2=128x128(far) 3=64x64(near,Mirror) 4,5,6=16x64(near)
+  // 7=256x256(near) 8=202vert dome(untextured).
+  {
+    static const char* s_skipIdx = nullptr;
+    static int s_init = 0;
+    if (!s_init) {
+      s_init = 1;
+      s_skipIdx = std::getenv("SB_SKIP_SKY_IDX");
+    }
+    bool matched = false;
+    if (s_skipIdx != nullptr && g_sbLastMarker == "DrawBuf Sky Xlu") {
+      char buf[16];
+      std::snprintf(buf, sizeof(buf), "%d", g_sbMarkerDrawIdx);
+      const std::string_view idxs(s_skipIdx);
+      size_t start = 0;
+      while (start <= idxs.size()) {
+        size_t comma = idxs.find(',', start);
+        const auto tok = idxs.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
+        if (!tok.empty() && tok == buf) { matched = true; break; }
+        if (comma == std::string_view::npos) break;
+        start = comma + 1;
+      }
+    }
+    ++g_sbMarkerDrawIdx;
+    if (matched) return;
+  }
+  // SB_SKIP_MIRROR_FAR / SB_SKIP_MIRROR_NEAR (diagnostic, title sky
+  // crosshatch bisection): the sky material draws two Mirror-wrapped quads
+  // (per SB_SKIP_TEXDIM survey) under two different translation clusters —
+  // a "far" quad (posmtx translate.x > 10000, huge world-space offset,
+  // 16x16 tex) and a "near" quad (translate near origin, 64x64 tex, part of
+  // the sun/glow group). Skip each independently to see which one is the
+  // crosshatch source.
+  {
+    const char* far = std::getenv("SB_SKIP_MIRROR_FAR");
+    const char* near = std::getenv("SB_SKIP_MIRROR_NEAR");
+    const char* dbg = std::getenv("SB_SKIP_MIRROR_DBG");
+    if ((far != nullptr || near != nullptr || dbg != nullptr) && g_sbLastMarker.find("Sky") != std::string::npos) {
+      const auto& obj0 = g_gxState.textures[0].texObj;
+      if (obj0.wrap_s() == GX_MIRROR || obj0.wrap_t() == GX_MIRROR) {
+        const auto* pn = reinterpret_cast<const float*>(&g_gxState.pnMtx[g_gxState.currentPnMtx].pos);
+        bool isFar = std::fabs(pn[3]) > 10000.0f;
+        if (dbg != nullptr) {
+          static long n = 0;
+          if (++n <= 200)
+            std::fprintf(stderr, "[skip-mirror] far=%d tex=%ux%u trans=%.1f\n", isFar ? 1 : 0, obj0.width(),
+                         obj0.height(), pn[3]);
+        }
+        if ((isFar && far != nullptr) || (!isFar && near != nullptr)) {
+          return;
+        }
+      }
+    }
+  }
   // SB_ORTHO_DBG=1: per ORTHO draw, log verts + tex dims + TEV/blend/channel
   // + whether it samples a copy — to identify the fullscreen white 2D quad
   // washing the scene. Prints the FULL final-pass 2D overlay set of a frame.
@@ -2693,6 +2794,7 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
       sb_timeline_log("draws '%s'", label.c_str());
     }
     g_sbLastMarker = label; // draw-identity for SB_DRAW_DUMP
+    g_sbMarkerDrawIdx = 0;  // reset per-marker draw counter (SB_SKIP_SKY_IDX)
     gfx::insert_debug_marker(std::move(label));
   }
 
