@@ -2196,6 +2196,34 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   if (s_skipOrtho == 1 && g_gxState.projType == GX_ORTHOGRAPHIC) {
     return;
   }
+  // SB_ORTHO_DBG=1: per ORTHO draw, log verts + tex dims + TEV/blend/channel
+  // + whether it samples a copy — to identify the fullscreen white 2D quad
+  // washing the scene. Prints the FULL final-pass 2D overlay set of a frame.
+  {
+    static int s_orthoDbg = -1;
+    if (s_orthoDbg < 0) {
+      const char* e = std::getenv("SB_ORTHO_DBG");
+      s_orthoDbg = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    }
+    if (s_orthoDbg == 1 && g_gxState.projType == GX_ORTHOGRAPHIC) {
+      static long n = 0;
+      if (++n <= 600) {
+        const auto& obj = g_gxState.textures[0].texObj;
+        const auto& t0 = g_gxState.tevStages[0];
+        std::fprintf(stderr,
+                     "[ortho] n=%ld verts=%u tex0=%ux%u tev=%u samplesCopy=%d bm=%d bf=%d/%d cU=%d aU=%d "
+                     "ch0[light=%d matSrc=%d] tev0C[a=%d b=%d c=%d d=%d] mark='%s'\n",
+                     n, vtxCount, obj.width(), obj.height(), g_gxState.numTevStages,
+                     g_sbDrawSamplesCopy ? 1 : 0, static_cast<int>(g_gxState.blendMode),
+                     static_cast<int>(g_gxState.blendFacSrc), static_cast<int>(g_gxState.blendFacDst),
+                     g_gxState.colorUpdate ? 1 : 0, g_gxState.alphaUpdate ? 1 : 0,
+                     static_cast<int>(g_gxState.colorChannelConfig[0].lightingEnabled),
+                     static_cast<int>(g_gxState.colorChannelConfig[0].matSrc),
+                     static_cast<int>(t0.colorPass.a), static_cast<int>(t0.colorPass.b),
+                     static_cast<int>(t0.colorPass.c), static_cast<int>(t0.colorPass.d), g_sbLastMarker.c_str());
+      }
+    }
+  }
   const auto bindGroups = build_bind_groups(info);
   const auto pipeline = gfx::pipeline_ref(config);
 

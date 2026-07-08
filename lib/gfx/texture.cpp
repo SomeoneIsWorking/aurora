@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <utility>
 
@@ -72,6 +74,25 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
     if (!converted.data.empty()) {
       data = converted.data;
       ref.hasArbitraryMips = converted.hasArbitraryMips;
+    }
+  }
+
+  // SB_TEX_DUMP=<dir>: write each converted texture's mip-0 RGBA to
+  // <dir>/tex_<seq>_<w>x<h>_fmt<f>.raw so the decode can be eyeballed
+  // (crosshatch/garbage vs a real image). Capped to 40 dumps.
+  if (const char* dumpDir = std::getenv("SB_TEX_DUMP");
+      dumpDir != nullptr && !tlut && !converted.data.empty() && ref.gxFormat != InvalidTextureFormat) {
+    static int s_seq = 0;
+    if (s_seq < 40) {
+      char path[512];
+      std::snprintf(path, sizeof(path), "%s/tex_%02d_%ux%u_fmt%u.raw", dumpDir, s_seq++, width, height,
+                    static_cast<unsigned>(format));
+      // converted.data mip-0 is RGBA8 (aurora converts GC formats to RGBA8_PC).
+      const uint32_t n = std::min<uint32_t>(width * height * 4u, static_cast<uint32_t>(converted.data.size()));
+      if (FILE* f = std::fopen(path, "wb")) {
+        std::fwrite(converted.data.data(), 1, n, f);
+        std::fclose(f);
+      }
     }
   }
 
