@@ -1232,12 +1232,41 @@ bool begin_frame() {
   set_efb_targets(pass);
   pass.clearColorValue = gx::g_gxState.clearColor;
   pass.clearDepthValue = gx::clear_depth_value();
+  // LAZY/NO EAGER CLEAR (2026-07-08, fixes GXCopyDisp black-frame bug):
+  // on real GC HW the EFB is a persistent buffer — it is erased ONLY by an
+  // explicit copy-clear (GXCopyTex/GXCopyDisp with clear=GX_TRUE), which
+  // resolve_pass()/copy_tex() below already implement correctly (it creates
+  // the NEXT pass with clearColor/clearDepth taken from the game's own
+  // clear flag). reference/sms calls GXCopyDisp(clear=true) as the LAST GX
+  // op of every frame, via TDisplay::endRendering, which runs AFTER
+  // TVideo::waitForRetrace() returns — i.e. AFTER this begin_frame() has
+  // already run for the new frame (sb_frame_present's seam order is
+  // end_frame -> begin_frame -> return to game -> GXCopyDisp). So this pass
+  // 0 is exactly the render pass GXCopyDisp's resolve_pass() will read from
+  // and then correctly replace with a freshly-cleared pass. If pass 0
+  // defaults to LoadOp::Clear here (as it did previously — RenderPass's
+  // struct default is clearColor=clearDepth=true, and this function never
+  // overrode it), that eager clear stomps the still-live, fully-drawn
+  // previous frame before GXCopyDisp ever gets to resolve it, and every
+  // GXCopyDisp resolve reads a blank pass with zero draws in it (uniform
+  // clear color, not the finished scene). Default to Load instead: pass 0
+  // starts as a no-op continuation of whatever physically sits in
+  // webgpu::g_frameBuffer (the previous frame's finished image) until
+  // something ACTUALLY clears it — either the game's own GXCopyDisp/
+  // GXCopyTex(clear=true), whose resolve_pass() creates a properly-cleared
+  // successor pass, or (defensively, should a frame have zero copies) an
+  // explicit clear draw. Do not restore an unconditional clear here; that
+  // is the bug, not a missing feature.
+  pass.clearColor = false;
+  pass.clearDepth = false;
   sb_timeline_frame();
-  sb_timeline_log("begin_frame CLEAR efb color=(%.2f,%.2f,%.2f)", pass.clearColorValue.x(),
+  sb_timeline_log("begin_frame LOAD efb (no eager clear) color=(%.2f,%.2f,%.2f)", pass.clearColorValue.x(),
                   pass.clearColorValue.y(), pass.clearColorValue.z());
-  // SB_CLEAR_OVERRIDE=RRGGBB (hex, diagnostic): force the frame-start clear
-  // to a known color — separates "what value is cleared" from "how the clear
-  // reaches the screen" when chasing channel-order/stale-color defects.
+  // SB_CLEAR_OVERRIDE=RRGGBB (hex, diagnostic): force an EAGER frame-start
+  // clear to a known color — separates "what value is cleared" from "how
+  // the clear reaches the screen" when chasing channel-order/stale-color
+  // defects. Diagnostic only: turning this on reintroduces the eager-clear
+  // bug above on purpose, for A/B comparison.
   {
     static int s_ovr = -2;
     static Vec4<float> s_ovrColor{};
@@ -1254,20 +1283,10 @@ bool begin_frame() {
     }
     if (s_ovr == 1) {
       pass.clearColorValue = s_ovrColor;
+      pass.clearColor = true;
+      pass.clearDepth = true;
     }
   }
-  // DEFERRED COPY-CLEAR MODEL (acknowledged middle ground, 2026-07-07):
-  // On GC the EFB persists across frames and is erased only by an explicit
-  // copy-clear (GXCopyTex/GXCopyDisp clear=true); SMS then repaints the
-  // copied scene from a screen texture. Reproducing that roundtrip
-  // pixel-faithfully is deep, still-uncharted machinery. Instead the
-  // copy-clear is DEFERRED to the next frame start: copy_tex() skips its
-  // clear and this first pass clears with the game's copy-clear color
-  // (g_gxState.clearColor, set by GXSetCopyClear). Net per frame:
-  // clear -> scene -> copy(no clear, correct content for samplers) -> 2D
-  // over the LIVE scene. Visually identical to GC when the screen-texture
-  // repaint is an identity repaint — and converges to fully faithful if a
-  // working repaint later covers the live scene with the same image.
   g_currentRenderPass = 0;
   // Refresh render viewport/scissor from logical in case FB size changed
   g_cachedViewport = gx::map_logical_viewport(gx::g_gxState.logicalViewport);
