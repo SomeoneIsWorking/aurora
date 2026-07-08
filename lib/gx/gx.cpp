@@ -26,6 +26,7 @@
 static aurora::Module Log("aurora::gx");
 
 namespace aurora::gx {
+extern "C" const char* sb_gx_last_marker();
 using webgpu::g_device;
 using webgpu::g_graphicsConfig;
 
@@ -491,6 +492,26 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
       }
     } else if (obj.has_data()) {
       handle = resolve_static_texture(obj);
+    }
+
+    // SB_TEXBIND_DBG=1: per sampled TEXMAP, log whether the texture resolved
+    // to a real handle — a null handle here means the material samples an
+    // UNBOUND texture (empty view), which multiplied against a white channel
+    // renders BLACK (the dark map/sea/logo hypothesis).
+    {
+      static int s_bindDbg = -1;
+      if (s_bindDbg < 0) {
+        const char* e = std::getenv("SB_TEXBIND_DBG");
+        s_bindDbg = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+      }
+      if (s_bindDbg == 1) {
+        static long n = 0;
+        if (++n <= 400)
+          std::fprintf(stderr,
+                       "[texbind] n=%ld map=%u data=%p hasData=%d isCopy=%d handleNull=%d %ux%u fmt=%u mark='%s'\n",
+                       n, i, obj.data, obj.has_data() ? 1 : 0, copyRef != nullptr ? 1 : 0, handle ? 0 : 1,
+                       obj.width(), obj.height(), static_cast<unsigned>(obj.format()), sb_gx_last_marker());
+      }
     }
 
     obj.mFormat = resolved_format_for_handle(handle);

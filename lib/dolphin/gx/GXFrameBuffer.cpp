@@ -12,6 +12,51 @@
 #include <cmath>
 
 namespace {
+// GXCopyDisp is the GC-HW operation that actually defines the displayed TV
+// image (real HW: the same "PE copy" op as GXCopyTex, selected by a
+// copy-to-XFB bit on the BP 0x52 command). aurora's BP-0x52 dispatch
+// (command_processor.cpp, owned by another agent this session) only wires
+// that bit to the GXCopyTex path today. Rather than block on that file,
+// GXCopyDisp below routes through the SAME working copy_tex() cache/resolve
+// mechanism GXCopyTex already uses, keyed on this reserved sentinel pointer
+// so copy_tex() can recognize "this resolve is the display copy" and latch
+// the result as the present source (see gpu.cpp g_sbDisplayPresent). This
+// preserves GXCopyTex's existing FIFO-ordering guarantees (the copy lands at
+// the correct point relative to the surrounding draws) without needing the
+// hardware-faithful copy-to-XFB bit wired through command_processor.cpp.
+struct DisplayCopyDestTag {};
+const DisplayCopyDestTag kDisplayCopyDestTagInstance{};
+const void* const kDisplayCopyDest = &kDisplayCopyDestTagInstance;
+
+// GXSetDispCopyYScale/GXGetNumXfbLines RE'd from reference/sms's decomp'd
+// dolphin/gx/GXFrameBuf.c (real Nintendo SDK source in the decomp tree, not
+// game logic): GXSetDispCopyDst's `ht` argument is a red herring — real HW
+// ignores it (only `wd` feeds the copy stride register). The actual XFB
+// copy height is GXSetDispCopyYScale's RETURN VALUE, computed from the EFB
+// height last configured via GXSetDispCopySrc plus the Y-scale ratio. Our
+// GXSetDispCopyYScale was a stub returning 0, which is why every per-frame
+// GXCopyDisp resolved a degenerate ~0-line-tall texture once the boot-time
+// call was superseded by JDREfbSetting::IssueGXCopyDisp's per-frame call.
+u32 s_dispCopyEfbHeight = 480;
+
+u32 gx_get_num_xfb_lines(u32 height, u32 scale) noexcept {
+  const u32 numLines = (height - 1) * 0x100;
+  u32 actualHeight = (numLines / scale) + 1;
+  u32 newScale = scale;
+  if (newScale > 0x80 && newScale < 0x100) {
+    while (newScale % 2 == 0) {
+      newScale /= 2;
+    }
+    if (height % newScale == 0) {
+      ++actualHeight;
+    }
+  }
+  if (actualHeight > 0x400) {
+    actualHeight = 0x400;
+  }
+  return actualHeight;
+}
+
 aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
   if (g_gxState.viewportPolicy == AURORA_VIEWPORT_NATIVE) {
     return {logicalWidth, logicalHeight};
@@ -106,6 +151,33 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   }
   gfx::resolve_pass(handle.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor, clear_depth_value(),
                     texCopyFmt);
+  // SB_PRESENT_PASS1: stash the FIRST clear=true copy's resolved texture as a
+  // candidate present source (the EFB captured just before it was cleared =
+  // the pre-clear pass's full content). Lets end_frame present that pass
+  // instead of the accumulated EFB, to test where the main scene lives.
+  if (clear && std::getenv("SB_PRESENT_PASS1") != nullptr) {
+    if (handle.handle && handle.handle->sampleTextureView) {
+      webgpu::g_sbPass1Present = webgpu::TextureWithSampler{
+          .texture = handle.handle->texture,
+          .view = handle.handle->sampleTextureView,
+          .size = handle.handle->size,
+          .format = handle.handle->format,
+          .sampler = webgpu::g_frameBuffer.sampler,
+      };
+    }
+  }
+  // GXCopyDisp (below) routes through this exact function on the reserved
+  // kDisplayCopyDest key; latch its resolve unconditionally as the present
+  // source — this IS the game's display copy, not a diagnostic guess.
+  if (dest == kDisplayCopyDest && handle.handle && handle.handle->sampleTextureView) {
+    webgpu::g_sbDisplayPresent = webgpu::TextureWithSampler{
+        .texture = handle.handle->texture,
+        .view = handle.handle->sampleTextureView,
+        .size = handle.handle->size,
+        .format = handle.handle->format,
+        .sampler = webgpu::g_frameBuffer.sampler,
+    };
+  }
   ++handle.revision;
   g_gxState.copyTextures[dest] = handle;
   if (std::getenv("SB_COPY_DBG") != nullptr) {
@@ -190,7 +262,22 @@ void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor,
   rmout->xfbHeight = size.fb_height;
 }
 
-void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {}
+void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+  if (std::getenv("SB_COPY_DBG") != nullptr) {
+    std::fprintf(stderr, "[disp-copy-src] left=%u top=%u wd=%u ht=%u\n", left, top, wd, ht);
+  }
+  // Real HW: GXSetDispCopySrc and GXSetTexCopySrc program the SAME BP
+  // compare-window registers (0x49-0x4C) — there is only one copy-source
+  // rect at the hardware level, shared between the disp and tex copy paths
+  // and consumed immediately by whichever copy command follows. Mirror
+  // GXSetTexCopySrc's queuing exactly.
+  s_dispCopyEfbHeight = ht != 0 ? ht : s_dispCopyEfbHeight;
+  GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_SRC);
+  GX_WRITE_U32(left);
+  GX_WRITE_U32(top);
+  GX_WRITE_U32(wd);
+  GX_WRITE_U32(ht);
+}
 
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
   GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_SRC);
@@ -200,7 +287,20 @@ void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
   GX_WRITE_U32(ht);
 }
 
-void GXSetDispCopyDst(u16 wd, u16 ht) {}
+void GXSetDispCopyDst(u16 wd, u16 ht) {
+  if (std::getenv("SB_COPY_DBG") != nullptr) {
+    std::fprintf(stderr, "[disp-copy-dst] wd=%u ht=%u\n", wd, ht);
+  }
+  // Same shared BP dst-size registers as GXSetTexCopyDst (see GXSetDispCopySrc
+  // above). The XFB's hardware pixel format isn't a GXTexFmt at all (YUV/RGB
+  // scan-out), but aurora presents through a plain wgpu texture, so route it
+  // through the existing RGBA8 render-texture path with no mipmaps.
+  GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_DST);
+  GX_WRITE_U32(wd);
+  GX_WRITE_U32(ht);
+  GX_WRITE_U32(static_cast<u32>(GX_TF_RGBA8));
+  GX_WRITE_U8(GX_FALSE);
+}
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
   GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_DST);
@@ -213,7 +313,13 @@ void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
 // TODO GXSetDispCopyFrame2Field
 // TODO GXSetCopyClamp
 
-u32 GXSetDispCopyYScale(f32 vscale) { return 0; }
+u32 GXSetDispCopyYScale(f32 vscale) {
+  // See gx_get_num_xfb_lines comment above: this return value (NOT
+  // GXSetDispCopyDst's ht arg) is what actually determines the XFB copy
+  // height on real HW.
+  const u32 scale = static_cast<u32>(256.0f / vscale) & 0x1FF;
+  return gx_get_num_xfb_lines(s_dispCopyEfbHeight, scale);
+}
 
 void GXSetCopyClear(GXColor color, u32 depth) {
   // SB_COPY_DBG=1: log every copy-clear color change — the deferred-clear
@@ -250,7 +356,24 @@ void GXSetCopyFilter(GXBool aa, const u8 sample_pattern[12][2], GXBool vf, const
 
 void GXSetDispCopyGamma(GXGamma gamma) {}
 
-void GXCopyDisp(void* dest, GXBool clear) {}
+void GXCopyDisp(void* dest, GXBool clear) {
+  // GXCopyDisp is the LAST GX call in the game's per-frame draw list (after
+  // the main scene + Chr + lens flare + all 2D UI — TEfbCtrlDisp /
+  // mPerformListGXPost in reference/sms) and is what actually defines the
+  // displayed TV image on real hardware. Queue the same BP-0x52 "PE copy"
+  // command GXCopyTex uses (see kDisplayCopyDest comment above for why this
+  // uses a dest-key discriminator instead of the hardware copy-to-XFB bit),
+  // so it resolves at the correct point in the frame relative to every other
+  // queued draw/copy, then gets latched as the present source in copy_tex().
+  (void)dest; // real XFB address; aurora keys the resolve on kDisplayCopyDest instead (see above)
+  GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_DEST);
+  GX_WRITE_U64(reinterpret_cast<u64>(kDisplayCopyDest));
+
+  SET_REG_FIELD(0, __gx->cpTex, 1, 11, clear != GX_FALSE);
+  SET_REG_FIELD(0, __gx->cpTex, 1, 14, 0);
+  SET_REG_FIELD(0, __gx->cpTex, 8, 24, 0x52);
+  GX_WRITE_RAS_REG(__gx->cpTex);
+}
 
 void GXCopyTex(void* dest, GXBool clear) {
   GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_DEST);
