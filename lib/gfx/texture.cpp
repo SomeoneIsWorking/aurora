@@ -79,11 +79,18 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
 
   // SB_TEX_DUMP=<dir>: write each converted texture's mip-0 RGBA to
   // <dir>/tex_<seq>_<w>x<h>_fmt<f>.raw so the decode can be eyeballed
-  // (crosshatch/garbage vs a real image). Capped to 40 dumps.
+  // (crosshatch/garbage vs a real image). Capped to SB_TEX_DUMP_MAX dumps
+  // (default 40); raise it to reach textures that load later in the boot
+  // sequence (e.g. title-screen 2D art loaded well after the first 40
+  // GX textures).
   if (const char* dumpDir = std::getenv("SB_TEX_DUMP");
       dumpDir != nullptr && !tlut && !converted.data.empty() && ref.gxFormat != InvalidTextureFormat) {
     static int s_seq = 0;
-    if (s_seq < 40) {
+    static int s_max = [] {
+      const char* e = std::getenv("SB_TEX_DUMP_MAX");
+      return e != nullptr ? std::atoi(e) : 40;
+    }();
+    if (s_seq < s_max) {
       char path[512];
       std::snprintf(path, sizeof(path), "%s/tex_%02d_%ux%u_fmt%u.raw", dumpDir, s_seq++, width, height,
                     static_cast<unsigned>(format));
