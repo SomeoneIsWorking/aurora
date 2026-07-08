@@ -716,6 +716,21 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
   };
   const auto blendState =
       to_blend_state(config.blendMode, config.blendFacSrc, config.blendFacDst, config.blendOp, config.dstAlpha);
+  // SB_PIPELINE_BLEND_DBG=1: dump the ACTUAL wgpu blend factors chosen for
+  // pipeline BUILD (not just the GX state captured elsewhere) to rule a
+  // pipeline-cache mixup in/out for the title "PRESS START" glow-blowout defect
+  // (debug_journal duotone TEV investigation): filter on the title glyph's
+  // narrow texture-size band so this doesn't spam every draw.
+  if (std::getenv("SB_PIPELINE_BLEND_DBG") != nullptr) {
+    std::fprintf(stderr,
+                 "[pipeline-blend] mode=%d src=%d dst=%d -> color(op=%d src=%d dst=%d) alpha(op=%d src=%d dst=%d) "
+                 "label=%s\n",
+                 static_cast<int>(config.blendMode), static_cast<int>(config.blendFacSrc),
+                 static_cast<int>(config.blendFacDst), static_cast<int>(blendState.color.operation),
+                 static_cast<int>(blendState.color.srcFactor), static_cast<int>(blendState.color.dstFactor),
+                 static_cast<int>(blendState.alpha.operation), static_cast<int>(blendState.alpha.srcFactor),
+                 static_cast<int>(blendState.alpha.dstFactor), label != nullptr ? label : "(null)");
+  }
   const std::array colorTargets{wgpu::ColorTargetState{
       .format = g_graphicsConfig.surfaceConfiguration.format,
       .blend = &blendState,

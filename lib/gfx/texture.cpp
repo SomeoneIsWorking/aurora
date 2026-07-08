@@ -1,4 +1,5 @@
 #include "common.hpp"
+#include <cctype>
 
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
@@ -91,9 +92,15 @@ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mi
       return e != nullptr ? std::atoi(e) : 40;
     }();
     if (s_seq < s_max) {
+      char safeLabel[256];
+      size_t li = 0;
+      for (const char* p = label; *p != '\0' && li + 1 < sizeof(safeLabel); ++p) {
+        safeLabel[li++] = (std::isalnum(static_cast<unsigned char>(*p)) || *p == '_' || *p == '.') ? *p : '_';
+      }
+      safeLabel[li] = '\0';
       char path[512];
-      std::snprintf(path, sizeof(path), "%s/tex_%02d_%ux%u_fmt%u.raw", dumpDir, s_seq++, width, height,
-                    static_cast<unsigned>(format));
+      std::snprintf(path, sizeof(path), "%s/tex_%02d_%ux%u_fmt%u_%s.raw", dumpDir, s_seq++, width, height,
+                    static_cast<unsigned>(format), safeLabel);
       // converted.data mip-0 is RGBA8 (aurora converts GC formats to RGBA8_PC).
       const uint32_t n = std::min<uint32_t>(width * height * 4u, static_cast<uint32_t>(converted.data.size()));
       if (FILE* f = std::fopen(path, "wb")) {
