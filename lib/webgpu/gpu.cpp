@@ -324,27 +324,27 @@ TextureWithSampler g_sbPass1Present;
 // on a reserved sentinel destination key and latches the resolved handle
 // here.
 //
-// NOT wired as the unconditional present source yet: reference/sms calls
-// GXCopyDisp AFTER waitForRetrace() returns, i.e. AFTER aurora's own frame
-// seam (sb_frame_present, hooked at that same waitForRetrace call) has
-// already run aurora_end_frame()+aurora_begin_frame() for this boundary.
-// aurora_begin_frame() (gfx::begin_frame(), gfx/common.cpp) EAGERLY stakes
-// out a fresh, about-to-be-cleared EFB render pass before returning control
-// to the game, so by the time GXCopyDisp executes, copy_tex()'s resolve
-// reads from that brand-new (undrawn) pass — verified empirically: the
-// latched texture is a uniform solid black frame every time (matches the
-// pass's clear color), never the finished previous frame. Presenting it
-// unconditionally made pixel_compare MSE roughly 4x WORSE than the existing
-// raw-EFB fallback (36126 vs 8927), so it is NOT the default here. The real
-// fix is making gfx::begin_frame()'s pass-0 creation lazy (deferred to the
-// new frame's first actual draw/clear) so a trailing GXCopyDisp still
-// resolves the prior frame's finished target — a cross-cutting change to
-// the render-pass bookkeeping not made this session; see debug_journal.
-// SB_PRESENT_COPYDISP=1 opts into it anyway, for diagnosis.
+// Wired as the unconditional present source (2026-07-08): reference/sms
+// calls GXCopyDisp AFTER waitForRetrace() returns, i.e. AFTER aurora's own
+// frame seam (sb_frame_present, hooked at that same waitForRetrace call)
+// has already run aurora_end_frame()+aurora_begin_frame() for this
+// boundary. aurora_begin_frame() (gfx::begin_frame(), gfx/common.cpp) used
+// to EAGERLY stake out a fresh, pre-cleared EFB render pass before
+// returning control to the game, so GXCopyDisp's resolve read a brand-new
+// (undrawn) pass — verified empirically: the latched texture was a uniform
+// solid black frame every time (matched the pass's clear color), never the
+// finished previous frame (MSE 36126 vs 8927 for raw-EFB). FIXED by making
+// begin_frame()'s pass 0 default to LoadOp::Load instead of Clear — the
+// EFB now only actually clears when the game's own GXCopyTex/GXCopyDisp
+// asks for it (clear=true), matching real GC HW where the EFB persists
+// until an explicit copy-clear. GXCopyDisp's resolve now reads the correct,
+// fully-drawn prior content (re-verified: MSE matches the raw-EFB path
+// exactly, no longer black). SB_NO_COPYDISP=1 is the escape hatch back to
+// raw-EFB present, kept for A/B diagnosis; do not remove.
 TextureWithSampler g_sbDisplayPresent;
 
 const TextureWithSampler& present_source() noexcept {
-  if (g_sbDisplayPresent.view != nullptr && std::getenv("SB_PRESENT_COPYDISP") != nullptr) {
+  if (g_sbDisplayPresent.view != nullptr && std::getenv("SB_NO_COPYDISP") == nullptr) {
     return g_sbDisplayPresent;
   }
   if (g_sbPass1Present.view != nullptr && std::getenv("SB_PRESENT_PASS1") != nullptr) {
