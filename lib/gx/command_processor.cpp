@@ -1847,9 +1847,49 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         // with unclippedDepth, so XY containment alone decides rasterization.
         if (nx >= -1.f && nx <= 1.f && ny >= -1.f && ny <= 1.f) ++in;
         if (nz >= -1.f && nz <= 0.f) ++zin;
-        if (s_printed <= 6 && v < 4)
-          std::fprintf(stderr, "[ndc-probe]   v%u idx=%u pos=(%.1f,%.1f,%.1f) mv=(%.1f,%.1f,%.1f) ndc=(%.3f,%.3f,%.4f) w=%.1f mtx=%u\n",
-                       v, idx, x, y, z, mv[0], mv[1], mv[2], nx, ny, nz, clip[3]);
+        if (s_printed <= 6 && v < 4) {
+          // Also fetch this vertex's CLR0 raw bytes (if indexed) — shading
+          // ground truth for "geometry rasterizes but comes out black".
+          u32 c0raw[4] = {0xAAAA, 0, 0, 0};
+          const auto c0desc = g_gxState.vtxDesc[GX_VA_CLR0];
+          if ((c0desc == GX_INDEX16 || c0desc == GX_INDEX8) && g_gxState.arrays[GX_VA_CLR0].data != nullptr) {
+            u32 c0off = 0;
+            for (int a = GX_VA_PNMTXIDX; a < GX_VA_CLR0; ++a) {
+              switch (g_gxState.vtxDesc[a]) {
+              case GX_NONE: break;
+              case GX_DIRECT: c0off += a < GX_VA_POS ? 1 : comp_type_size(static_cast<GXAttr>(a), g_gxState.vtxFmts[fmt].attrs[a].type) * comp_cnt_count(static_cast<GXAttr>(a), g_gxState.vtxFmts[fmt].attrs[a].cnt); break;
+              case GX_INDEX8: c0off += (a == GX_VA_NRM && g_gxState.vtxFmts[fmt].attrs[a].cnt == GX_NRM_NBT3) ? 3 : 1; break;
+              case GX_INDEX16: c0off += (a == GX_VA_NRM && g_gxState.vtxFmts[fmt].attrs[a].cnt == GX_NRM_NBT3) ? 6 : 2; break;
+              }
+            }
+            const u32 cidx = c0desc == GX_INDEX16 ? read_u16(vp + c0off, true) : vp[c0off];
+            const auto& carr = g_gxState.arrays[GX_VA_CLR0];
+            const u8* cd = static_cast<const u8*>(carr.data) + cidx * carr.stride;
+            c0raw[0] = cd[0]; c0raw[1] = cd[1]; c0raw[2] = cd[2]; c0raw[3] = carr.stride > 3 ? cd[3] : 0;
+          }
+          std::fprintf(stderr,
+                       "[ndc-probe]   v%u idx=%u pos=(%.1f,%.1f,%.1f) mv=(%.1f,%.1f,%.1f) ndc=(%.3f,%.3f,%.4f) "
+                       "w=%.1f mtx=%u clr0=[%02x %02x %02x %02x] c0type=%d\n",
+                       v, idx, x, y, z, mv[0], mv[1], mv[2], nx, ny, nz, clip[3], firstMtx, c0raw[0], c0raw[1],
+                       c0raw[2], c0raw[3], static_cast<int>(g_gxState.vtxFmts[fmt].attrs[GX_VA_CLR0].type));
+        }
+      }
+      // TEV stage 0 combiner state — decides "vertex colors right but TEV
+      // outputs black".
+      {
+        const auto& t0 = g_gxState.tevStages[0];
+        std::fprintf(stderr,
+                     "[ndc-probe]  tev0 C[a=%d b=%d c=%d d=%d op=%d bias=%d scale=%d out=%d] "
+                     "A[a=%d b=%d c=%d d=%d op=%d out=%d] ras=%d tc=%d tm=%d nStages=%u\n",
+                     static_cast<int>(t0.colorPass.a), static_cast<int>(t0.colorPass.b),
+                     static_cast<int>(t0.colorPass.c), static_cast<int>(t0.colorPass.d),
+                     static_cast<int>(t0.colorOp.op), static_cast<int>(t0.colorOp.bias),
+                     static_cast<int>(t0.colorOp.scale), static_cast<int>(t0.colorOp.outReg),
+                     static_cast<int>(t0.alphaPass.a), static_cast<int>(t0.alphaPass.b),
+                     static_cast<int>(t0.alphaPass.c), static_cast<int>(t0.alphaPass.d),
+                     static_cast<int>(t0.alphaOp.op), static_cast<int>(t0.alphaOp.outReg),
+                     static_cast<int>(t0.channelId), static_cast<int>(t0.texCoordId),
+                     static_cast<int>(t0.texMapId), g_gxState.numTevStages);
       }
       std::fprintf(stderr,
                    "[ndc-probe] #%d verts=%u inXY=%u inZ=%u wneg=%u proj=%c ndcX=[%.2f..%.2f] ndcY=[%.2f..%.2f] "
@@ -2116,6 +2156,22 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   PipelineConfig config{};
   populate_pipeline_config(config, prim, fmt);
   const auto info = build_shader_info(config.shaderConfig);
+  // SB_SHADER_HASH=1: per-draw shader-config hash (pairs with SB_SHADER_DUMP
+  // to locate the exact WGSL a given marked draw uses).
+  {
+    static int s_shHash = -1;
+    if (s_shHash < 0) {
+      const char* e = std::getenv("SB_SHADER_HASH");
+      s_shHash = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    }
+    if (s_shHash == 1) {
+      static long n = 0;
+      if (++n <= 3000)
+        std::fprintf(stderr, "[draw-shader] n=%ld hash=%zx proj=%c verts=%u mark='%s'\n", n,
+                     static_cast<size_t>(xxh3_hash(config.shaderConfig)),
+                     g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', vtxCount, g_sbLastMarker.c_str());
+    }
+  }
   g_sbDrawSamplesCopy = false;
   resolve_sampled_textures(info);
   // SB_SKIP_COPY_QUAD=1 (diagnostic): drop draws that sample an EFB-copy
@@ -2127,6 +2183,17 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     s_skipCopyQuad = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
   }
   if (s_skipCopyQuad == 1 && g_sbDrawSamplesCopy) {
+    return;
+  }
+  // SB_SKIP_ORTHO=1 (diagnostic): drop every orthographic-projection draw —
+  // strips all 2D overlays (logo art, faders, letterbox) to expose what the
+  // 3D scene alone contributes to the framebuffer.
+  static int s_skipOrtho = -1;
+  if (s_skipOrtho < 0) {
+    const char* e = std::getenv("SB_SKIP_ORTHO");
+    s_skipOrtho = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  if (s_skipOrtho == 1 && g_gxState.projType == GX_ORTHOGRAPHIC) {
     return;
   }
   const auto bindGroups = build_bind_groups(info);
