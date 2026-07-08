@@ -2117,12 +2117,26 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       const auto& sc = g_gxState.logicalScissor;
       const auto& cc = g_gxState.colorChannelConfig[0];
       const auto& cs = g_gxState.colorChannelState[0];
+      // ALPHA0 (GX_ALPHA0 == 2): independent chanCtrl/ambient/material state
+      // from COLOR0 — same REG/lightMask machinery, but never dumped before.
+      // A lit-but-near-black material with a bright COLOR0 (mat/amb both
+      // ~white, per oracle ground-truth scratch/oracle/title_light_ground_truth.txt)
+      // is consistent with the geometry being nearly TRANSPARENT rather than
+      // dark: XLU blend reads ALPHA0's REG output, which this printf never
+      // exposed, so a wrong ALPHA0 ambSrc/matSrc/lightMask/register value
+      // could sink alpha near 0 and blend the map/sea to the black EFB clear
+      // while COLOR0 alone looks perfectly correct. See
+      // debug_journal/2026-07-07_title_backdrop_and_indexed_mtx.md
+      // Continuation 16/17 for the standing "map/sea near-black" defect.
+      const auto& cca = g_gxState.colorChannelConfig[GX_ALPHA0];
+      const auto& csa = g_gxState.colorChannelState[GX_ALPHA0];
       const auto& posFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
       const auto posDesc = g_gxState.vtxDesc[GX_VA_POS];
       std::fprintf(stderr,
                    "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
                    "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
-                   "tev=%u ch0[light=%d matSrc=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
+                   "tev=%u ch0[light=%d matSrc=%d ambSrc=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
+                   "a0[light=%d matSrc=%d ambSrc=%d mat=%.2f amb=%.2f mask=%02x] "
                    "prj=[%.4f %.4f %.4f %.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] mtxIdx=%u "
                    "posmtx=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] mark='%s'\n",
                    s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(),
@@ -2130,9 +2144,12 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                    pn[3], pn[7], pn[11], g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
                    static_cast<unsigned>(g_gxState.blendMode), vp.left, vp.top, vp.width, vp.height,
                    sc.x, sc.y, sc.width, sc.height, g_gxState.numTevStages,
-                   static_cast<int>(cc.lightingEnabled), static_cast<int>(cc.matSrc), cs.matColor.x(),
+                   static_cast<int>(cc.lightingEnabled), static_cast<int>(cc.matSrc), static_cast<int>(cc.ambSrc),
+                   cs.matColor.x(),
                    cs.matColor.y(), cs.matColor.z(), cs.matColor.w(), cs.ambColor.x(), cs.ambColor.y(),
                    cs.ambColor.z(), static_cast<unsigned>(cs.lightMask.to_ulong() & 0xff),
+                   static_cast<int>(cca.lightingEnabled), static_cast<int>(cca.matSrc), static_cast<int>(cca.ambSrc),
+                   csa.matColor.w(), csa.ambColor.w(), static_cast<unsigned>(csa.lightMask.to_ulong() & 0xff),
                    reinterpret_cast<const float*>(&g_gxState.proj)[0],
                    reinterpret_cast<const float*>(&g_gxState.proj)[5],
                    reinterpret_cast<const float*>(&g_gxState.proj)[10],
