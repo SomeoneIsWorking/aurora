@@ -1,4 +1,6 @@
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <dolphin/gd.h>
 #include <dolphin/os.h>
 
@@ -263,12 +265,39 @@ void GDSetArraySized(GXAttr attr, void* base_ptr, u32 size, u8 stride, bool le) 
   GDWriteCPCmd(cpAttr + CP_REG_ARRAYSTRIDE_ID, stride);
 }
 
-void GDSetArray(GXAttr, void*, u8) {
-    OSPanic(__FILE__, __LINE__, "GDSetArray is not supported on Aurora");
+// J3DShape::makeVtxArrayCmd() (reference/sms) is the ONE-TIME per-shape array-base
+// bake: on real GC it calls GDSetArray/GDSetArrayRaw ONCE at model-load time to bake
+// a small VCD+VAT+array-base display list (mGDCommands) that's replayed every frame —
+// valid forever because GC bakes a real 32-bit VRAM/MRAM physical address. These two
+// functions used to unconditionally OSPanic ("not supported on Aurora"), which made
+// makeVtxArrayCmd's array registration for GX_VA_TEX0..TEX7 (and NBT) a dead path on
+// this port: those attrs are NEVER refreshed per-frame (J3DShape::loadVtxArray() only
+// re-binds POS/NRM/CLR0, matching GC's skinning/color-anim double-buffer contract),
+// so on Aurora they silently kept g_gxState.arrays[TEXn] at its zero-initialized
+// {nullptr,...} forever. Symptom: any J3D shape with real per-vertex UV data (e.g. the
+// title lens-flare ghost sprites, sun__glow.bmd VTX1 TEX0 array at file offset 0x1a0)
+// sampled a null/zero-size indexed array, which resolve_sampled_textures/AUTO ARRAY
+// SIZING (command_processor.cpp) explicitly skip growing (requires data != nullptr),
+// leaving the GPU storage-buffer range whatever a PREVIOUS unrelated draw's push left
+// there — stale bytes reinterpreted as S16 texcoords, Mirror-wrapped across a small
+// sprite: the title-sky "crosshatch" moire on the big on-screen lens-flare ghosts.
+//
+// FIX: bake the same Aurora-native GX_AURORA_LOAD_ARRAYBASE extension
+// GDSetArraySized() already emits for the live per-frame POS/NRM/CLR0 refresh
+// (J3DLoadArrayBasePtr), with size=0 ("trust": AUTO ARRAY SIZING derives the real
+// upload extent from the max index each draw actually references — the same
+// mechanism already proven for POS/NRM/CLR0). This is baked ONCE into the shape's
+// mGDCommands DL exactly like GC's real hardware bake, and needs no per-frame calls.
+void GDSetArray(GXAttr attr, void* base_ptr, u8 stride) {
+    GDSetArraySized(attr, base_ptr, 0, stride, /*le=*/true);
 }
 
-void GDSetArrayRaw(GXAttr, u32, u8) {
-    OSPanic(__FILE__, __LINE__, "GDSetArrayRaw is not supported on Aurora");
+void GDSetArrayRaw(GXAttr attr, u32 base_ptr_raw, u8 stride) {
+    // Always called with base_ptr_raw==nullptr by J3DShape::makeVtxArrayCmd (the
+    // "this attr has no array" case) — bake an explicit null/size-0 binding so the
+    // attr's GX state is well-defined (matches GC: no array, no live reads) instead
+    // of leaving a stale binding from whatever attr slot this DL never touches.
+    GDSetArraySized(attr, reinterpret_cast<void*>(static_cast<uintptr_t>(base_ptr_raw)), 0, stride, /*le=*/true);
 }
 
 void GDPatchArrayPtr(void* base_ptr) {
