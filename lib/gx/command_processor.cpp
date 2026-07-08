@@ -2132,12 +2132,17 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       const auto& csa = g_gxState.colorChannelState[GX_ALPHA0];
       const auto& posFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
       const auto posDesc = g_gxState.vtxDesc[GX_VA_POS];
+      // clr0Desc/clr1Desc: whether this draw's VCD actually supplies CLR0/CLR1
+      // (GX_NONE=0 -> vtx_attr() default-white fallback fires; GX_DIRECT=1/
+      // GX_INDEX8=2/GX_INDEX16=3 -> real per-vertex color stream is bound).
+      const auto clr0Desc = g_gxState.vtxDesc[GX_VA_CLR0];
+      const auto clr1Desc = g_gxState.vtxDesc[GX_VA_CLR1];
       std::fprintf(stderr,
                    "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
                    "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
                    "tev=%u ch0[light=%d matSrc=%d ambSrc=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
                    "a0[light=%d matSrc=%d ambSrc=%d mat=%.2f amb=%.2f mask=%02x] "
-                   "prj=[%.4f %.4f %.4f %.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] mtxIdx=%u "
+                   "prj=[%.4f %.4f %.4f %.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] clr0=%d clr1=%d mtxIdx=%u "
                    "posmtx=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] mark='%s'\n",
                    s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(),
                    static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
@@ -2158,10 +2163,60 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                    static_cast<int>(g_gxState.blendMode), static_cast<int>(g_gxState.blendFacSrc),
                    static_cast<int>(g_gxState.blendFacDst), static_cast<int>(posDesc),
                    static_cast<int>(posFmt.cnt), static_cast<int>(posFmt.type), posFmt.frac,
+                   static_cast<int>(clr0Desc), static_cast<int>(clr1Desc),
                    g_gxState.currentPnMtx, pn[0], pn[1], pn[2], pn[3], pn[4], pn[5], pn[6], pn[7],
                    pn[8], pn[9], pn[10], pn[11], g_sbLastMarker.c_str());
+      // SB_TEV_DUMP=1: full TEV combiner state + texture format for this same
+      // window, to pin down the exact stage math on a specific overbright
+      // draw (e.g. the title logo quad) once SB_DRAW_DUMP has located it.
+      if (std::getenv("SB_TEV_DUMP") != nullptr) {
+        for (unsigned st = 0; st < g_gxState.numTevStages; ++st) {
+          const auto& s = g_gxState.tevStages[st];
+          std::fprintf(stderr,
+                       "  [tev] #%d stage=%u texMap=%d texCoord=%d chan=%d "
+                       "colorPass(a=%d b=%d c=%d d=%d op=%d bias=%d scale=%d clamp_outReg=%d) "
+                       "alphaPass(a=%d b=%d c=%d d=%d op=%d bias=%d scale=%d outReg=%d) "
+                       "kcSel=%d kaSel=%d swapRas=%d swapTex=%d\n",
+                       s_dumped - 1, st, static_cast<int>(s.texMapId), static_cast<int>(s.texCoordId),
+                       static_cast<int>(s.channelId), static_cast<int>(s.colorPass.a),
+                       static_cast<int>(s.colorPass.b), static_cast<int>(s.colorPass.c),
+                       static_cast<int>(s.colorPass.d), static_cast<int>(s.colorOp.op),
+                       static_cast<int>(s.colorOp.bias), static_cast<int>(s.colorOp.scale),
+                       static_cast<int>(s.colorOp.outReg), static_cast<int>(s.alphaPass.a),
+                       static_cast<int>(s.alphaPass.b), static_cast<int>(s.alphaPass.c),
+                       static_cast<int>(s.alphaPass.d), static_cast<int>(s.alphaOp.op),
+                       static_cast<int>(s.alphaOp.bias), static_cast<int>(s.alphaOp.scale),
+                       static_cast<int>(s.alphaOp.outReg), static_cast<int>(s.kcSel),
+                       static_cast<int>(s.kaSel), static_cast<int>(s.tevSwapRas),
+                       static_cast<int>(s.tevSwapTex));
+        }
+        const auto& tobj = g_gxState.textures[0].texObj;
+        std::fprintf(stderr, "  [tex] fmt=%d minFilt=%d magFilt=%d wrapS=%d wrapT=%d\n",
+                     static_cast<int>(tobj.format()), static_cast<int>(tobj.min_filter()),
+                     static_cast<int>(tobj.mag_filter()), static_cast<int>(tobj.wrap_s()),
+                     static_cast<int>(tobj.wrap_t()));
+        for (unsigned r = 0; r < aurora::gx::MaxTevRegs; ++r) {
+          const auto& c = g_gxState.colorRegs[r];
+          std::fprintf(stderr, "  [tevreg] %u = (%.3f, %.3f, %.3f, %.3f)\n", r, c.x(), c.y(), c.z(), c.w());
+        }
+      }
     }
     ++s_dumped;
+  }
+  // SB_SKIP_TEV3=1 (diagnostic, title-logo wash investigation): drop any draw
+  // configured with >=3 TEV stages. Isolates whether the J2DPicture
+  // black/white "duotone" recolor stage (title_parts_NN.bti overlay quads,
+  // forced to flat white when mBlack.rgb==mWhite.rgb==white) is what's
+  // washing out the title logo, without touching TEV/shader math.
+  {
+    static int s_skipTev3 = -1;
+    if (s_skipTev3 < 0) {
+      const char* e = std::getenv("SB_SKIP_TEV3");
+      s_skipTev3 = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    }
+    if (s_skipTev3 == 1 && g_gxState.numTevStages >= 3) {
+      return;
+    }
   }
   // Build pipeline, bind groups, and push draw command
   BindGroupRanges ranges{};
