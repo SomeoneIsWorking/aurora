@@ -392,6 +392,22 @@ AuroraWindowSize get_window_size() {
 
   int fb_w = native_fb_w;
   int fb_h = native_fb_h;
+  // SB_FB_SCALE: pin the render framebuffer to configured_fb (GC 640x480) *
+  // scale, instead of the raw window pixel size — which under a hi-DPI display
+  // (or SB_HEADLESS's fallback) balloons to e.g. 3200x2400 (30 MB dumps, slow,
+  // and a stride mismatch that silently corrupted pixel_compare reads). Default
+  // 2.0 = 1280x960; SB_FB_SCALE=1 = native 640x480 (matches the oracle exactly);
+  // SB_FB_SCALE=0 restores the raw window-pixel behavior.
+  {
+    static float s_sbScale = -1.f;
+    if (s_sbScale < 0.f) {
+      const char* e = std::getenv("SB_FB_SCALE");
+      s_sbScale = e != nullptr && e[0] != '\0' ? std::strtof(e, nullptr) : 2.0f;
+    }
+    if (s_sbScale > 0.f) {
+      g_frameBufferScale = s_sbScale;
+    }
+  }
   if (g_frameBufferScale > 0.f) {
     const auto [baseW, baseH] = vi::configured_fb_size();
     const auto [scaledW, scaledH] =
