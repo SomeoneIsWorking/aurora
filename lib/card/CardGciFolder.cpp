@@ -128,7 +128,12 @@ ECardResult CardGciFolder::createFile(const char* filename, size_t size, FileHan
   }
 
   gciFileHeader->swapEndian();
-  m_files.push_back({*gciFileHeader, fileSize, reinterpret_cast<const char8_t*>(gciFilename.c_str()), false}); // push non-endian swapped header first
+  // GC SDK semantics: CARDCreate returns an OPEN file handle -- the caller
+  // writes through it immediately (e.g. SMS TCardManager::createFile_ ->
+  // filledInitData_ -> CARDWrite). Registering the file as opened=false made
+  // getFile() reject the fresh handle, so every post-create CARDWrite/CARDClose
+  // failed (NOCARD/NOFILE) and newly created save files stayed all-zero.
+  m_files.push_back({*gciFileHeader, fileSize, reinterpret_cast<const char8_t*>(gciFilename.c_str()), true}); // push non-endian swapped header first
   handleOut = FileHandle(m_files.size() - 1, 0);
 
   return ECardResult::READY;
