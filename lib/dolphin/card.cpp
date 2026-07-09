@@ -11,6 +11,25 @@
 #include "../card/CardGciFolder.hpp"
 #include "../fs_helper.hpp"
 
+// Weak host-allocation scope hooks. Hosts that replace the global operator
+// new with a guest-heap router (sms-boot's JKRHeap) override these so CARD-
+// internal C++ allocations (std::filesystem::path, std::vector/std::string in
+// CardGciFolder, make_unique in CARDInit) go to the host allocator instead of
+// whatever guest heap is current at the game-thread call site. Same weak-
+// override pattern as lib/dolphin/dvd/dvd.cpp — CARD was the last un-gated
+// entry-point group (CLAUDE.md "aurora CARD is the known un-gated remainder").
+extern "C" void aurora_host_alloc_push(void) __attribute__((weak));
+extern "C" void aurora_host_alloc_pop(void) __attribute__((weak));
+extern "C" void aurora_host_alloc_push(void) {}
+extern "C" void aurora_host_alloc_pop(void) {}
+
+namespace {
+struct HostAllocScope {
+  HostAllocScope() { aurora_host_alloc_push(); }
+  ~HostAllocScope() { aurora_host_alloc_pop(); }
+};
+} // namespace
+
 namespace {
 aurora::Module Log("aurora::card");
 std::array<std::unique_ptr<aurora::card::ICard>, 2> CardChannels = {{}};
@@ -158,6 +177,7 @@ void CARDInit(const char* game, const char* maker) {
   if (Initialized) {
     return;
   }
+  HostAllocScope hostAllocScope;
   Initialized = true;
   Log.info("CARD API Initialized BUILT <{} {}>", __DATE__, __TIME__);
 
@@ -278,6 +298,7 @@ s32 CARDCreate(const s32 chan, const char* fileName, const u32 size, CARDFileInf
   if (chan < 0 || chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   if (!CARD_READY(chan))
     return CARD_RESULT_NOCARD;
   const auto& card = GET_CARD(chan);
@@ -307,6 +328,7 @@ s32 CARDDelete(const s32 chan, const char* fileName) {
   if (chan < 0 || chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   if (!CARD_READY(chan))
     return CARD_RESULT_NOCARD;
 
@@ -335,6 +357,7 @@ s32 CARDFastDelete(const s32 chan, const s32 fileNo) {
   if (chan < 0 || chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   if (!CARD_READY(chan))
     return CARD_RESULT_NOCARD;
 
@@ -362,6 +385,7 @@ s32 CARDFastOpen(const s32 chan, const s32 fileNo, CARDFileInfo* fileInfo) {
   if (chan < 0 || chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   if (!CARD_READY(chan))
     return CARD_RESULT_NOCARD;
 
@@ -381,6 +405,7 @@ s32 CARDFormat(s32 chan) {
   if (chan < 0 || chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   if (!CARD_READY(chan))
     return CARD_RESULT_NOCARD;
 
@@ -488,6 +513,7 @@ s32 CARDGetStatus(const s32 chan, s32 fileNo, CARDStat* stat) {
   if (chan < 0 || chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   if (!CARD_READY(chan))
     return CARD_RESULT_NOCARD;
   const auto& card = GET_CARD(chan);
@@ -532,6 +558,7 @@ s32 CARDOpen(const s32 chan, const char* fileName, CARDFileInfo* fileInfo) {
   if (chan < 0 || chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   if (!CARD_READY(chan))
     return CARD_RESULT_NOCARD;
   const auto& card = GET_CARD(chan);
@@ -550,6 +577,7 @@ BOOL CARDProbe(const s32 chan) {
   if (chan < 0 || chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   const auto& card = GET_CARD(chan);
 
   aurora::card::ProbeResults probeData = card->probeCardFile(cardPaths[chan]);
@@ -560,6 +588,7 @@ s32 CARDProbeEx(const s32 chan, s32* memSize, s32* sectorSize) {
   if (chan < 0 || chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   const auto& card = GET_CARD(chan);
 
   // ReSharper disable once CppUseStructuredBinding
@@ -574,6 +603,7 @@ s32 CARDRename(const s32 chan, const char* oldName, const char* newName) {
   if (chan < 0 || chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   if (!CARD_READY(chan))
     return CARD_RESULT_NOCARD;
   const auto& card = GET_CARD(chan);
@@ -613,6 +643,7 @@ s32 CARDSetStatus(const s32 chan, s32 fileNo, const CARDStat* stat) {
   if (chan < 0 || chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   if (!CARD_READY(chan))
     return CARD_RESULT_NOCARD;
   const auto& card = GET_CARD(chan);
@@ -672,6 +703,7 @@ s32 CARDClose(CARDFileInfo* fileInfo) {
   if (fileInfo->chan < 0 || fileInfo->chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   if (!CARD_READY(fileInfo->chan))
     return CARD_RESULT_NOCARD;
   const auto& card = GET_CARD(fileInfo->chan);
@@ -689,6 +721,7 @@ s32 CARDRead(const CARDFileInfo* fileInfo, void* addr, s32 length, const s32 off
   if (fileInfo->chan < 0 || fileInfo->chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   if (!CARD_READY(fileInfo->chan))
     return CARD_RESULT_NOCARD;
   const auto& card = GET_CARD(fileInfo->chan);
@@ -715,6 +748,7 @@ s32 CARDWrite(const CARDFileInfo* fileInfo, const void* addr, const s32 length, 
   if (fileInfo->chan < 0 || fileInfo->chan >= 2) {
     return CARD_RESULT_FATAL_ERROR;
   }
+  HostAllocScope hostAllocScope;
   if (!CARD_READY(fileInfo->chan))
     return CARD_RESULT_NOCARD;
   const auto& card = GET_CARD(fileInfo->chan);
