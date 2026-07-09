@@ -80,7 +80,10 @@ ECardResult CardGciFolder::openFile(const char* filename, FileHandle& handleOut)
     idx++;
   }
 
-  return ECardResult::NOCARD;
+  // Per the GC SDK contract (dolphin/card.h): NOCARD means "no card in slot",
+  // NOFILE means "card present, file absent". The folder is already mounted
+  // by the time this scan runs, so a miss here is always NOFILE.
+  return ECardResult::NOFILE;
 }
 
 ECardResult CardGciFolder::openFile(uint32_t fileno, FileHandle& handleOut) {
@@ -94,7 +97,9 @@ ECardResult CardGciFolder::openFile(uint32_t fileno, FileHandle& handleOut) {
     return ECardResult::READY;
   }
 
-  return ECardResult::NOCARD;
+  // See comment in the const char* overload above: card is mounted, so a
+  // missing fileno is NOFILE, not NOCARD.
+  return ECardResult::NOFILE;
 }
 
 ECardResult CardGciFolder::createFile(const char* filename, size_t size, FileHandle& handleOut) {
