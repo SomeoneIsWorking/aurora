@@ -67,24 +67,27 @@ OSTime OSGetTime() {
     auto sinceUnix = chrono::duration_cast<chrono::microseconds>(currentTime.time_since_epoch());
     s64 totalMicros = sinceUnix.count();
 
-    // Apply local timezone offset
-    std::time_t wallClock = chrono::system_clock::to_time_t(currentTime);
-    std::tm localTm{};
-    std::tm gmTm{};
+    // Apply local timezone offset (the GC RTC counts local time). Computing it
+    // with localtime_r + two mktime() calls PER INVOCATION made this the
+    // hottest path in the game loop: glibc re-stats /etc/localtime inside
+    // mktime/tzset, and OSGetTick is called from every frame-pacing spin. The
+    // offset is constant for the process lifetime — compute it exactly once.
+    static const s64 utcOffsetSec = [] {
+        std::time_t wallClock = chrono::system_clock::to_time_t(startupTime);
+        std::tm localTm{};
+        std::tm gmTm{};
 #if defined(_WIN32)
-    localtime_s(&localTm, &wallClock);
-    gmtime_s(&gmTm, &wallClock);
+        localtime_s(&localTm, &wallClock);
+        gmtime_s(&gmTm, &wallClock);
 #else
-    localtime_r(&wallClock, &localTm);
-    gmtime_r(&wallClock, &gmTm);
+        localtime_r(&wallClock, &localTm);
+        gmtime_r(&wallClock, &gmTm);
 #endif
-
-    // Fix time with daylight savings
-    localTm.tm_isdst = -1;
-    gmTm.tm_isdst = -1;
-
-    // Compute UTC offset in seconds
-    s64 utcOffsetSec = static_cast<s64>(mktime(&localTm)) - static_cast<s64>(mktime(&gmTm));
+        // Fix time with daylight savings
+        localTm.tm_isdst = -1;
+        gmTm.tm_isdst = -1;
+        return static_cast<s64>(mktime(&localTm)) - static_cast<s64>(mktime(&gmTm));
+    }();
 
     s64 secondsSinceGcnEpoch = (totalMicros / 1000000LL) - gcnEpochUnix + utcOffsetSec;
     s64 remainderMicros = totalMicros % 1000000LL;
