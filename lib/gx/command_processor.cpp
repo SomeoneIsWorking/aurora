@@ -31,6 +31,13 @@ static thread_local int g_sbMarkerDrawIdx = 0; // Nth draw since the current mar
 // element a GXCopyTex follows).
 extern "C" const char* sb_gx_last_marker() { return g_sbLastMarker.c_str(); }
 
+// VIGetRetraceCount is defined game-side (sms-boot/runtime/sdk_stubs.cpp) and
+// advanced once per sb_frame_present (sms-boot/runtime/frame_seam.cpp) — same
+// counter SB_DUMP_FRAME_AFTER's frame index tracks. Declared weak so aurora's
+// standalone unit tests (which don't link the game) still build.
+extern "C" unsigned VIGetRetraceCount(void) __attribute__((weak));
+static unsigned sb_gx_vi_retrace_count() { return (&VIGetRetraceCount) ? VIGetRetraceCount() : 0; }
+
 // SB_TIMELINE: ordered per-frame event log shared across TUs (marker changes,
 // copies, clears, present) to reconstruct the GC multi-pass frame sequence.
 static long g_sbTimelineStart = -1;
@@ -1799,20 +1806,33 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     }
   }
 
-  // SB_NDC_PROBE=<minVerts> [+ SB_NDC_MARK=<marker substring>]: CPU-side
-  // replication of the vertex shader transform for indexed-position draws —
+  // SB_NDC_PROBE=<minVerts> [+ SB_NDC_MARK=<marker substring>] [+ SB_NDC_PROBE_AFTER=<retraceCount>]:
+  // CPU-side replication of the vertex shader transform for indexed-position draws —
   // projects EVERY vertex through the exact matrices the GPU will use
   // (per-vertex PNMTXIDX honored, same row-dot convention as the WGSL) and
   // histograms the clip results. Distinguishes "strip lands off-screen due to
   // a transform bug" from "strip genuinely tiny / genuinely missing".
+  //
+  // SB_NDC_PROBE_AFTER (2026-07-10, title-backdrop-black probe): the 400-print
+  // budget below is a whole-run budget, not per-frame — at title, thousands of
+  // draws happen before the stable PRESS-START window (present ~800-3200), so
+  // an unwindowed probe exhausts its budget on the logo/fade frames and never
+  // reaches the frame under investigation. Gate on the game's own VI retrace
+  // counter (VIGetRetraceCount, defined in sms-boot/runtime/sdk_stubs.cpp and
+  // advanced once per sb_frame_present — same counter SB_DUMP_FRAME_AFTER's
+  // frame index tracks) so this can be pointed at the exact dumped present.
   {
     static int s_minVerts = -2;
     static const char* s_markFilter = nullptr;
+    static long s_afterRetrace = -1;
     if (s_minVerts == -2) {
       const char* e = std::getenv("SB_NDC_PROBE");
       s_minVerts = (e != nullptr && e[0] != '\0') ? std::atoi(e) : -1;
       if (s_minVerts == 0) s_minVerts = 1;
       s_markFilter = std::getenv("SB_NDC_MARK");
+      if (const char* a = std::getenv("SB_NDC_PROBE_AFTER"); a != nullptr && a[0] != '\0') {
+        s_afterRetrace = std::atol(a);
+      }
     }
     static int s_printed = 0;
     // SB_NDC_PROBE companion: the per-vertex breakdown below is normally gated to the
@@ -1824,7 +1844,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     const auto posDesc = g_gxState.vtxDesc[GX_VA_POS];
     const auto& posFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
     const auto& arr = g_gxState.arrays[GX_VA_POS];
-    if (s_minVerts > 0 && s_printed < 400 && vtxCount >= static_cast<u16>(s_minVerts) &&
+    const bool afterWindowOk = s_afterRetrace < 0 || static_cast<long>(sb_gx_vi_retrace_count()) >= s_afterRetrace;
+    if (s_minVerts > 0 && s_printed < 400 && afterWindowOk && vtxCount >= static_cast<u16>(s_minVerts) &&
         (posDesc == GX_INDEX16 || posDesc == GX_INDEX8) &&
         (posFmt.type == GX_F32 || posFmt.type == GX_S16) && arr.data != nullptr &&
         (s_markFilter == nullptr || g_sbLastMarker.find(s_markFilter) != std::string::npos)) {
@@ -2243,17 +2264,39 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // SB_DRAW_DUMP=1: one-shot per-draw identity dump for the first drain past
   // draw #200 — prim/verts/texture/position-matrix translation, enough to
   // recognize which shapes the frame contains (e.g. the 752-vert sky dome).
+  //
+  // SB_DRAW_DUMP_AFTER=<retraceCount> (2026-07-10, title-backdrop-black probe):
+  // the draw-index heuristic below (~160 draws/frame) undercounts badly once a
+  // marker's packet-per-strip breakdown is this fine (DrawBuf MapOpa alone is
+  // 200+ packets at title) — start/duration in draw-index space lands on the
+  // wrong present entirely. Gate on VIGetRetraceCount instead (same counter
+  // SB_DUMP_FRAME_AFTER / SB_NDC_PROBE_AFTER use) so this can target the exact
+  // dumped present directly.
   if (const char* e = std::getenv("SB_DRAW_DUMP"); e != nullptr) {
     // SB_DRAW_DUMP=<startDraw>: dump 200 draws starting at that global draw
     // index (draw counts run ~160/frame at title; pick start = frame*160).
     // SB_DRAW_DUMP=1 keeps the old early-boot window.
     static int s_dumped = 0;
     static int s_start = -1;
+    static long s_afterRetrace = -1;
+    static int s_windowDumped = 0; // draws emitted since the retrace window opened
     if (s_start < 0) {
       s_start = std::atoi(e);
       if (s_start < 200) s_start = 200;
+      if (const char* a = std::getenv("SB_DRAW_DUMP_AFTER"); a != nullptr && a[0] != '\0') {
+        s_afterRetrace = std::atol(a);
+      }
     }
-    if (s_dumped >= s_start && s_dumped < s_start + 200) {
+    // SB_DRAW_DUMP_AFTER present: replace the draw-index window with "first 200
+    // draws once the retrace counter clears the threshold" — the two schemes
+    // are mutually exclusive (a present's absolute draw index is unrelated to
+    // its retrace count once boot has run for a while).
+    const bool windowed = s_afterRetrace >= 0;
+    const bool afterWindowOk = !windowed || static_cast<long>(sb_gx_vi_retrace_count()) >= s_afterRetrace;
+    const bool inRange = windowed ? (afterWindowOk && s_windowDumped < 200)
+                                   : (s_dumped >= s_start && s_dumped < s_start + 200);
+    if (inRange) {
+      if (windowed) ++s_windowDumped;
       const auto& obj = g_gxState.textures[0].texObj;
       const auto* pn = reinterpret_cast<const float*>(&g_gxState.pnMtx[g_gxState.currentPnMtx].pos);
       const auto& vp = g_gxState.logicalViewport;
