@@ -376,6 +376,12 @@ void GXCopyDisp(void* dest, GXBool clear) {
 }
 
 void GXCopyTex(void* dest, GXBool clear) {
+  // SB_COPY_DBG: log every EFB->texture copy (the mirror capture + the mid-scene
+  // "snapshot" retail composites the title backdrop from). Distinct from the disp copy.
+  if (std::getenv("SB_COPY_DBG") != nullptr) {
+    static long n = 0;
+    std::fprintf(stderr, "[tex-copy] n=%ld dest=%p clear=%d\n", ++n, dest, clear != GX_FALSE);
+  }
   GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_DEST);
   GX_WRITE_U64(reinterpret_cast<u64>(dest));
 
