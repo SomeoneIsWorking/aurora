@@ -1,5 +1,6 @@
 #include "gx.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <execinfo.h>
@@ -19,6 +20,36 @@ static inline void CacheProjectionVector(const f32* ptr, GXProjectionType type) 
 // game) still build. Same pattern as lib/gx/command_processor.cpp.
 extern "C" unsigned VIGetRetraceCount(void) __attribute__((weak));
 static unsigned sb_proj_vi_retrace_count() { return (&VIGetRetraceCount) ? VIGetRetraceCount() : 0; }
+
+// Shared cross-instrument sequence counter (sms-boot/runtime/trace_seq.cpp).
+// SB_TRACE_SEQ=1: prefix proj-dbg (and pos-mtx-slot0) lines with seq=N so
+// this family interleaves exactly with the present-boundary/plist-order/
+// drawbuf-flush logs on one global order (retrace stamps alone straddle
+// present boundaries and can't be trusted to interleave — see trace_seq.cpp).
+extern "C" uint64_t sb_trace_seq(void) __attribute__((weak));
+static bool sb_trace_seq_on() {
+  static int v = -1;
+  if (v < 0) {
+    const char* e = std::getenv("SB_TRACE_SEQ");
+    v = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  return v == 1 && &sb_trace_seq;
+}
+
+// SB_PROJ_DBG_AFTER=<retrace> also gates [posmtx0-dbg]: unthresholded, this
+// print fires on every GX_PNMTX0 load (every draw call), which floods stderr
+// heavily enough from frame 0 to dominate a paced run's wall-clock (observed:
+// 75s of paced runtime only reached retrace 788 with this unconditional).
+// Reuses the existing SB_PROJ_DBG_AFTER threshold rather than adding a new
+// var, since posmtx0 is diagnostic sibling data to the projection trace.
+static long sb_proj_dbg_after_thresh() {
+  static long t = -2;
+  if (t == -2) {
+    const char* e = std::getenv("SB_PROJ_DBG_AFTER");
+    t = (e != nullptr && e[0] != '\0') ? std::atol(e) : -1;
+  }
+  return t;
+}
 
 // SB_PROJ_DBG=1: per-call log of every GXSetProjection[v] — type, the 4
 // "diagonal" scale/translate terms (mtx00, mtx11, mtx22, mtx23 — the values
@@ -42,9 +73,17 @@ static void sb_proj_dbg_log(const char* fn, GXProjectionType type, const f32* pr
   const unsigned retrace = sb_proj_vi_retrace_count();
   static long nCalls = 0;
   ++nCalls;
+  const bool seqOn = sb_trace_seq_on();
+  const uint64_t seq = seqOn ? sb_trace_seq() : 0;
   if (dbgAll == 1) {
-    std::fprintf(stderr, "[proj-dbg] n=%ld fn=%s type=%c retrace=%u diag=[%.6f,%.6f,%.6f,%.6f]\n", nCalls, fn,
-                 type == GX_ORTHOGRAPHIC ? 'O' : 'P', retrace, projVec[1], projVec[3], projVec[5], projVec[6]);
+    if (seqOn) {
+      std::fprintf(stderr, "[proj-dbg] seq=%lu n=%ld fn=%s type=%c retrace=%u diag=[%.6f,%.6f,%.6f,%.6f]\n",
+                   (unsigned long)seq, nCalls, fn, type == GX_ORTHOGRAPHIC ? 'O' : 'P', retrace, projVec[1],
+                   projVec[3], projVec[5], projVec[6]);
+    } else {
+      std::fprintf(stderr, "[proj-dbg] n=%ld fn=%s type=%c retrace=%u diag=[%.6f,%.6f,%.6f,%.6f]\n", nCalls, fn,
+                   type == GX_ORTHOGRAPHIC ? 'O' : 'P', retrace, projVec[1], projVec[3], projVec[5], projVec[6]);
+    }
   }
   if (afterThresh >= 0 && static_cast<long>(retrace) >= afterThresh) {
     static int nOrtho = 0;
@@ -52,10 +91,17 @@ static void sb_proj_dbg_log(const char* fn, GXProjectionType type, const f32* pr
     int* counter = type == GX_ORTHOGRAPHIC ? &nOrtho : &nPersp;
     if (*counter < 5) {
       ++*counter;
-      std::fprintf(stderr,
-                    "[proj-dbg-after] n=%ld fn=%s type=%c retrace=%u diag=[%.6f,%.6f,%.6f,%.6f] (case %d/5 of type)\n",
-                    nCalls, fn, type == GX_ORTHOGRAPHIC ? 'O' : 'P', retrace, projVec[1], projVec[3], projVec[5],
-                    projVec[6], *counter);
+      if (seqOn) {
+        std::fprintf(stderr,
+                      "[proj-dbg-after] seq=%lu n=%ld fn=%s type=%c retrace=%u diag=[%.6f,%.6f,%.6f,%.6f] (case %d/5 of type)\n",
+                      (unsigned long)seq, nCalls, fn, type == GX_ORTHOGRAPHIC ? 'O' : 'P', retrace, projVec[1],
+                      projVec[3], projVec[5], projVec[6], *counter);
+      } else {
+        std::fprintf(stderr,
+                      "[proj-dbg-after] n=%ld fn=%s type=%c retrace=%u diag=[%.6f,%.6f,%.6f,%.6f] (case %d/5 of type)\n",
+                      nCalls, fn, type == GX_ORTHOGRAPHIC ? 'O' : 'P', retrace, projVec[1], projVec[3], projVec[5],
+                      projVec[6], *counter);
+      }
       void* fr[16];
       int nf = backtrace(fr, 16);
       backtrace_symbols_fd(fr, nf, 2);
@@ -144,6 +190,18 @@ void GXSetProjectionv(const f32* ptr) {
 void GXLoadPosMtxImm(const void* mtx_, u32 id) {
   CHECK(id >= GX_PNMTX0 && id <= GX_PNMTX9, "invalid pn mtx {}", static_cast<int>(id));
   const auto* mtx = reinterpret_cast<const f32*>(mtx_);
+
+  // SB_TRACE_SEQ=1: log every load to slot 0 (GX_PNMTX0, the slot every
+  // unskinned draw call binds) so the unified trace shows the pos-mtx write
+  // that pairs with each drawbuf flush, not just the projection write.
+  if (id == GX_PNMTX0 && sb_trace_seq_on()) {
+    long after = sb_proj_dbg_after_thresh();
+    unsigned retrace = sb_proj_vi_retrace_count();
+    if (after < 0 || static_cast<long>(retrace) >= after) {
+      std::fprintf(stderr, "[posmtx0-dbg] seq=%lu retrace=%u m=[%.3f,%.3f,%.3f,%.3f]\n",
+                   (unsigned long)sb_trace_seq(), retrace, mtx[3], mtx[7], mtx[11], mtx[0]);
+    }
+  }
 
   GX_WRITE_U8(0x10);
   GX_WRITE_U32((id * 4) | 0xB0000);
