@@ -2302,9 +2302,12 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     if (s_frameIdx == s_targetFrame) {
       static long s_frameDumped = 0;
       const auto& vp = g_gxState.logicalViewport;
-      std::fprintf(stderr, "[draw-dump-frame] #%ld frame=%ld retrace=%ld prim=%u verts=%u proj=%c vp=%.0fx%.0f mark='%s'\n",
+      std::fprintf(stderr, "[draw-dump-frame] #%ld frame=%ld retrace=%ld prim=%u verts=%u proj=%c vp=%.0fx%.0f bm=%d sf=%d df=%d cU=%d aU=%d mark='%s'\n",
                    s_frameDumped++, s_targetFrame, rc, static_cast<unsigned>(prim), vtxCount,
-                   g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', vp.width, vp.height, g_sbLastMarker.c_str());
+                   g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', vp.width, vp.height,
+                   static_cast<int>(g_gxState.blendMode), static_cast<int>(g_gxState.blendFacSrc),
+                   static_cast<int>(g_gxState.blendFacDst), g_gxState.colorUpdate ? 1 : 0,
+                   g_gxState.alphaUpdate ? 1 : 0, g_sbLastMarker.c_str());
     }
   }
   if (const char* e = std::getenv("SB_DRAW_DUMP"); e != nullptr) {
