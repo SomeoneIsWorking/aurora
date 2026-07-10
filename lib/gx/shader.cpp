@@ -1677,7 +1677,12 @@ fn load_u16(p: ptr<storage, array<u32>>, byte_off: u32, le: bool) -> u32 {{
   let sub = byte_off & 3u;
   let word = load_word(p, word_idx);
   if (sub <= 2u) {{
-    return bswap16(extractBits(word, sub * 8u, 16u), le);
+    // Shift+mask instead of dynamic-offset extractBits: Tint miscompiles
+    // extractBits with a runtime offset (clamped lowering emits an
+    // OpExtInst(GLSL.std.450 UMin) whose SPIRV writer produces an invalid
+    // operand -> "Produced invalid SPIRV" on cold pipeline compile). Guarded
+    // sub<=2 so offset(0/8/16)+16 <= 32, making these exactly equivalent.
+    return bswap16((word >> (sub * 8u)) & 0xffffu, le);
   }}
   let next = load_word(p, word_idx + 1u);
   let raw = extractBits(word, 24u, 8u) | (extractBits(next, 0u, 8u) << 8u);
@@ -1713,8 +1718,8 @@ fn raw_fetch_u8_2(p: ptr<storage, array<u32>>, byte_off: u32) -> vec2u {{
   if (sub <= 2u) {{
     let shift = sub * 8u;
     return vec2u(
-      extractBits(word, shift + 0u, 8u),
-      extractBits(word, shift + 8u, 8u),
+      (word >> (shift + 0u)) & 0xffu,
+      (word >> (shift + 8u)) & 0xffu,
     );
   }}
   let next = load_word(p, word_idx + 1u);
