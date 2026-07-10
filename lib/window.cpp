@@ -345,6 +345,19 @@ void show_window() {
   }
 }
 
+bool is_headless() noexcept {
+  static const int s_headless = [] {
+    const char* e = std::getenv("SB_HEADLESS");
+    const bool headless = e != nullptr && e[0] != '\0' && e[0] != '0';
+    if (headless) {
+      Log.info("SB_HEADLESS: surface/swapchain will never be touched -- rendering "
+               "offscreen only, present is a no-op");
+    }
+    return headless ? 1 : 0;
+  }();
+  return s_headless != 0;
+}
+
 bool initialize() {
   /* We don't want to initialize anything input related here, otherwise the add events will get lost to the void */
   TRY(SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight"), "Error setting {}: {}", SDL_HINT_ORIENTATIONS,
@@ -447,17 +460,11 @@ bool is_paused() noexcept {
     return true;
   }
   const auto flags = SDL_GetWindowFlags(g_window);
-  if ((flags & SDL_WINDOW_HIDDEN) != 0u) {
+  if ((flags & SDL_WINDOW_HIDDEN) != 0u && !is_headless()) {
+    // A hidden window normally means backgrounded/minimized and should pause.
     // SB_HEADLESS runs render with the window intentionally hidden — a hidden
     // window must not pause the frame loop there.
-    static int s_headless = -1;
-    if (s_headless < 0) {
-      const char* e = std::getenv("SB_HEADLESS");
-      s_headless = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
-    }
-    if (s_headless == 0) {
-      return true;
-    }
+    return true;
   }
   // Wait until the window has received focus before respecting pauseOnFocusLost
   if (!g_gotFocus) {

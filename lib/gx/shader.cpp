@@ -9,6 +9,8 @@
 #include <dolphin/gx/GXEnum.h>
 
 #include <absl/container/flat_hash_set.h>
+#include <cstdio>
+#include <filesystem>
 #include <mutex>
 #include <string_view>
 #include <utility>
@@ -2008,6 +2010,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
   // SB_SHADER_DUMP=1: print every generated WGSL shader (hash-tagged).
   if (EnableDebugPrints || std::getenv("SB_SHADER_DUMP") != nullptr) {
     Log.info("Generated shader (hash {:x}): {}", hash, shaderSource);
+  }
+  // SB_DUMP_WGSL=<dir>: write each composed WGSL source to <dir>/pipeline_<hash>.wgsl
+  // BEFORE it reaches Dawn/Tint for compilation. Permanent diagnostic (keep-diagnostics
+  // rule) for tracking down cold-pipeline-compile crashes where the offending shader
+  // must be captured pre-crash (the device error callback only prints Dawn's message,
+  // not which shader produced it) -- see debug_journal/ for the WGSL->SPIRV
+  // "OpFunction ... cannot be a type" investigation this was built for.
+  if (const char* dumpDir = std::getenv("SB_DUMP_WGSL"); dumpDir != nullptr && dumpDir[0] != '\0') {
+    std::error_code ec;
+    std::filesystem::create_directories(dumpDir, ec);
+    const auto path = std::filesystem::path(dumpDir) / fmt::format("pipeline_{:x}.wgsl", hash);
+    if (FILE* f = std::fopen(path.c_str(), "wb")) {
+      std::fwrite(shaderSource.data(), 1, shaderSource.size(), f);
+      std::fclose(f);
+    }
   }
 
   return shaderSource;

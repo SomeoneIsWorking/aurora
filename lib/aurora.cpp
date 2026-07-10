@@ -168,12 +168,9 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
 #endif
 
   // SB_HEADLESS=1: keep the window hidden — diagnostic/CI runs render and
-  // dump frames without ever mapping an X11 window.
-  {
-    const char* e = std::getenv("SB_HEADLESS");
-    if (e == nullptr || e[0] == '\0' || e[0] == '0') {
-      window::show_window();
-    }
+  // dump frames without ever mapping an X11 window. See window::is_headless().
+  if (!window::is_headless()) {
+    window::show_window();
   }
 
 #ifdef AURORA_ENABLE_GX
@@ -231,7 +228,15 @@ const AuroraEvent* update() noexcept {
 bool begin_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
-  {
+  if (window::is_headless()) {
+    // Headless: the surface/swapchain is never touched (see is_headless()) --
+    // just gate on pause and fall through to render into the offscreen
+    // target. is_presentable()/refresh_surface()/release_surface() all deal
+    // with the WSI surface and must not run here.
+    if (window::is_paused()) {
+      return false;
+    }
+  } else {
     if (!window::is_presentable()) {
       webgpu::release_surface();
       return false;
@@ -383,10 +388,14 @@ void end_frame() noexcept {
             s_dumpBuffer.Unmap();
           });
     }
+    const bool headless = window::is_headless();
     wgpu::Texture currentTexture;
     wgpu::TextureView currentView;
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
-    {
+    if (!headless) {
+      // Headless never acquires a swapchain texture at all -- GetCurrentTexture
+      // on a hidden window's surface is what deadlocks in the Vulkan WSI's
+      // explicit-sync release wait when the compositor never displays it.
       window::SurfaceLock surfaceLock;
       if (window::is_presentable() && g_surface) {
         ZoneScopedN("Acquire texture");
@@ -400,7 +409,7 @@ void end_frame() noexcept {
       }
     }
 
-    const bool canPresent = currentTexture && currentView;
+    const bool canPresent = !headless && currentTexture && currentView;
     if (canPresent) {
       wgpu::BindGroup presentBindGroup;
       if (rmlBindGroup && !rmlOverlay) {
@@ -458,7 +467,7 @@ void end_frame() noexcept {
         imgui::render(pass, imguiDrawData);
         pass.End();
       }
-    } else {
+    } else if (!headless) {
       Log.info("Skipping present; window not presentable");
     }
     webgpu::gpu_prof::frame_end(encoder);
@@ -469,7 +478,11 @@ void end_frame() noexcept {
       g_queue.Submit(1, &buffer);
     }
     webgpu::gpu_prof::after_submit();
-    if (canPresent && g_surface) {
+    if (headless) {
+      // No WSI present in headless mode -- GPU progress is driven by the
+      // submitted queue work above (fifo drain + gfx::finish), not by a
+      // present, so pacing/wait_for_gpu_progress must not depend on this.
+    } else if (canPresent && g_surface) {
       ZoneScopedN("Present");
       wgpu::ConvertibleStatus status = wgpu::Status::Error;
       {

@@ -40,6 +40,10 @@ SDL_Window* get_sdl_window();
 SDL_Renderer* get_sdl_renderer();
 bool is_paused() noexcept;
 bool is_presentable() noexcept;
+// SB_HEADLESS=1: the window is created hidden and never shown, and (per this
+// flag) the surface/swapchain is never touched at all -- see is_headless()
+// call sites in aurora.cpp/webgpu/gpu.cpp. Cached from the environment once.
+bool is_headless() noexcept;
 void set_surface_ready(bool ready) noexcept;
 void set_title(const char* title);
 void set_fullscreen(bool fullscreen);

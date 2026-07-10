@@ -1142,9 +1142,14 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t 
   }
   g_graphicsConfig.surfaceConfiguration.width = nativeWidth;
   g_graphicsConfig.surfaceConfiguration.height = nativeHeight;
-  auto surfaceConfiguration = g_graphicsConfig.surfaceConfiguration;
-  surfaceConfiguration.device = g_device;
-  {
+  // SB_HEADLESS: never configure the real WSI swapchain -- the hidden
+  // window's surface can deadlock a later GetCurrentTexture on the Vulkan
+  // explicit-sync release wait if the compositor never displays it. The
+  // offscreen render targets below are still (re)created at the requested
+  // size; only the swapchain configuration is skipped.
+  if (!window::is_headless()) {
+    auto surfaceConfiguration = g_graphicsConfig.surfaceConfiguration;
+    surfaceConfiguration.device = g_device;
     window::SurfaceLock surfaceLock;
     g_surface.Configure(&surfaceConfiguration);
   }
