@@ -2301,9 +2301,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     if (rc != s_prevRetrace) { s_prevRetrace = rc; ++s_frameIdx; }
     if (s_frameIdx == s_targetFrame) {
       static long s_frameDumped = 0;
-      std::fprintf(stderr, "[draw-dump-frame] #%ld frame=%ld retrace=%ld prim=%u verts=%u proj=%c mark='%s'\n",
+      const auto& vp = g_gxState.logicalViewport;
+      std::fprintf(stderr, "[draw-dump-frame] #%ld frame=%ld retrace=%ld prim=%u verts=%u proj=%c vp=%.0fx%.0f mark='%s'\n",
                    s_frameDumped++, s_targetFrame, rc, static_cast<unsigned>(prim), vtxCount,
-                   g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', g_sbLastMarker.c_str());
+                   g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', vp.width, vp.height, g_sbLastMarker.c_str());
     }
   }
   if (const char* e = std::getenv("SB_DRAW_DUMP"); e != nullptr) {
