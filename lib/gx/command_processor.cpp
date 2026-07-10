@@ -2272,6 +2272,26 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // wrong present entirely. Gate on VIGetRetraceCount instead (same counter
   // SB_DUMP_FRAME_AFTER / SB_NDC_PROBE_AFTER use) so this can target the exact
   // dumped present directly.
+  // SB_DRAW_DUMP_FRAME=<retraceCount>: dump EVERY draw whose VIGetRetraceCount()
+  // equals the target exactly, unbounded (no 200-draw cap) — the fix for the
+  // draw-count-window/200-cap undercounting whole late-boot frames (DrawBuf
+  // MapOpa alone is 200+ packets at title, so the old windows landed on the
+  // wrong present or truncated mid-frame). Retrace count is incremented AFTER
+  // the frame's draws drain inside sb_frame_present (frame_seam.cpp), so every
+  // draw belonging to "frame N" is emitted while VIGetRetraceCount() still
+  // reads N — reading it as an exact match (not >=) brackets exactly one
+  // present-to-present frame with no cap. Independent of SB_DRAW_DUMP/_AFTER
+  // below; env-gated, kept permanently as a diagnostic.
+  if (const char* fe = std::getenv("SB_DRAW_DUMP_FRAME"); fe != nullptr && fe[0] != '\0') {
+    static long s_targetRetrace = -2;
+    if (s_targetRetrace == -2) s_targetRetrace = std::atol(fe);
+    if (static_cast<long>(sb_gx_vi_retrace_count()) == s_targetRetrace) {
+      static long s_frameDumped = 0;
+      std::fprintf(stderr, "[draw-dump-frame] #%ld retrace=%ld prim=%u verts=%u proj=%c mark='%s'\n",
+                   s_frameDumped++, s_targetRetrace, static_cast<unsigned>(prim), vtxCount,
+                   g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', g_sbLastMarker.c_str());
+    }
+  }
   if (const char* e = std::getenv("SB_DRAW_DUMP"); e != nullptr) {
     // SB_DRAW_DUMP=<startDraw>: dump 200 draws starting at that global draw
     // index (draw counts run ~160/frame at title; pick start = frame*160).
@@ -2280,12 +2300,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     static int s_start = -1;
     static long s_afterRetrace = -1;
     static int s_windowDumped = 0; // draws emitted since the retrace window opened
+    static bool s_fullFrame = false; // SB_DRAW_DUMP_FRAME set: no 200-draw cap
     if (s_start < 0) {
       s_start = std::atoi(e);
       if (s_start < 200) s_start = 200;
       if (const char* a = std::getenv("SB_DRAW_DUMP_AFTER"); a != nullptr && a[0] != '\0') {
         s_afterRetrace = std::atol(a);
       }
+      s_fullFrame = std::getenv("SB_DRAW_DUMP_FRAME") != nullptr;
     }
     // SB_DRAW_DUMP_AFTER present: replace the draw-index window with "first 200
     // draws once the retrace counter clears the threshold" — the two schemes
@@ -2293,7 +2315,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     // its retrace count once boot has run for a while).
     const bool windowed = s_afterRetrace >= 0;
     const bool afterWindowOk = !windowed || static_cast<long>(sb_gx_vi_retrace_count()) >= s_afterRetrace;
-    const bool inRange = windowed ? (afterWindowOk && s_windowDumped < 200)
+    const bool inRange = windowed ? (afterWindowOk && (s_fullFrame || s_windowDumped < 200))
                                    : (s_dumped >= s_start && s_dumped < s_start + 200);
     if (inRange) {
       if (windowed) ++s_windowDumped;
