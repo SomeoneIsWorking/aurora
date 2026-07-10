@@ -13,6 +13,56 @@ static inline void CacheProjectionVector(const f32* ptr, GXProjectionType type) 
   }
 }
 
+// VIGetRetraceCount is defined game-side (sms-boot/runtime/sdk_stubs.cpp),
+// advanced once per sb_frame_present (sms-boot/runtime/frame_seam.cpp).
+// Declared weak so aurora's standalone unit tests (which don't link the
+// game) still build. Same pattern as lib/gx/command_processor.cpp.
+extern "C" unsigned VIGetRetraceCount(void) __attribute__((weak));
+static unsigned sb_proj_vi_retrace_count() { return (&VIGetRetraceCount) ? VIGetRetraceCount() : 0; }
+
+// SB_PROJ_DBG=1: per-call log of every GXSetProjection[v] — type, the 4
+// "diagonal" scale/translate terms (mtx00, mtx11, mtx22, mtx23 — the values
+// that distinguish a calibrated perspective/ortho from a garbage one), and
+// the current VIGetRetraceCount so calls can be correlated to a specific
+// present. SB_PROJ_DBG_AFTER=<retraceCount>: once VIGetRetraceCount clears
+// this threshold, also dump a caller backtrace for the first K calls of
+// EACH projection type (K=5) so the binder can be named, not just counted.
+static void sb_proj_dbg_log(const char* fn, GXProjectionType type, const f32* projVec) {
+  static int dbgAll = -1;
+  static long afterThresh = -1;
+  if (dbgAll < 0) {
+    const char* e = std::getenv("SB_PROJ_DBG");
+    dbgAll = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    const char* eAfter = std::getenv("SB_PROJ_DBG_AFTER");
+    afterThresh = (eAfter != nullptr && eAfter[0] != '\0') ? std::atol(eAfter) : -1;
+  }
+  if (dbgAll != 1 && afterThresh < 0) {
+    return;
+  }
+  const unsigned retrace = sb_proj_vi_retrace_count();
+  static long nCalls = 0;
+  ++nCalls;
+  if (dbgAll == 1) {
+    std::fprintf(stderr, "[proj-dbg] n=%ld fn=%s type=%c retrace=%u diag=[%.6f,%.6f,%.6f,%.6f]\n", nCalls, fn,
+                 type == GX_ORTHOGRAPHIC ? 'O' : 'P', retrace, projVec[1], projVec[3], projVec[5], projVec[6]);
+  }
+  if (afterThresh >= 0 && static_cast<long>(retrace) >= afterThresh) {
+    static int nOrtho = 0;
+    static int nPersp = 0;
+    int* counter = type == GX_ORTHOGRAPHIC ? &nOrtho : &nPersp;
+    if (*counter < 5) {
+      ++*counter;
+      std::fprintf(stderr,
+                    "[proj-dbg-after] n=%ld fn=%s type=%c retrace=%u diag=[%.6f,%.6f,%.6f,%.6f] (case %d/5 of type)\n",
+                    nCalls, fn, type == GX_ORTHOGRAPHIC ? 'O' : 'P', retrace, projVec[1], projVec[3], projVec[5],
+                    projVec[6], *counter);
+      void* fr[16];
+      int nf = backtrace(fr, 16);
+      backtrace_symbols_fd(fr, nf, 2);
+    }
+  }
+}
+
 extern "C" {
 
 void GXSetProjection(const void* mtx_, GXProjectionType type) {
@@ -44,6 +94,7 @@ void GXSetProjection(const void* mtx_, GXProjectionType type) {
       mtx[2][3],
   };
   CacheProjectionVector(projVec, type);
+  sb_proj_dbg_log("GXSetProjection", type, projVec);
 
   // XF bulk write: 6 params + projection type at 0x1020-0x1026
   GX_WRITE_U8(0x10);
@@ -78,6 +129,7 @@ void GXSetProjectionv(const f32* ptr) {
     }
   }
   CacheProjectionVector(ptr, type);
+  sb_proj_dbg_log("GXSetProjectionv", type, ptr);
 
   // XF bulk write: 6 params + projection type at 0x1020-0x1026
   GX_WRITE_U8(0x10);
