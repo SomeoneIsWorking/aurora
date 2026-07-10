@@ -2272,23 +2272,37 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // wrong present entirely. Gate on VIGetRetraceCount instead (same counter
   // SB_DUMP_FRAME_AFTER / SB_NDC_PROBE_AFTER use) so this can target the exact
   // dumped present directly.
-  // SB_DRAW_DUMP_FRAME=<retraceCount>: dump EVERY draw whose VIGetRetraceCount()
-  // equals the target exactly, unbounded (no 200-draw cap) — the fix for the
-  // draw-count-window/200-cap undercounting whole late-boot frames (DrawBuf
-  // MapOpa alone is 200+ packets at title, so the old windows landed on the
-  // wrong present or truncated mid-frame). Retrace count is incremented AFTER
-  // the frame's draws drain inside sb_frame_present (frame_seam.cpp), so every
-  // draw belonging to "frame N" is emitted while VIGetRetraceCount() still
-  // reads N — reading it as an exact match (not >=) brackets exactly one
-  // present-to-present frame with no cap. Independent of SB_DRAW_DUMP/_AFTER
-  // below; env-gated, kept permanently as a diagnostic.
+  // SB_DRAW_DUMP_FRAME=<retraceCount>: dump EVERY draw of exactly ONE frame —
+  // the first present whose VIGetRetraceCount() has reached the target — with
+  // no 200-draw cap (the fix for the draw-count-window/200-cap undercounting
+  // whole late-boot frames; DrawBuf MapOpa alone is 200+ packets at title, so
+  // the old windows landed on the wrong present or truncated mid-frame).
+  // Retrace is incremented AFTER a frame's draws drain in sb_frame_present, so
+  // every draw of "frame N" emits while VIGetRetraceCount()==N. NOTE: retrace
+  // does NOT advance by 1 per present — sb_frame_present adds `retraces` (often
+  // 2+ NTSC fields) each time, so it routinely JUMPS OVER an exact target (a
+  // `== target` test then never fires — the 2026-07-10 "0 draws dumped despite
+  // retrace passing 1000" bug). Latch onto the first retrace value >= target
+  // and dump only that latched frame — robust to the step size.
   if (const char* fe = std::getenv("SB_DRAW_DUMP_FRAME"); fe != nullptr && fe[0] != '\0') {
-    static long s_targetRetrace = -2;
-    if (s_targetRetrace == -2) s_targetRetrace = std::atol(fe);
-    if (static_cast<long>(sb_gx_vi_retrace_count()) == s_targetRetrace) {
+    // SB_DRAW_DUMP_FRAME=<N>: dump every draw of the Nth RENDERED FRAME. "Frame"
+    // is counted by retrace-value CHANGES, not by an absolute retrace target:
+    // VIGetRetraceCount neither steps by 1 nor advances at a fixed rate vs
+    // presents at the title (it can jump 2+ per present and stall during load
+    // loops), so both `== target` and `>= target` on the absolute value are
+    // unreliable (the 2026-07-10 "0 draws dumped" bug — retrace never landed on
+    // 1000/3000). Counting distinct retrace values gives a robust ordinal frame
+    // index regardless of step size or rate.
+    static long s_targetFrame = -2;
+    static long s_frameIdx = -1;       // # of retrace changes seen so far
+    static long s_prevRetrace = -1;
+    if (s_targetFrame == -2) s_targetFrame = std::atol(fe);
+    const long rc = static_cast<long>(sb_gx_vi_retrace_count());
+    if (rc != s_prevRetrace) { s_prevRetrace = rc; ++s_frameIdx; }
+    if (s_frameIdx == s_targetFrame) {
       static long s_frameDumped = 0;
-      std::fprintf(stderr, "[draw-dump-frame] #%ld retrace=%ld prim=%u verts=%u proj=%c mark='%s'\n",
-                   s_frameDumped++, s_targetRetrace, static_cast<unsigned>(prim), vtxCount,
+      std::fprintf(stderr, "[draw-dump-frame] #%ld frame=%ld retrace=%ld prim=%u verts=%u proj=%c mark='%s'\n",
+                   s_frameDumped++, s_targetFrame, rc, static_cast<unsigned>(prim), vtxCount,
                    g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', g_sbLastMarker.c_str());
     }
   }
