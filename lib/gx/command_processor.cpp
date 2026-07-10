@@ -1815,6 +1815,12 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       s_markFilter = std::getenv("SB_NDC_MARK");
     }
     static int s_printed = 0;
+    // SB_NDC_PROBE companion: the per-vertex breakdown below is normally gated to the
+    // first 6 MATCHED draws, which (2026-07-10 title-backdrop probe) happened to all be
+    // an orthographic pass. Also unlock the per-vertex dump for the first few PERSPECTIVE
+    // draws specifically, so a fully w<=0 (behind-camera) perspective draw is visible at
+    // the vertex level instead of only as a "wneg=vtxCount" summary line.
+    static int s_printedP = 0;
     const auto posDesc = g_gxState.vtxDesc[GX_VA_POS];
     const auto& posFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
     const auto& arr = g_gxState.arrays[GX_VA_POS];
@@ -1874,6 +1880,13 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           clip[c] = P[4 * c] * mv[0] + P[4 * c + 1] * mv[1] + P[4 * c + 2] * mv[2] + P[4 * c + 3];
         if (clip[3] <= 0.f) {
           ++wneg;
+          if (g_gxState.projType != GX_ORTHOGRAPHIC && s_printedP < 6 && v < 4) {
+            std::fprintf(stderr,
+                         "[ndc-probe-behind]  v%u idx=%u pos=(%.1f,%.1f,%.1f) mtx=%u M=[%.3f %.3f %.3f %.3f | "
+                         "%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f] mv=(%.1f,%.1f,%.1f) clipW=%.3f mark='%s'\n",
+                         v, idx, x, y, z, mtxIdx, M[0], M[1], M[2], M[3], M[4], M[5], M[6], M[7], M[8], M[9],
+                         M[10], M[11], mv[0], mv[1], mv[2], clip[3], g_sbLastMarker.c_str());
+          }
           continue;
         }
         const float nx = clip[0] / clip[3], ny = clip[1] / clip[3], nz = clip[2] / clip[3];
@@ -1937,6 +1950,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
                    static_cast<int>(g_gxState.alphaCompare.comp1), g_gxState.alphaCompare.ref1,
                    static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
                    g_sbLastMarker.c_str());
+      if (g_gxState.projType != GX_ORTHOGRAPHIC) ++s_printedP;
     }
   }
 
