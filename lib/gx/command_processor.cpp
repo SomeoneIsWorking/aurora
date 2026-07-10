@@ -2329,6 +2329,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                    "tev=%u ch0[light=%d matSrc=%d ambSrc=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
                    "a0[light=%d matSrc=%d ambSrc=%d mat=%.2f amb=%.2f mask=%02x] "
                    "prj=[%.4f %.4f %.4f %.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] clr0=%d clr1=%d mtxIdx=%u "
+                   "cull=%d zfunc=%d acmp=[c0=%d r0=%u op=%d c1=%d r1=%u] "
                    "posmtx=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] mark='%s'\n",
                    s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(),
                    static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
@@ -2350,7 +2351,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                    static_cast<int>(g_gxState.blendFacDst), static_cast<int>(posDesc),
                    static_cast<int>(posFmt.cnt), static_cast<int>(posFmt.type), posFmt.frac,
                    static_cast<int>(clr0Desc), static_cast<int>(clr1Desc),
-                   g_gxState.currentPnMtx, pn[0], pn[1], pn[2], pn[3], pn[4], pn[5], pn[6], pn[7],
+                   g_gxState.currentPnMtx,
+                   static_cast<int>(g_gxState.cullMode),
+                   static_cast<int>(g_gxState.depthFunc),
+                   static_cast<int>(g_gxState.alphaCompare.comp0), g_gxState.alphaCompare.ref0,
+                   static_cast<int>(g_gxState.alphaCompare.op),
+                   static_cast<int>(g_gxState.alphaCompare.comp1), g_gxState.alphaCompare.ref1,
+                   pn[0], pn[1], pn[2], pn[3], pn[4], pn[5], pn[6], pn[7],
                    pn[8], pn[9], pn[10], pn[11], g_sbLastMarker.c_str());
       // SB_TEV_DUMP=1: full TEV combiner state + texture format for this same
       // window, to pin down the exact stage math on a specific overbright
