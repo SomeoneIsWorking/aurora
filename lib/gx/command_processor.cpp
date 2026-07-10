@@ -2587,6 +2587,18 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   if (s_skipCopyQuad == 1 && g_sbDrawSamplesCopy) {
     return;
   }
+  // SB_PERSP_ZONLY=1 (diagnostic): force color_update=false on every PERSPECTIVE draw,
+  // mimicking retail's title where the whole 3D scene is drawn Z-only (cU=0) and only the
+  // 2D/EFB-snapshot composite paints color. If the frame then shows a crisp composited scene,
+  // native's over-bright is the missing Z-only discipline; if it goes black, native has no
+  // composite painting the backdrop. Restores after the draw so state isn't corrupted.
+  {
+    static int s_perspZonly = -1;
+    if (s_perspZonly < 0) { const char* e = std::getenv("SB_PERSP_ZONLY"); s_perspZonly = (e && e[0] && e[0] != '0') ? 1 : 0; }
+    if (s_perspZonly == 1 && g_gxState.projType != GX_ORTHOGRAPHIC) {
+      g_gxState.colorUpdate = false;
+    }
+  }
   // SB_SKIP_ORTHO=1 (diagnostic): drop every orthographic-projection draw —
   // strips all 2D overlays (logo art, faders, letterbox) to expose what the
   // 3D scene alone contributes to the framebuffer.
