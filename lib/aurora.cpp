@@ -3,6 +3,7 @@
 #ifdef AURORA_ENABLE_GX
 #include "gfx/common.hpp"
 #include "gfx/render_worker.hpp"
+#include "gx/command_processor.hpp"
 #include "gx/fifo.hpp"
 #include "imgui.hpp"
 #include "webgpu/gpu.hpp"
@@ -584,6 +585,14 @@ void aurora_end_frame() { aurora::end_frame(); }
 void aurora_discard_frame() {
 #ifdef AURORA_ENABLE_GX
   aurora::gx::fifo::clear_buffer();
+#endif
+}
+void aurora_fifo_replay(const uint8_t* data, uint32_t size, int bigEndian) {
+#ifdef AURORA_ENABLE_GX
+  // Synchronous replay of a raw command stream through the command processor.
+  // Does NOT touch the live FIFO buffer (the game's own commands); the parity
+  // harness calls this between begin_frame/end_frame with no game running.
+  aurora::gx::fifo::process(data, size, bigEndian != 0);
 #endif
 }
 AuroraBackend aurora_get_backend() { return aurora::g_config.desiredBackend; }
