@@ -137,6 +137,16 @@ void aurora_end_frame();
  * to be emptied or it grows without bound. */
 void aurora_discard_frame();
 
+/* Replay a raw GX FIFO command byte stream through the renderer's command
+ * processor (the same path aurora_end_frame's internal drain() takes, but
+ * synchronous and without draining the live FIFO buffer). Diagnostic ONLY --
+ * drives the SB_FIFO_REPLAY parity harness in sms-boot, which feeds a captured
+ * Dolphin .dff's per-frame command bytes here between aurora_begin_frame and
+ * aurora_end_frame so the render can be diffed against Dolphin's. See
+ * docs/model_interpolation.md (2026-07-11 amendment). bigEndian=true treats the
+ * bytes as GC-native big-endian (the .dff wire format). */
+void aurora_fifo_replay(const uint8_t* data, uint32_t size, int bigEndian);
+
 void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);
 void aurora_set_background_input(bool value);
