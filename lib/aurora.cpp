@@ -23,6 +23,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 #include "system_info.hpp"
 #include "tracy/Tracy.hpp"
@@ -284,14 +285,16 @@ void end_frame() noexcept {
 
   gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
                   imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder) {
-    // SB_DUMP_FRAME=/path/to.raw : one-shot raw dump of the framebuffer in the
-    // SURFACE format — typically BGRA8 — taken SB_DUMP_FRAME_AFTER frames in
-    // (default 60). Convert with:
-    //   magick -size WxH -depth 8 bgra:path.raw out.png
-    // (using rgba: swaps red/blue and has already caused one false "wrong
-    // colors" diagnosis — the render was correct, the conversion wasn't).
+    // SB_DUMP_FRAME=/path/to.raw : one-shot raw dump of the framebuffer, taken
+    // SB_DUMP_FRAME_AFTER frames in (default 60). The OUTPUT is always normalized
+    // to true RGBA8 (R,G,B,A byte order) regardless of the host surface format, so
+    // the file matches its label and any standard RGBA reader is correct. (The raw
+    // surface is BGRA8 on most platforms; writing it unconverted caused a recurring
+    // false "red/blue swapped / wrong colors" diagnosis — the render was correct,
+    // the dump conversion wasn't. See debug_journal/2026-07-11_dump_bgra_mislabel.md.)
     static int s_dumpFramesLeft = -2;
     static uint32_t s_dumpWidth = 0, s_dumpHeight = 0;
+    static bool s_dumpSwapRB = false;  // surface is BGRA8 -> swap R/B to emit RGBA8
     static wgpu::Buffer s_dumpBuffer;
     static const char* s_dumpPath = nullptr;
     if (s_dumpFramesLeft == -2) {
@@ -327,6 +330,11 @@ void end_frame() noexcept {
       const auto& src = webgpu::present_source();
       s_dumpWidth = src.size.width;
       s_dumpHeight = src.size.height;
+      // The present-source texture is in the host surface format; if that's
+      // BGRA8, the mapped bytes are B,G,R,A and must be swapped to R,G,B,A to
+      // honor the "RGBA" output contract.
+      s_dumpSwapRB = (webgpu::g_graphicsConfig.surfaceConfiguration.format ==
+                      wgpu::TextureFormat::BGRA8Unorm);
       const uint32_t bytesPerRow = ((s_dumpWidth * 4 + 255) / 256) * 256;
       const wgpu::BufferDescriptor bd{
           .label = "framebuffer dump",
@@ -376,13 +384,30 @@ void end_frame() noexcept {
             if (!f) {
               Log.error("SB_DUMP_FRAME: fopen failed {}", outPath);
             } else {
+              const uint32_t rowBytes = static_cast<size_t>(s_dumpWidth) * 4;
+              std::vector<uint8_t> row;  // scratch for optional R/B swap
+              if (s_dumpSwapRB)
+                row.resize(rowBytes);
               for (uint32_t y = 0; y < s_dumpHeight; ++y) {
-                std::fwrite(mapped + static_cast<size_t>(y) * bpr, 1,
-                            static_cast<size_t>(s_dumpWidth) * 4, f);
+                const uint8_t* src =
+                    mapped + static_cast<size_t>(y) * bpr;
+                if (s_dumpSwapRB) {
+                  // BGRA8 -> RGBA8 (swap bytes 0<->2 of each pixel)
+                  for (uint32_t p = 0; p < rowBytes; p += 4) {
+                    row[p + 0] = src[p + 2];  // R <- B
+                    row[p + 1] = src[p + 1];  // G
+                    row[p + 2] = src[p + 0];  // B <- R
+                    row[p + 3] = src[p + 3];  // A
+                  }
+                  std::fwrite(row.data(), 1, rowBytes, f);
+                } else {
+                  std::fwrite(src, 1, rowBytes, f);
+                }
               }
               std::fclose(f);
-              Log.info("SB_DUMP_FRAME: wrote {}x{} RGBA to {} ({} bytes)",
-                       s_dumpWidth, s_dumpHeight, outPath,
+              Log.info("SB_DUMP_FRAME: wrote {}x{} RGBA8{} to {} ({} bytes)",
+                       s_dumpWidth, s_dumpHeight,
+                       s_dumpSwapRB ? " (swapped from BGRA8)" : "", outPath,
                        static_cast<size_t>(s_dumpWidth) * s_dumpHeight * 4);
             }
             s_dumpBuffer.Unmap();
