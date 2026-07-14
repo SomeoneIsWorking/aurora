@@ -290,6 +290,13 @@ uint32_t alloc_zone() {
 } // namespace
 
 void initialize() {
+  // SB_NO_GPU_PROF=1: disable timestamp-query profiling (needed under the
+  // RenderDoc layer, which is crash-prone with Dawn's query resolves).
+  if (const char* e = std::getenv("SB_NO_GPU_PROF"); e != nullptr && e[0] != '\0' && e[0] != '0') {
+    g_enabled = false;
+    Log.info("GPU profiling disabled via SB_NO_GPU_PROF");
+    return;
+  }
   g_enabled = g_device.HasFeature(wgpu::FeatureName::TimestampQuery);
   if (!g_enabled) {
     Log.info("Timestamp queries unsupported; GPU profiling disabled");

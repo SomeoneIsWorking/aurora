@@ -5,6 +5,7 @@
 #include <tracy/Tracy.hpp>
 
 namespace aurora::gx {
+namespace fifo { extern long g_sbPushedDrawCount; } // SB_UNIF_DUMP window (command_processor.cpp)
 // TODO: remove, just for testing
 bool enableLodBias = true;
 
@@ -388,6 +389,39 @@ static u32 line_texcoord_mask() noexcept {
 
 gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges) noexcept {
   ZoneScoped;
+
+  // SB_UNIF_DUMP=<lo>[:<hi>] (diagnostic): print the exact uniform inputs for
+  // draws in the post-merge index window — the GROUND TRUTH the GPU transforms
+  // with, to cross-check against the CPU-side [ndc-probe] math.
+  {
+    static long s_lo = -2, s_hi = -2;
+    if (s_lo == -2) {
+      s_lo = -1; s_hi = -1;
+      if (const char* w = std::getenv("SB_UNIF_DUMP"); w != nullptr && w[0] != '\0') {
+        char* endp = nullptr;
+        s_lo = std::strtol(w, &endp, 0);
+        s_hi = (endp != nullptr && *endp == ':') ? std::strtol(endp + 1, nullptr, 0) : s_lo;
+      }
+    }
+    if (s_lo >= 0 && fifo::g_sbPushedDrawCount >= s_lo && fifo::g_sbPushedDrawCount <= s_hi) {
+      const float* P = reinterpret_cast<const float*>(&g_gxState.proj);
+      std::fprintf(stderr,
+                   "[unif] #%ld vtxStart=%u curPn=%u vp=(%.0fx%.0f log %.0fx%.0f) va0=%u va1=%u va2=%u va4=%u\n",
+                   fifo::g_sbPushedDrawCount, vtxStart, g_gxState.currentPnMtx,
+                   g_gxState.renderViewport.width, g_gxState.renderViewport.height,
+                   g_gxState.logicalViewport.width, g_gxState.logicalViewport.height,
+                   ranges.vaRanges[0].offset, ranges.vaRanges[1].offset, ranges.vaRanges[2].offset,
+                   ranges.vaRanges[4].offset);
+      std::fprintf(stderr, "[unif]   proj=[%g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g]\n",
+                   P[0], P[1], P[2], P[3], P[4], P[5], P[6], P[7], P[8], P[9], P[10], P[11], P[12], P[13],
+                   P[14], P[15]);
+      for (int i = 0; i < MaxPnMtx; ++i) {
+        const float* M = reinterpret_cast<const float*>(&g_gxState.pnMtx[i].pos);
+        std::fprintf(stderr, "[unif]   pn%d=[%.3f %.3f %.3f %.2f | %.3f %.3f %.3f %.2f | %.3f %.3f %.3f %.2f]\n",
+                     i, M[0], M[1], M[2], M[3], M[4], M[5], M[6], M[7], M[8], M[9], M[10], M[11]);
+      }
+    }
+  }
 
   static ByteBuffer buf;
   buf.clear();

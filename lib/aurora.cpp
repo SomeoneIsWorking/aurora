@@ -1,4 +1,6 @@
 #include <aurora/aurora.h>
+#include <dlfcn.h>
+#include "renderdoc_app.h"
 
 #ifdef AURORA_ENABLE_GX
 #include "gfx/common.hpp"
@@ -37,6 +39,67 @@ char g_gameName[4];
 
 namespace {
 Module Log("aurora");
+
+// ---- SB_RDOC: RenderDoc in-application capture trigger ----------------------
+// SB_RDOC=<present#> arms a single-frame RenderDoc capture: present 0 = the
+// first frame ever rendered (TriggerCapture fires at init), N>0 = the frame
+// AFTER the Nth present. librenderdoc.so must be dlopen'd BEFORE any Vulkan
+// init for its layer to inject — hence the call at the top of initialize().
+// SB_RDOC_PATH sets the capture file template (default scratch/rdoc/aurora).
+// Open the resulting .rdc in qrenderdoc.
+RENDERDOC_API_1_6_0* s_rdocApi = nullptr;
+long s_rdocTarget = -1;
+long s_rdocPresentCount = 0;
+
+void sb_rdoc_init() {
+  const char* e = std::getenv("SB_RDOC");
+  if (e == nullptr || e[0] == '\0') {
+    return;
+  }
+  s_rdocTarget = std::atol(e);
+  void* mod = dlopen("librenderdoc.so", RTLD_NOW | RTLD_GLOBAL);
+  if (mod == nullptr) {
+    mod = dlopen("/usr/lib64/renderdoc/librenderdoc.so", RTLD_NOW | RTLD_GLOBAL);
+  }
+  if (mod == nullptr) {
+    Log.error("[rdoc] dlopen librenderdoc.so failed: {}", dlerror());
+    s_rdocTarget = -1;
+    return;
+  }
+  auto getApi = reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(mod, "RENDERDOC_GetAPI"));
+  if (getApi == nullptr ||
+      getApi(eRENDERDOC_API_Version_1_6_0, reinterpret_cast<void**>(&s_rdocApi)) != 1) {
+    Log.error("[rdoc] RENDERDOC_GetAPI failed");
+    s_rdocTarget = -1;
+    return;
+  }
+  const char* p = std::getenv("SB_RDOC_PATH");
+  s_rdocApi->SetCaptureFilePathTemplate(p != nullptr && p[0] != '\0' ? p : "scratch/rdoc/aurora");
+  if (s_rdocTarget == 0) {
+    // Explicit capture (works headless, where no WSI present delimits frames):
+    // start NOW; ended by the first sb_rdoc_on_present().
+    s_rdocApi->StartFrameCapture(nullptr, nullptr);
+    Log.info("[rdoc] StartFrameCapture (frame 0)");
+  }
+  Log.info("[rdoc] armed: capture frame after present {}", s_rdocTarget);
+}
+
+void sb_rdoc_on_present() {
+  if (s_rdocApi == nullptr || s_rdocTarget < 0) {
+    return;
+  }
+  if (s_rdocPresentCount == s_rdocTarget) {
+    const unsigned ok = s_rdocApi->EndFrameCapture(nullptr, nullptr);
+    Log.info("[rdoc] EndFrameCapture at present {} -> {}", s_rdocPresentCount, ok);
+    s_rdocTarget = -1; // one-shot
+  }
+  ++s_rdocPresentCount;
+  if (s_rdocPresentCount == s_rdocTarget) {
+    s_rdocApi->StartFrameCapture(nullptr, nullptr);
+    Log.info("[rdoc] StartFrameCapture at present {}", s_rdocPresentCount);
+  }
+}
+// -----------------------------------------------------------------------------
 
 #ifdef AURORA_ENABLE_GX
 // GPU
@@ -99,6 +162,12 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   g_config = config;
   Log.info("Aurora initializing");
   log_system_information();
+  // SB_RDOC=<present#>: load the RenderDoc in-application API BEFORE any
+  // graphics init (dlopen'ing librenderdoc.so this early injects its Vulkan
+  // layer) and arm a single-frame capture at the given present index (see
+  // end_frame). Capture files land under SB_RDOC_PATH (default scratch-less
+  // "aurora_rdoc" template in cwd).
+  sb_rdoc_init();
   if (g_config.appName == nullptr) {
     g_config.appName = "Aurora";
   } else {
@@ -594,6 +663,9 @@ void end_frame() noexcept {
   });
 
 #endif
+  // SB_RDOC frame delimiter — unconditional (headless included): every
+  // end_frame counts as one "present" for the capture window.
+  sb_rdoc_on_present();
 }
 } // namespace
 } // namespace aurora
