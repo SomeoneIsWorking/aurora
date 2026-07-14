@@ -102,11 +102,11 @@ auto underlying(T value) -> std::underlying_type_t<T> {
 #define ASSERT(cond, msg, ...)                                                                                         \
   if (!(cond))                                                                                                         \
   UNLIKELY FATAL(msg, ##__VA_ARGS__)
-#ifdef NDEBUG
-#define CHECK(cond, msg, ...)
-#else
+// CHECK is fatal in ALL builds (2026-07-14, user directive: silent fails are
+// banned). It used to compile out under NDEBUG, which made every contract/
+// bounds validation silently disappear in Release — an out-of-range stream
+// read then proceeds into UB instead of crashing at the root cause.
 #define CHECK(cond, msg, ...) ASSERT(cond, msg, ##__VA_ARGS__)
-#endif
 #define DEFAULT_FATAL(msg, ...) UNLIKELY default : FATAL(msg, ##__VA_ARGS__)
 #define TRY(cond, msg, ...)                                                                                            \
   if (!(cond))                                                                                                         \

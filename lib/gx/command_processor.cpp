@@ -303,6 +303,11 @@ static bool copy_xf_data(u32 addr, const u8* data, u32 len, bool bigEndian) {
       flat[i] = read_f32(data + i * 4, bigEndian);
     }
     g_gxState.stateDirty = true;
+    // Was missing `return true` -- the copy succeeded but reported failure,
+    // so every position-matrix indexed load looked "unimplemented" (silent
+    // while the failure path was an NDEBUG-gated debug log; exposed the
+    // moment it became fatal).
+    return true;
   } else if (addr < 0x0F0) {
     // Texture matrices (0x078-0x0EF)
     u32 texBase = addr - 0x078;
@@ -545,11 +550,12 @@ void process(const u8* data, u32 size, bool bigEndian) {
       // The source endianness is the ARRAY's, not the command stream's:
       // runtime-computed pools (J3D draw/normal matrices) are host-endian
       // even when referenced from a big-endian display list.
-      if (!copy_xf_data(dstAddr, srcData, len, !array.le)) {
-#ifndef NDEBUG
-        Log.debug("Unimplemented indexed XF load (opcode 0x{:02X}, dstAddr={:04x})", opcode, dstAddr);
-#endif
-      }
+      // Silent fails banned (2026-07-14): an indexed XF load into an
+      // unimplemented XF region means the matrix/light data the next draws
+      // depend on was NOT loaded — crash at the root cause instead of
+      // rendering with stale state. (Was an NDEBUG-gated Log.debug.)
+      ASSERT(copy_xf_data(dstAddr, srcData, len, !array.le),
+             "unimplemented indexed XF load (opcode 0x{:02X}, dstAddr={:04x}, len={})", opcode, dstAddr, len);
       break;
     }
 
