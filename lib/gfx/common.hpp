@@ -186,7 +186,15 @@ inline constexpr bool UseTextureBuffer = true;
 inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
 inline constexpr uint64_t VertexBufferSize = 3145728;    // 3mb
 inline constexpr uint64_t IndexBufferSize = 1048576;     // 1mb
-inline constexpr uint64_t StorageBufferSize = 8388608;   // 8mb
+inline constexpr uint64_t StorageBufferSize = 33554432;  // 32mb (was 8mb, a
+// title-era size). Measured: a single Delfino Plaza pass (SB_SKIP_GHOST=1, ghost
+// pass OFF) overflows 8MB — gameplay map geometry genuinely needs more indexed-
+// array storage per frame than the title ever did. 32MB fits the single pass
+// (verified: no overflow with the ghost pass skipped). NOTE: with the redundant
+// phase-1 ghost pass ON (default) storage ~doubles to ~33MB and still overflows
+// this — that doubling is a SEPARATE wart to remove (see
+// sunbright debug_journal/2026-07-15_delfino_storage_overflow_ghost_pass.md), not
+// a reason to keep growing this cap.
 inline constexpr uint64_t TextureUploadSize = 25165824;  // 24mb
 
 extern AuroraStats g_stats;
