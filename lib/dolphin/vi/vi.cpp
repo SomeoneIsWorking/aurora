@@ -1,21 +1,12 @@
 #include <dolphin/vi.h>
 
-#include "../../internal.hpp"
 #include "../../window.hpp"
 #include "aurora/math.hpp"
 #include "vi_internal.hpp"
 
 #include <optional>
 
-// Declared in webgpu/gpu.hpp; not included here because the aurora_vi target
-// doesn't carry the Dawn include paths that header requires.
-namespace aurora::webgpu {
-extern uint32_t g_sbViWidth;
-extern uint32_t g_sbViHeight;
-} // namespace aurora::webgpu
-
 namespace aurora::vi {
-static Module Log("aurora::vi");
 std::optional<GXRenderModeObj> g_renderMode;
 
 Vec2<uint32_t> render_mode_size() noexcept {
@@ -29,18 +20,8 @@ void configure(const GXRenderModeObj* rm) noexcept {
   const auto oldSize = render_mode_size();
   if (rm == nullptr) {
     g_renderMode.reset();
-    webgpu::g_sbViWidth = 640;
-    webgpu::g_sbViHeight = 480;
   } else {
     g_renderMode = *rm;
-    // Latch the VI-space picture size the present viewport must preserve
-    // (see gpu.hpp g_sbViWidth). A zero field would make the viewport math
-    // degenerate silently — crash at the bad render mode instead.
-    if (rm->viWidth == 0 || rm->viHeight == 0) {
-      Log.fatal("VIConfigure: render mode has degenerate viWidth={} viHeight={}", rm->viWidth, rm->viHeight);
-    }
-    webgpu::g_sbViWidth = rm->viWidth;
-    webgpu::g_sbViHeight = rm->viHeight;
   }
   if (render_mode_size() != oldSize) {
     window::request_frame_buffer_resize();
