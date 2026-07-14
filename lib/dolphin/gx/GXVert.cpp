@@ -2,6 +2,10 @@
 #include "__gx.h"
 #include "../../gx/fifo.hpp"
 
+#include <cstdio>
+#include <cstdlib>
+#include <execinfo.h>
+
 // Track vertex count between GXBegin/GXEnd for mismatch detection
 static u16 sBeginNVerts = 0;
 static u32 sBeginFifoSize = 0;
@@ -10,10 +14,47 @@ static bool sInBegin = false;
 static u32 sBeginSizeOffset = 0;
 static bool sBeginAuto = false;
 
+// SB_GXBEGIN_TRACE=1 localizes an unbalanced GXBegin (a draw that opened a
+// primitive and never GXEnd'd it): remember the OPENING GXBegin's params +
+// call stack so, when the next GXBegin trips the sInBegin guard, we can name
+// exactly who left GX mid-primitive. Off by default (the per-begin backtrace()
+// is not free); the diagnostic run sets the env var.
+static u8 sBeginPrim = 0;
+static u8 sBeginVtxFmt = 0;
+static void* sBeginStack[24];
+static int sBeginStackN = 0;
+
+static bool sb_gxbegin_trace() {
+  static int v = -1;
+  if (v < 0) {
+    const char* e = std::getenv("SB_GXBEGIN_TRACE");
+    v = (e && e[0] && e[0] != '0') ? 1 : 0;
+  }
+  return v != 0;
+}
+
 extern "C" {
 
 void GXBegin(GXPrimitive primitive, GXVtxFmt vtxFmt, u16 nVerts) {
+  if (sInBegin && sb_gxbegin_trace()) {
+    std::fprintf(stderr,
+        "[SB_GXBEGIN_TRACE] unbalanced GXBegin: the OPEN primitive was "
+        "prim=0x%02x vtxFmt=0x%02x (%d verts) and never GXEnd'd. "
+        "Stack of that opening GXBegin:\n",
+        sBeginPrim, sBeginVtxFmt, sBeginNVerts);
+    if (sBeginStackN > 0) {
+      backtrace_symbols_fd(sBeginStack, sBeginStackN, 2 /*stderr*/);
+    } else {
+      std::fprintf(stderr, "  (no stack captured for the opening begin)\n");
+    }
+  }
   CHECK(!sInBegin, "GXBegin: called without matching GXEnd");
+
+  if (sb_gxbegin_trace()) {
+    sBeginPrim = static_cast<u8>(primitive);
+    sBeginVtxFmt = static_cast<u8>(vtxFmt);
+    sBeginStackN = backtrace(sBeginStack, 24);
+  }
 
   // Flush dirty state before starting a draw
   if (__gx->dirtyState != 0) {
