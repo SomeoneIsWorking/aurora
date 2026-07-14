@@ -2382,7 +2382,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     const bool windowed = s_afterRetrace >= 0;
     const bool afterWindowOk = !windowed || static_cast<long>(sb_gx_vi_retrace_count()) >= s_afterRetrace;
     const bool inRange = windowed ? (afterWindowOk && (s_fullFrame || s_windowDumped < 200))
-                                   : (s_dumped >= s_start && s_dumped < s_start + 200);
+                                   : (s_dumped >= s_start && (s_fullFrame || s_dumped < s_start + 200));
     if (inRange) {
       if (windowed) ++s_windowDumped;
       const auto& obj = g_gxState.textures[0].texObj;
