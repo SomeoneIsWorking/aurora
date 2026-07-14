@@ -400,8 +400,40 @@ void GXCopyTex(void* dest, GXBool clear) {
   GX_WRITE_RAS_REG(__gx->cpTex);
 }
 
-// TODO GXGetYScaleFactor
-// TODO GXGetNumXfbLines
+// GXGetNumXfbLines/GXGetYScaleFactor: faithful ports of the SDK bodies in
+// reference/sms/src/dolphin/gx/GXFrameBuf.c. The game's render-mode setup
+// (JDrama::CalcRenderModeXFBHeight -> rmo->xfbHeight/viHeight) flows through
+// these; they were silent 0-returning stubs in sms-boot/runtime/sdk_stubs.cpp
+// until 2026-07-14, which zeroed every computed xfbHeight/viHeight.
+u16 GXGetNumXfbLines(u16 efbHeight, f32 yScale) {
+  const u32 scale = static_cast<u32>(256.0f / yScale) & 0x1FF;
+  return static_cast<u16>(gx_get_num_xfb_lines(efbHeight, scale));
+}
+
+f32 GXGetYScaleFactor(u16 efbHeight, u16 xfbHeight) {
+  u32 height1 = xfbHeight;
+  f32 scale1 = static_cast<f32>(xfbHeight) / static_cast<f32>(efbHeight);
+  u32 scale = static_cast<u32>(256.0f / scale1) & 0x1FF;
+  u32 height2 = gx_get_num_xfb_lines(efbHeight, scale);
+
+  while (height2 > xfbHeight) {
+    height1--;
+    scale1 = static_cast<f32>(height1) / static_cast<f32>(efbHeight);
+    scale = static_cast<u32>(256.0f / scale1) & 0x1FF;
+    height2 = gx_get_num_xfb_lines(efbHeight, scale);
+  }
+
+  f32 scale2 = scale1;
+  while (height2 < xfbHeight) {
+    scale2 = scale1;
+    height1++;
+    scale1 = static_cast<f32>(height1) / static_cast<f32>(efbHeight);
+    scale = static_cast<u32>(256.0f / scale1) & 0x1FF;
+    height2 = gx_get_num_xfb_lines(efbHeight, scale);
+  }
+
+  return scale2;
+}
 // TODO GXClearBoundingBox
 // TODO GXReadBoundingBox
 }

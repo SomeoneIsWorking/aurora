@@ -271,15 +271,17 @@ void end_frame() noexcept {
   auto imguiDrawData = imgui::freeze();
 
   const auto& presentSource = webgpu::present_source();
-  // Aspect from the VI-space picture size (g_sbViWidth/Height, default
-  // 640x480), NOT presentSource's own texel size: real VI stretches the
-  // XFB's lines across viHeight physical scanlines unconditionally (SMS
-  // title copies 640x448 which a real TV shows as a full 4:3 picture).
+  // Aspect from the TV's fixed 4:3 picture, NOT presentSource's own texel
+  // size: VI scan-out stretches whatever XFB the display copy produced
+  // across the physical picture, erasing the XFB's own aspect by design.
+  // The render mode's raw viWidth/viHeight must not drive this either —
+  // SMS programs viWidth=660/viHeight=448 (overscan-domain values), yet a
+  // real TV and the Dolphin oracle both show the full 4:3 picture.
   // presentSource.size stays authoritative for sampling inside the resample
-  // pass; only the on-screen rectangle's aspect comes from VI.
+  // pass; only the on-screen rectangle's aspect is the TV's.
   const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
                                                            webgpu::g_graphicsConfig.surfaceConfiguration.height,
-                                                           webgpu::g_sbViWidth, webgpu::g_sbViHeight);
+                                                           640, 480);
 
   wgpu::BindGroup rmlBindGroup;
   bool rmlOverlay = false;
