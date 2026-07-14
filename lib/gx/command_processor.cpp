@@ -436,7 +436,11 @@ struct RecentDraw { u32 pos; u8 cmd; u16 vtxCount; u32 vtxSize; };
 static constexpr size_t kRecentDrawN = 16;
 static thread_local RecentDraw s_recentDraws[kRecentDrawN];
 struct RecentCmd { u32 pos; u8 cmd; };
-static constexpr size_t kRecentN = 32;
+// 128 (was 32): a fifo desync into vertex/pointer data emits a long run of
+// misread short commands (e.g. 31 zero-bytes = 31 NOPs) that floods a small
+// ring and hides the pre-desync commands where the mis-advance actually
+// happened. 128 reaches back past such a flood to the culprit command.
+static constexpr size_t kRecentN = 128;
 static thread_local RecentCmd s_recent[kRecentN];
 static thread_local size_t s_recentHead = 0;
 // Dump the recent-command ring to stderr (diagnostics outside the drain fn).
@@ -604,7 +608,7 @@ void process(const u8* data, u32 size, bool bigEndian) {
         Log.error("  last draw-identity marker: '{}'", g_sbLastMarker);
         // Hex dump surrounding bytes for debugging
         {
-          u32 dumpStart = (pos > 161) ? pos - 161 : 0;
+          u32 dumpStart = (pos > 321) ? pos - 321 : 0;
           u32 dumpEnd = (pos + 32 < size) ? pos + 32 : size;
           std::string hex;
           for (u32 i = dumpStart; i < dumpEnd; i++) {
@@ -616,12 +620,23 @@ void process(const u8* data, u32 size, bool bigEndian) {
           Log.error("  hex dump (pos {}-{}):{}", dumpStart, dumpEnd - 1, hex);
         }
         // Recent-command ring buffer — what was processed before the garbage.
+        // Print each command's byte SPAN (delta to the next recorded command,
+        // or to the desync `pos` for the last one): a fifo desync is a single
+        // command whose parser advanced by the wrong number of bytes, so the
+        // culprit is the entry whose span doesn't match its opcode's real
+        // encoding (e.g. a load-CP that should span 6 but the next opcode sits
+        // at +5, or an AURORA sub-op that mis-sized a pointer payload).
         {
           std::string trail;
           for (size_t i = 0; i < kRecentN; ++i) {
             const auto& r = s_recent[(s_recentHead + i) % kRecentN];
             if (r.pos == 0 && r.cmd == 0 && i == 0) continue;
-            trail += fmt::format(" [pos={} cmd=0x{:02X}]", r.pos, r.cmd);
+            const auto& next = s_recent[(s_recentHead + i + 1) % kRecentN];
+            // The chronologically-next command's start (the last entry's "next"
+            // is the desync pos itself).
+            const u32 endPos = (i + 1 < kRecentN && !(next.pos == 0 && next.cmd == 0)) ? next.pos : pos;
+            const long span = static_cast<long>(endPos) - static_cast<long>(r.pos);
+            trail += fmt::format(" [pos={} cmd=0x{:02X} span={}]", r.pos, r.cmd, span);
           }
           Log.error("  recent opcodes (oldest first):{}", trail);
         }
