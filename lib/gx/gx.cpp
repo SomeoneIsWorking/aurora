@@ -549,6 +549,38 @@ static inline wgpu::BlendFactor to_blend_factor(GXBlendFactor fac, bool isDst) {
   }
 }
 
+// SB_NO_ZWRITE_DRAWS=<lo>[:<hi>] (diagnostic): suppress depth WRITES for draws
+// whose post-merge index (g_sbPushedDrawCount, command_processor.cpp) falls in
+// the window — bisects WHICH earlier z-writer buries a depth-killed draw.
+namespace fifo { extern long g_sbPushedDrawCount; }
+static bool sb_no_zwrite_this_draw() {
+  static long s_lo = -2, s_hi = -2;
+  if (s_lo == -2) {
+    s_lo = -1; s_hi = -1;
+    if (const char* w = std::getenv("SB_NO_ZWRITE_DRAWS"); w != nullptr && w[0] != '\0') {
+      char* endp = nullptr;
+      s_lo = std::strtol(w, &endp, 0);
+      s_hi = (endp != nullptr && *endp == ':') ? std::strtol(endp + 1, nullptr, 0) : s_lo;
+    }
+  }
+  return s_lo >= 0 && fifo::g_sbPushedDrawCount >= s_lo && fifo::g_sbPushedDrawCount <= s_hi;
+}
+
+// SB_NO_ZTEST_DRAWS=<lo>[:<hi>] (diagnostic): force depth compare ALWAYS for
+// draws in the post-merge index window — per-draw variant of SB_NO_DEPTH.
+static bool sb_no_ztest_this_draw() {
+  static long s_lo = -2, s_hi = -2;
+  if (s_lo == -2) {
+    s_lo = -1; s_hi = -1;
+    if (const char* w = std::getenv("SB_NO_ZTEST_DRAWS"); w != nullptr && w[0] != '\0') {
+      char* endp = nullptr;
+      s_lo = std::strtol(w, &endp, 0);
+      s_hi = (endp != nullptr && *endp == ':') ? std::strtol(endp + 1, nullptr, 0) : s_lo;
+    }
+  }
+  return s_lo >= 0 && fifo::g_sbPushedDrawCount >= s_lo && fifo::g_sbPushedDrawCount <= s_hi;
+}
+
 static inline wgpu::CompareFunction to_compare_function(GXCompare func) {
   switch (func) {
     DEFAULT_FATAL("invalid depth fn {}", underlying(func));
@@ -870,8 +902,8 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       .polygonOffsetBits = std::bit_cast<uint32_t>(polygonOffset),
       .polygonOffsetScaleBits = std::bit_cast<uint32_t>(polygonOffsetScale),
       .polygonOffsetClampBits = std::bit_cast<uint32_t>(g_gxState.clamp),
-      .depthCompare = g_gxState.depthCompare,
-      .depthUpdate = g_gxState.depthUpdate,
+      .depthCompare = g_gxState.depthCompare && !sb_no_ztest_this_draw(),
+      .depthUpdate = g_gxState.depthUpdate && !sb_no_zwrite_this_draw(),
       .alphaUpdate = g_gxState.alphaUpdate,
       .colorUpdate = g_gxState.colorUpdate,
   };

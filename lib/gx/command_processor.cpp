@@ -1777,7 +1777,7 @@ static ByteBuffer handle_draw_idx_buf;
 // draw_prim's SB_NDC_DRAW window so a [draw-dump] index can be probed at the
 // vertex level (a prim that MERGES into the previous draw executes while the
 // counter already points one past its draw, hence the window's +1 slack).
-static long g_sbPushedDrawCount = 0;
+long g_sbPushedDrawCount = 0; // exported: SB_NO_ZWRITE_DRAWS window check in gx.cpp
 
 static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size) {
   ZoneScoped;
@@ -2399,6 +2399,25 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   detail::sDrainDraws += 1;
   detail::sDrainVerts += vtxCount;
   ++g_sbPushedDrawCount; // see decl above draw_prim: SB_NDC_DRAW window alignment
+  // SB_ONLY_DRAW=<lo>[:<hi>] (diagnostic): drop every draw OUTSIDE the given
+  // post-merge index window — isolates one suspect draw against the clear
+  // color (a vanishing draw either appears alone => killed by earlier frame
+  // state; or stays gone => its own GPU path is broken). Stream parsing and
+  // state tracking are untouched; only the GPU push is skipped.
+  {
+    static long s_onlyLo = -2, s_onlyHi = -2;
+    if (s_onlyLo == -2) {
+      s_onlyLo = -1; s_onlyHi = -1;
+      if (const char* w = std::getenv("SB_ONLY_DRAW"); w != nullptr && w[0] != '\0') {
+        char* endp = nullptr;
+        s_onlyLo = std::strtol(w, &endp, 0);
+        s_onlyHi = (endp != nullptr && *endp == ':') ? std::strtol(endp + 1, nullptr, 0) : s_onlyLo;
+      }
+    }
+    if (s_onlyLo >= 0 && (g_sbPushedDrawCount < s_onlyLo || g_sbPushedDrawCount > s_onlyHi)) {
+      return;
+    }
+  }
   // SB_DRAW_DUMP=1: one-shot per-draw identity dump for the first drain past
   // draw #200 — prim/verts/texture/position-matrix translation, enough to
   // recognize which shapes the frame contains (e.g. the 752-vert sky dome).
@@ -2661,7 +2680,16 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       continue;
     }
     auto& array = g_gxState.arrays[i];
-    bool cached = array.cachedRange.size > 0;
+    // SB_NO_ARRCACHE=1 (diagnostic): re-upload every indexed array on every
+    // draw — bisects "GPU reads a stale cached array upload" (content changed
+    // under an unchanged base/size, e.g. via replay memupdates) from other
+    // vertex-path causes.
+    static int s_noArrCache = -1;
+    if (s_noArrCache < 0) {
+      const char* e = std::getenv("SB_NO_ARRCACHE");
+      s_noArrCache = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    }
+    bool cached = s_noArrCache == 0 && array.cachedRange.size > 0;
     if (cached) {
       ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
     } else {
