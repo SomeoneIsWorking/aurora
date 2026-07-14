@@ -182,10 +182,18 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   g_gxState.copyTextures[dest] = handle;
   if (std::getenv("SB_COPY_DBG") != nullptr) {
     static long n = 0;
-    if (n < 40)
-      std::fprintf(stderr, "[copy-tex] n=%ld dest=%p %ux%u fmt=%u clear=%d rect=(%d,%d %ux%u) mark='%s'\n", ++n, dest,
-                   dstWidth, dstHeight, static_cast<unsigned>(texCopyFmt), static_cast<int>(clear), rect.x, rect.y,
-                   rect.width, rect.height, sb_gx_last_marker());
+    if (n < 40) {
+      const auto [lw, lh] = aurora::gx::logical_fb_size();
+      const auto [tw, th] = gfx::get_render_target_size();
+      std::fprintf(stderr,
+                   "[copy-tex] n=%ld dest=%p %ux%u fmt=%u clear=%d rect=(%d,%d %ux%u) src=(%d,%d %ux%u) "
+                   "logical=%ux%u target=%ux%u policy=%d offscreen=%d mark='%s'\n",
+                   ++n, dest, dstWidth, dstHeight, static_cast<unsigned>(texCopyFmt), static_cast<int>(clear), rect.x,
+                   rect.y, rect.width, rect.height, g_gxState.texCopySrc.x, g_gxState.texCopySrc.y,
+                   g_gxState.texCopySrc.width, g_gxState.texCopySrc.height, lw, lh, tw, th,
+                   static_cast<int>(g_gxState.viewportPolicy), static_cast<int>(gfx::is_offscreen()),
+                   sb_gx_last_marker());
+    }
     else
       ++n;
   }
