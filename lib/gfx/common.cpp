@@ -1715,9 +1715,16 @@ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass) {
     return true;
   }
   wgpu::RenderPipeline pipeline;
-  if (!get_pipeline(ref, pipeline)) {
-    return false;
-  }
+  // A recorded draw referencing a pipeline that never finished compiling was
+  // previously a SILENT DRAW SKIP (renderers returned early) — banned
+  // (2026-07-14 user directive). Pipelines compile synchronously by default;
+  // reaching this with a missing pipeline is a real bug (or a misuse of the
+  // SB_ASYNC_PIPELINES opt-in) and must crash at the root cause, not render
+  // a frame with holes.
+  ASSERT(get_pipeline(ref, pipeline),
+         "draw references pipeline {:x} which is not compiled -- silent draw-skip is banned "
+         "(async compile is opt-in via SB_ASYNC_PIPELINES and still must never lose a draw)",
+         ref);
   pass.SetPipeline(pipeline);
   g_currentPipeline = ref;
   return true;
