@@ -4,6 +4,7 @@
 #include "../webgpu/gpu.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -152,6 +153,16 @@ private:
       m_owned = true;
     } else if (size > m_capacity) {
       if (!m_owned) {
+        // A mapped GPU staging region (verts/uniforms/indices/storage) can't be
+        // realloc'd — overflowing it is a real capacity error, not something to
+        // silently abort on. Report which by how much (see the *BufferSize
+        // constants) so it can be sized to the workload / this points at a
+        // runaway upload.
+        std::fprintf(stderr,
+            "[aurora FATAL gfx] mapped ByteBuffer overflow: have %zu bytes "
+            "(capacity %zu), need %zu more -> %zu total. A per-frame staging "
+            "region is too small for this scene (or a runaway upload).\n",
+            m_length, m_capacity, size - m_length, size);
         abort();
       }
       // Exponential expansion to avoid O(n^2) time complexity.
