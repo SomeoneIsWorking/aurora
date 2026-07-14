@@ -2299,7 +2299,17 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     }
   }
 
-  auto* lastDraw = !g_gxState.stateDirty ? gfx::get_last_draw_command<DrawData>() : nullptr;
+  // SB_NO_MERGE=1 (diagnostic): never merge draws. A merged draw reuses the
+  // merge-head's uniform (array_start offsets) + bind groups; if the head's
+  // indexed-array upload doesn't cover a later merged prim's indices, the GPU
+  // fetches past the upload -> origin/garbage positions -> the geometry collapses
+  // (candidate for the seagull zero-fragments defect). This isolates that.
+  static int s_noMerge = -1;
+  if (s_noMerge < 0) {
+    const char* e = std::getenv("SB_NO_MERGE");
+    s_noMerge = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  auto* lastDraw = (!g_gxState.stateDirty && s_noMerge == 0) ? gfx::get_last_draw_command<DrawData>() : nullptr;
   const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
                         lastDraw->instanceCount == 1;
 
