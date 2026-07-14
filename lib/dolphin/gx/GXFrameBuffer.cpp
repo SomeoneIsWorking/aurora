@@ -14,19 +14,15 @@
 namespace {
 // GXCopyDisp is the GC-HW operation that actually defines the displayed TV
 // image (real HW: the same "PE copy" op as GXCopyTex, selected by a
-// copy-to-XFB bit on the BP 0x52 command). aurora's BP-0x52 dispatch
-// (command_processor.cpp, owned by another agent this session) only wires
-// that bit to the GXCopyTex path today. Rather than block on that file,
-// GXCopyDisp below routes through the SAME working copy_tex() cache/resolve
-// mechanism GXCopyTex already uses, keyed on this reserved sentinel pointer
-// so copy_tex() can recognize "this resolve is the display copy" and latch
-// the result as the present source (see gpu.cpp g_sbDisplayPresent). This
-// preserves GXCopyTex's existing FIFO-ordering guarantees (the copy lands at
-// the correct point relative to the surrounding draws) without needing the
-// hardware-faithful copy-to-XFB bit wired through command_processor.cpp.
+// copy-to-XFB bit on the BP 0x52 command). GXCopyDisp below routes through
+// the SAME working copy_tex() cache/resolve mechanism GXCopyTex uses, keyed
+// on the reserved sentinel pointer aurora::gx::kDisplayCopyDest so
+// copy_tex() can recognize "this resolve is the display copy" and latch the
+// result as the present source (see gpu.cpp g_sbDisplayPresent).
+// command_processor.cpp's BP-0x52 dispatch routes in-stream copy_to_xfb
+// triggers (e.g. FIFO replay) to the same key, so both entry paths converge.
 struct DisplayCopyDestTag {};
 const DisplayCopyDestTag kDisplayCopyDestTagInstance{};
-const void* const kDisplayCopyDest = &kDisplayCopyDestTagInstance;
 
 // GXSetDispCopyYScale/GXGetNumXfbLines RE'd from reference/sms's decomp'd
 // dolphin/gx/GXFrameBuf.c (real Nintendo SDK source in the decomp tree, not
@@ -77,6 +73,7 @@ aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
 } // namespace
 
 namespace aurora::gx {
+const void* const kDisplayCopyDest = &kDisplayCopyDestTagInstance; // declared in gx.hpp
 extern "C" const char* sb_gx_last_marker();
 extern "C" int sb_timeline_enabled();
 extern "C" void sb_timeline_log(const char* fmt, ...);
@@ -98,9 +95,13 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
     if (gfx::tex_copy_conv::needs_conversion(texCopyFmt)) {
       handle = gfx::new_conv_texture(dstWidth, dstHeight, texCopyFmt, "Copy Conv Texture");
     } else {
-      // Configure the texture swizzle to use alpha 1.0 if targeting RGB565 or EFB doesn't have alpha
+      // Configure the texture swizzle to use alpha 1.0 if targeting RGB565 or
+      // EFB doesn't have alpha. The display copy is also alpha-less: the real
+      // XFB is YUYV scan-out with NO alpha channel, so EFB alpha (e.g. SMS's
+      // mid-frame dst-alpha stamps) must never leak into the presented image
+      // (it washes out any alpha-aware consumer of the present source).
       const auto fmt = texCopyFmt == GX_TF_RGB565 || g_gxState.pixelFmt == GX_PF_RGB8_Z24 ||
-                               g_gxState.pixelFmt == GX_PF_RGB565_Z16
+                               g_gxState.pixelFmt == GX_PF_RGB565_Z16 || dest == kDisplayCopyDest
                            ? GX_TF_RGB565
                            : GX_TF_RGBA8;
       handle = gfx::new_render_texture(dstWidth, dstHeight, fmt, "Resolved Texture");
@@ -375,7 +376,7 @@ void GXCopyDisp(void* dest, GXBool clear) {
   // queued draw/copy, then gets latched as the present source in copy_tex().
   (void)dest; // real XFB address; aurora keys the resolve on kDisplayCopyDest instead (see above)
   GX_WRITE_AURORA(GX_AURORA_LOAD_COPY_DEST);
-  GX_WRITE_U64(reinterpret_cast<u64>(kDisplayCopyDest));
+  GX_WRITE_U64(reinterpret_cast<u64>(aurora::gx::kDisplayCopyDest));
 
   SET_REG_FIELD(0, __gx->cpTex, 1, 11, clear != GX_FALSE);
   SET_REG_FIELD(0, __gx->cpTex, 1, 14, 0);

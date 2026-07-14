@@ -414,6 +414,10 @@ void set_render_viewport(const gfx::Viewport& viewport) noexcept;
 void set_logical_scissor(const gfx::ClipRect& scissor) noexcept;
 void set_render_scissor(const gfx::ClipRect& scissor) noexcept;
 void copy_tex(const void* dest, GXBool clear) noexcept;
+// Reserved dest key naming "this copy is the display copy" (GXCopyDisp / a
+// BP-0x52 trigger with copy_to_xfb set): copy_tex latches its resolve as the
+// present source. Defined in GXFrameBuffer.cpp.
+extern const void* const kDisplayCopyDest;
 // SB_SKIP_COPY_QUAD diagnostic: set by resolve_sampled_textures when the
 // pending draw samples an EFB-copy texture; consumed by push_gx_draw.
 extern bool g_sbDrawSamplesCopy;

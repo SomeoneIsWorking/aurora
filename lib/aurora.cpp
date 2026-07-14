@@ -24,6 +24,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <vector>
 
 #include "system_info.hpp"
@@ -270,9 +271,15 @@ void end_frame() noexcept {
   auto imguiDrawData = imgui::freeze();
 
   const auto& presentSource = webgpu::present_source();
+  // Aspect from the VI-space picture size (g_sbViWidth/Height, default
+  // 640x480), NOT presentSource's own texel size: real VI stretches the
+  // XFB's lines across viHeight physical scanlines unconditionally (SMS
+  // title copies 640x448 which a real TV shows as a full 4:3 picture).
+  // presentSource.size stays authoritative for sampling inside the resample
+  // pass; only the on-screen rectangle's aspect comes from VI.
   const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
                                                            webgpu::g_graphicsConfig.surfaceConfiguration.height,
-                                                           presentSource.size.width, presentSource.size.height);
+                                                           webgpu::g_sbViWidth, webgpu::g_sbViHeight);
 
   wgpu::BindGroup rmlBindGroup;
   bool rmlOverlay = false;
@@ -293,11 +300,30 @@ void end_frame() noexcept {
     // surface is BGRA8 on most platforms; writing it unconverted caused a recurring
     // false "red/blue swapped / wrong colors" diagnosis — the render was correct,
     // the dump conversion wasn't. See debug_journal/2026-07-11_dump_bgra_mislabel.md.)
+    // Per-job dump state: each queued dump owns its buffer/dims/path, so
+    // periodic dumps (SB_DUMP_FRAME_EVERY) can overlap safely. The old design
+    // reused ONE static buffer/path across dumps: re-arming while the previous
+    // MapAsync was still pending destroyed its buffer ("map failed status=4")
+    // and let a later dump's dims/path corrupt an earlier callback's write —
+    // torn/mislabeled frames in short FIFO-replay runs.
+    struct SbDumpJob {
+      wgpu::Buffer buffer;
+      uint32_t width = 0, height = 0;
+      bool swapRB = false;  // surface is BGRA8 -> swap R/B to emit RGBA8
+      std::string path;
+    };
     static int s_dumpFramesLeft = -2;
-    static uint32_t s_dumpWidth = 0, s_dumpHeight = 0;
-    static bool s_dumpSwapRB = false;  // surface is BGRA8 -> swap R/B to emit RGBA8
-    static wgpu::Buffer s_dumpBuffer;
     static const char* s_dumpPath = nullptr;
+    // Jobs whose texture->buffer copy was encoded last present; their MapAsync
+    // is requested on the NEXT present (mapping a buffer with an unsubmitted
+    // pending copy is a usage error).
+    static std::vector<std::shared_ptr<SbDumpJob>> s_dumpAwaitingMap;
+    // SB_DUMP_FRAME_EVERY=N: instead of a one-shot, dump every N presents to
+    // <path>.<seq>.rgba — turbo timing varies run-to-run, so one fixed frame
+    // index samples a different game moment each run; a periodic series shows
+    // the whole boot/title progression from a single run.
+    static int s_dumpEvery = -1;
+    static int s_dumpSeq = 0;
     if (s_dumpFramesLeft == -2) {
       s_dumpPath = std::getenv("SB_DUMP_FRAME");
       if (s_dumpPath && s_dumpPath[0]) {
@@ -309,90 +335,42 @@ void end_frame() noexcept {
         s_dumpFramesLeft = -1;
       }
     }
-    // SB_DUMP_FRAME_EVERY=N: instead of a one-shot, dump every N presents to
-    // <path>.<seq>.rgba — turbo timing varies run-to-run, so one fixed frame
-    // index samples a different game moment each run; a periodic series shows
-    // the whole boot/title progression from a single run.
-    static int s_dumpEvery = -1;
-    static int s_dumpSeq = 0;
-    static std::string s_dumpPathBuf;
     if (s_dumpEvery < 0) {
       const char* e = std::getenv("SB_DUMP_FRAME_EVERY");
       s_dumpEvery = (e != nullptr && e[0] != '\0') ? std::atoi(e) : 0;
     }
-    if (s_dumpFramesLeft == -4 && s_dumpEvery > 0 && s_dumpPath != nullptr) {
-      // previous dump finished; re-arm for the next periodic capture
-      s_dumpFramesLeft = s_dumpEvery;
-      ++s_dumpSeq;
-    }
-    if (s_dumpFramesLeft > 0) {
-      --s_dumpFramesLeft;
-    } else if (s_dumpFramesLeft == 0) {
-      const auto& src = webgpu::present_source();
-      s_dumpWidth = src.size.width;
-      s_dumpHeight = src.size.height;
-      // The present-source texture is in the host surface format; if that's
-      // BGRA8, the mapped bytes are B,G,R,A and must be swapped to R,G,B,A to
-      // honor the "RGBA" output contract.
-      s_dumpSwapRB = (webgpu::g_graphicsConfig.surfaceConfiguration.format ==
-                      wgpu::TextureFormat::BGRA8Unorm);
-      const uint32_t bytesPerRow = ((s_dumpWidth * 4 + 255) / 256) * 256;
-      const wgpu::BufferDescriptor bd{
-          .label = "framebuffer dump",
-          .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead,
-          .size = static_cast<uint64_t>(bytesPerRow) * s_dumpHeight,
-      };
-      s_dumpBuffer = webgpu::g_device.CreateBuffer(&bd);
-      const wgpu::TexelCopyTextureInfo srcInfo{
-          .texture = src.texture,
-          .mipLevel = 0,
-          .origin = {0, 0, 0},
-          .aspect = wgpu::TextureAspect::All,
-      };
-      const wgpu::TexelCopyBufferInfo dstInfo{
-          .layout = {.offset = 0, .bytesPerRow = bytesPerRow, .rowsPerImage = s_dumpHeight},
-          .buffer = s_dumpBuffer,
-      };
-      const wgpu::Extent3D copySize{s_dumpWidth, s_dumpHeight, 1};
-      encoder.CopyTextureToBuffer(&srcInfo, &dstInfo, &copySize);
-      s_dumpFramesLeft = -3;
-      Log.info("SB_DUMP_FRAME: queued dump ({}x{}, bytesPerRow={}) -> {}",
-               s_dumpWidth, s_dumpHeight, bytesPerRow, s_dumpPath);
-    } else if (s_dumpFramesLeft == -3) {
-      s_dumpFramesLeft = -4;
-      const uint32_t bytesPerRow = ((s_dumpWidth * 4 + 255) / 256) * 256;
-      const uint64_t totalBytes = static_cast<uint64_t>(bytesPerRow) * s_dumpHeight;
-      s_dumpBuffer.MapAsync(
+    // Request the map for jobs whose copies were submitted last present. The
+    // callback owns its job (shared_ptr capture), so any number of dumps can
+    // be in flight without clobbering each other.
+    for (auto& jobRef : s_dumpAwaitingMap) {
+      auto job = jobRef;
+      const uint32_t bpr = ((job->width * 4 + 255) / 256) * 256;
+      const uint64_t totalBytes = static_cast<uint64_t>(bpr) * job->height;
+      job->buffer.MapAsync(
           wgpu::MapMode::Read, 0, totalBytes, wgpu::CallbackMode::AllowSpontaneous,
-          [](wgpu::MapAsyncStatus status, wgpu::StringView) {
+          [job](wgpu::MapAsyncStatus status, wgpu::StringView) {
             if (status != wgpu::MapAsyncStatus::Success) {
-              Log.error("SB_DUMP_FRAME map failed status={}", static_cast<int>(status));
+              Log.error("SB_DUMP_FRAME map failed status={} ({})", static_cast<int>(status), job->path);
               return;
             }
-            const uint32_t bpr = ((s_dumpWidth * 4 + 255) / 256) * 256;
+            const uint32_t bpr = ((job->width * 4 + 255) / 256) * 256;
             const auto* mapped = static_cast<const uint8_t*>(
-                s_dumpBuffer.GetConstMappedRange(0, static_cast<uint64_t>(bpr) * s_dumpHeight));
+                job->buffer.GetConstMappedRange(0, static_cast<uint64_t>(bpr) * job->height));
             if (!mapped) {
-              Log.error("SB_DUMP_FRAME: GetConstMappedRange returned null");
+              Log.error("SB_DUMP_FRAME: GetConstMappedRange returned null ({})", job->path);
               return;
             }
-            const char* outPath = s_dumpPath;
-            if (s_dumpEvery > 0) {
-              s_dumpPathBuf = std::string(s_dumpPath) + "." + std::to_string(s_dumpSeq);
-              outPath = s_dumpPathBuf.c_str();
-            }
-            FILE* f = std::fopen(outPath, "wb");
+            FILE* f = std::fopen(job->path.c_str(), "wb");
             if (!f) {
-              Log.error("SB_DUMP_FRAME: fopen failed {}", outPath);
+              Log.error("SB_DUMP_FRAME: fopen failed {}", job->path);
             } else {
-              const uint32_t rowBytes = static_cast<size_t>(s_dumpWidth) * 4;
+              const uint32_t rowBytes = static_cast<size_t>(job->width) * 4;
               std::vector<uint8_t> row;  // scratch for optional R/B swap
-              if (s_dumpSwapRB)
+              if (job->swapRB)
                 row.resize(rowBytes);
-              for (uint32_t y = 0; y < s_dumpHeight; ++y) {
-                const uint8_t* src =
-                    mapped + static_cast<size_t>(y) * bpr;
-                if (s_dumpSwapRB) {
+              for (uint32_t y = 0; y < job->height; ++y) {
+                const uint8_t* src = mapped + static_cast<size_t>(y) * bpr;
+                if (job->swapRB) {
                   // BGRA8 -> RGBA8 (swap bytes 0<->2 of each pixel)
                   for (uint32_t p = 0; p < rowBytes; p += 4) {
                     row[p + 0] = src[p + 2];  // R <- B
@@ -407,12 +385,56 @@ void end_frame() noexcept {
               }
               std::fclose(f);
               Log.info("SB_DUMP_FRAME: wrote {}x{} RGBA8{} to {} ({} bytes)",
-                       s_dumpWidth, s_dumpHeight,
-                       s_dumpSwapRB ? " (swapped from BGRA8)" : "", outPath,
-                       static_cast<size_t>(s_dumpWidth) * s_dumpHeight * 4);
+                       job->width, job->height,
+                       job->swapRB ? " (swapped from BGRA8)" : "", job->path,
+                       static_cast<size_t>(job->width) * job->height * 4);
             }
-            s_dumpBuffer.Unmap();
+            job->buffer.Unmap();
           });
+    }
+    s_dumpAwaitingMap.clear();
+    if (s_dumpFramesLeft > 0) {
+      --s_dumpFramesLeft;
+    } else if (s_dumpFramesLeft == 0) {
+      const auto& src = webgpu::present_source();
+      auto job = std::make_shared<SbDumpJob>();
+      job->width = src.size.width;
+      job->height = src.size.height;
+      // The present-source texture is in the host surface format; if that's
+      // BGRA8, the mapped bytes are B,G,R,A and must be swapped to R,G,B,A to
+      // honor the "RGBA" output contract.
+      job->swapRB = (webgpu::g_graphicsConfig.surfaceConfiguration.format ==
+                     wgpu::TextureFormat::BGRA8Unorm);
+      job->path = s_dumpPath;
+      if (s_dumpEvery > 0) {
+        job->path += "." + std::to_string(s_dumpSeq++);
+      }
+      const uint32_t bytesPerRow = ((job->width * 4 + 255) / 256) * 256;
+      const wgpu::BufferDescriptor bd{
+          .label = "framebuffer dump",
+          .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead,
+          .size = static_cast<uint64_t>(bytesPerRow) * job->height,
+      };
+      job->buffer = webgpu::g_device.CreateBuffer(&bd);
+      const wgpu::TexelCopyTextureInfo srcInfo{
+          .texture = src.texture,
+          .mipLevel = 0,
+          .origin = {0, 0, 0},
+          .aspect = wgpu::TextureAspect::All,
+      };
+      const wgpu::TexelCopyBufferInfo dstInfo{
+          .layout = {.offset = 0, .bytesPerRow = bytesPerRow, .rowsPerImage = job->height},
+          .buffer = job->buffer,
+      };
+      const wgpu::Extent3D copySize{job->width, job->height, 1};
+      encoder.CopyTextureToBuffer(&srcInfo, &dstInfo, &copySize);
+      Log.info("SB_DUMP_FRAME: queued dump ({}x{}, bytesPerRow={}) -> {}",
+               job->width, job->height, bytesPerRow, job->path);
+      s_dumpAwaitingMap.push_back(std::move(job));
+      // Re-arm for the next periodic capture (EVERY=1 -> a dump at every
+      // present: the countdown consumes one present per unit), or disarm
+      // for the one-shot.
+      s_dumpFramesLeft = s_dumpEvery > 0 ? s_dumpEvery - 1 : -1;
     }
     const bool headless = window::is_headless();
     wgpu::Texture currentTexture;

@@ -342,6 +342,8 @@ TextureWithSampler g_sbPass1Present;
 // exactly, no longer black). SB_NO_COPYDISP=1 is the escape hatch back to
 // raw-EFB present, kept for A/B diagnosis; do not remove.
 TextureWithSampler g_sbDisplayPresent;
+uint32_t g_sbViWidth = 640;
+uint32_t g_sbViHeight = 480;
 
 const TextureWithSampler& present_source() noexcept {
   if (g_sbDisplayPresent.view != nullptr && std::getenv("SB_NO_COPYDISP") == nullptr) {
