@@ -1892,6 +1892,43 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
                    s_ndcDrawCounter, static_cast<int>(posDesc), static_cast<int>(posFmt.type),
                    arr.data, vtxCount);
     }
+    // SB_NDC_DRAW companion [tex-id]: texture-identity line for every windowed draw —
+    // GC image address (image3), host data ptr, dims/format, data version, and an FNV-1a
+    // hash + alpha summary of the SOURCE texels, so two draws can be compared at the
+    // texture-content level (2026-07-14 seagull probe: same state, different per-bird
+    // texture addresses; are the invisible birds' texels actually transparent?).
+    if (ndcDrawWindowed) {
+      const auto& tobj = g_gxState.textures[0].texObj;
+      const u8* td = static_cast<const u8*>(tobj.data);
+      u32 w = tobj.width(), h = tobj.height(), f = tobj.format();
+      // Size of the base level in GC layout (fmt-dependent bpp); enough for identity.
+      u32 bpp4 = (f == GX_TF_RGBA8) ? 128 : (f == GX_TF_RGB565 || f == GX_TF_RGB5A3 || f == GX_TF_IA8) ? 64
+                 : (f == GX_TF_I8 || f == GX_TF_IA4 || f == GX_TF_C8)                                   ? 32
+                                                                                                        : 16; // bits per 4 texels
+      u64 nbytes = static_cast<u64>(w) * h * bpp4 / 32;
+      if (nbytes > 0x4000) nbytes = 0x4000;
+      u64 hash = 1469598103934665603ull;
+      u32 aZero = 0, aFull = 0, aSamp = 0;
+      if (td != nullptr) {
+        for (u64 i = 0; i < nbytes; ++i) { hash ^= td[i]; hash *= 1099511628211ull; }
+        if (f == GX_TF_RGB5A3) {
+          // 16bpp BE: top bit 0 => 3-bit alpha in bits 12-14 (0 possible); top bit 1 => opaque.
+          for (u64 i = 0; i + 1 < nbytes; i += 2) {
+            u16 v = static_cast<u16>((td[i] << 8) | td[i + 1]);
+            ++aSamp;
+            if (v & 0x8000) ++aFull;
+            else if ((v & 0x7000) == 0) ++aZero;
+          }
+        } else if (f == GX_TF_IA8) {
+          for (u64 i = 0; i + 1 < nbytes; i += 2) { ++aSamp; if (td[i] == 0) ++aZero; else if (td[i] == 0xFF) ++aFull; }
+        }
+      }
+      std::fprintf(stderr,
+                   "[tex-id] #%ld image3=0x%x data=%p %ux%u fmt=%u ver=%u hash=%016llx "
+                   "alpha[samp=%u zero=%u full=%u]\n",
+                   s_ndcDrawCounter, tobj.image3, static_cast<const void*>(td), w, h, f,
+                   tobj.texDataVersion, static_cast<unsigned long long>(hash), aSamp, aZero, aFull);
+    }
     const bool probeMatch = s_minVerts > 0 && s_printed < 400 && afterWindowOk &&
                             vtxCount >= static_cast<u16>(s_minVerts) &&
                             (s_markFilter == nullptr || g_sbLastMarker.find(s_markFilter) != std::string::npos);
