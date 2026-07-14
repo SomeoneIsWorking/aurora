@@ -48,6 +48,14 @@ extern TextureWithSampler g_frameBuffer;
 extern TextureWithSampler g_frameBufferResolved;
 extern TextureWithSampler g_sbPass1Present;
 extern TextureWithSampler g_sbDisplayPresent;
+// VI-space picture size (viWidth/viHeight of the game's configured render
+// mode; default 640x480). This — NOT the present source's own texel size —
+// is the aspect ratio the present viewport preserves: real VI scan-out
+// stretches xfbHeight copied lines across viHeight physical scanlines
+// unconditionally (e.g. SMS title's 640x448 display copy fills a 480-line
+// picture), erasing the XFB's own aspect by design. Set by VIConfigure.
+extern uint32_t g_sbViWidth;
+extern uint32_t g_sbViHeight;
 extern TextureWithSampler g_depthBuffer;
 extern wgpu::RenderPipeline g_CopyPipeline;
 extern wgpu::RenderPipeline g_CopyPremultipliedAlphaPipeline;

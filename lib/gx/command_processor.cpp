@@ -954,11 +954,17 @@ static void handle_bp(u32 value, bool bigEndian) {
     break;
   }
 
-  // Texture copy
+  // EFB copy trigger (texture copy or, with the copy_to_xfb bit, the display
+  // copy that defines the presented TV image).
   case 0x52: {
     const bool clear = bp_get(value, 1, 11) != 0;
     if (bp_get(value, 1, 14) != 0) {
-      Log.warn("STUB: display copy is not implemented");
+      // copy_to_xfb: resolve through the same copy_tex path keyed on
+      // kDisplayCopyDest so it latches as the present source — identical to
+      // what GXCopyDisp does via its dest-key discriminator. Reached by
+      // in-stream triggers (FIFO replay); the copy src/dst state must have
+      // been loaded via GX_AURORA_LOAD_COPY_{SRC,DST} beforehand.
+      copy_tex(kDisplayCopyDest, clear);
     } else {
       copy_tex(g_gxState.texCopyDest, clear);
     }
@@ -2319,7 +2325,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   if (const char* e = std::getenv("SB_DRAW_DUMP"); e != nullptr) {
     // SB_DRAW_DUMP=<startDraw>: dump 200 draws starting at that global draw
     // index (draw counts run ~160/frame at title; pick start = frame*160).
-    // SB_DRAW_DUMP=1 keeps the old early-boot window.
+    // SB_DRAW_DUMP=0 dumps from the very first draw.
     static int s_dumped = 0;
     static int s_start = -1;
     static long s_afterRetrace = -1;
@@ -2327,7 +2333,6 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     static bool s_fullFrame = false; // SB_DRAW_DUMP_FRAME set: no 200-draw cap
     if (s_start < 0) {
       s_start = std::atoi(e);
-      if (s_start < 200) s_start = 200;
       if (const char* a = std::getenv("SB_DRAW_DUMP_AFTER"); a != nullptr && a[0] != '\0') {
         s_afterRetrace = std::atol(a);
       }
