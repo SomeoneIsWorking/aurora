@@ -1097,14 +1097,32 @@ static void stop_pipeline_cache_writer() {
   g_pipelineCacheWriteQueue.clear();
 }
 
+// SB_SYNC_PIPELINES=1: compile every pipeline synchronously (Blocking) instead
+// of async-with-draw-skip. Draw-skip trades first-use hitches for dropped
+// draws, which is invisible in a long interactive run but FATAL for short
+// deterministic captures: a 3-frame SB_FIFO_REPLAY renders a different subset
+// of the scene every run (whatever happened to finish compiling), and frame 0
+// is near-empty on a cold cache. Any harness comparing pixels against an
+// oracle must set this.
+static bool sync_pipelines() {
+  static int s = -1;
+  if (s < 0) {
+    const char* e = std::getenv("SB_SYNC_PIPELINES");
+    s = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+  }
+  return s == 1;
+}
+
 template <>
 PipelineRef find_pipeline(ShaderType type, const clear::PipelineConfig& config, NewPipelineCallback&& cb) {
-  return find_pipeline_impl(type, config, std::move(cb));
+  return find_pipeline_impl(type, config, std::move(cb),
+                            sync_pipelines() ? PipelinePriority::Blocking : PipelinePriority::Normal);
 }
 
 template <>
 PipelineRef find_pipeline(ShaderType type, const gx::PipelineConfig& config, NewPipelineCallback&& cb) {
-  return find_pipeline_impl(type, config, std::move(cb));
+  return find_pipeline_impl(type, config, std::move(cb),
+                            sync_pipelines() ? PipelinePriority::Blocking : PipelinePriority::Normal);
 }
 
 #ifdef AURORA_ENABLE_RMLUI
