@@ -1772,6 +1772,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
 // Draw command handler - parses vertices inline and caches results
 static ByteBuffer handle_draw_idx_buf;
 
+// Global post-merge draw counter: incremented once per push_gx_draw call —
+// the exact indexing scheme SB_DRAW_DUMP's [draw-dump] #N lines use. Read by
+// draw_prim's SB_NDC_DRAW window so a [draw-dump] index can be probed at the
+// vertex level (a prim that MERGES into the previous draw executes while the
+// counter already points one past its draw, hence the window's +1 slack).
+static long g_sbPushedDrawCount = 0;
+
 static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size) {
   ZoneScoped;
   u32 vtxSize;
@@ -1837,6 +1844,16 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     static int s_minVerts = -2;
     static const char* s_markFilter = nullptr;
     static long s_afterRetrace = -1;
+    // SB_NDC_DRAW=<lo>[:<hi>] (2026-07-14, seagull localization): window the
+    // probe by GLOBAL DRAW INDEX — the same "count every draw reaching this
+    // function since process start" scheme SB_DRAW_DUMP's s_dumped uses, so
+    // indices from a [draw-dump] log map 1:1. Windowed draws bypass the
+    // minVerts/budget gates and print EVERY vertex (up to 32), so a specific
+    // suspect draw (e.g. an invisible sprite) can be inspected at the vertex
+    // level. If a windowed draw can't be walked (non-indexed pos), that is
+    // REPORTED, never silently skipped.
+    static long s_ndcDrawLo = -1, s_ndcDrawHi = -1;
+    static long s_ndcDrawCounter = -1;
     if (s_minVerts == -2) {
       const char* e = std::getenv("SB_NDC_PROBE");
       s_minVerts = (e != nullptr && e[0] != '\0') ? std::atoi(e) : -1;
@@ -1845,7 +1862,16 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       if (const char* a = std::getenv("SB_NDC_PROBE_AFTER"); a != nullptr && a[0] != '\0') {
         s_afterRetrace = std::atol(a);
       }
+      if (const char* w = std::getenv("SB_NDC_DRAW"); w != nullptr && w[0] != '\0') {
+        char* endp = nullptr;
+        s_ndcDrawLo = std::strtol(w, &endp, 0);
+        s_ndcDrawHi = (endp != nullptr && *endp == ':') ? std::strtol(endp + 1, nullptr, 0) : s_ndcDrawLo;
+      }
     }
+    s_ndcDrawCounter = g_sbPushedDrawCount; // post-merge index of the draw this prim starts (or, if it
+                                            // merges, one past the draw it extends — hence +1 slack below)
+    const bool ndcDrawWindowed =
+        s_ndcDrawLo >= 0 && s_ndcDrawCounter >= s_ndcDrawLo && s_ndcDrawCounter <= s_ndcDrawHi + 1;
     static int s_printed = 0;
     // SB_NDC_PROBE companion: the per-vertex breakdown below is normally gated to the
     // first 6 MATCHED draws, which (2026-07-10 title-backdrop probe) happened to all be
@@ -1857,10 +1883,19 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     const auto& posFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
     const auto& arr = g_gxState.arrays[GX_VA_POS];
     const bool afterWindowOk = s_afterRetrace < 0 || static_cast<long>(sb_gx_vi_retrace_count()) >= s_afterRetrace;
-    if (s_minVerts > 0 && s_printed < 400 && afterWindowOk && vtxCount >= static_cast<u16>(s_minVerts) &&
-        (posDesc == GX_INDEX16 || posDesc == GX_INDEX8) &&
-        (posFmt.type == GX_F32 || posFmt.type == GX_S16) && arr.data != nullptr &&
-        (s_markFilter == nullptr || g_sbLastMarker.find(s_markFilter) != std::string::npos)) {
+    const bool walkable = (posDesc == GX_INDEX16 || posDesc == GX_INDEX8) &&
+                          (posFmt.type == GX_F32 || posFmt.type == GX_S16) && arr.data != nullptr;
+    if (ndcDrawWindowed && !walkable) {
+      std::fprintf(stderr,
+                   "[ndc-draw] #%ld NOT WALKABLE: posDesc=%d posType=%d arr=%p verts=%u -- extend the walker "
+                   "before trusting this window\n",
+                   s_ndcDrawCounter, static_cast<int>(posDesc), static_cast<int>(posFmt.type),
+                   arr.data, vtxCount);
+    }
+    const bool probeMatch = s_minVerts > 0 && s_printed < 400 && afterWindowOk &&
+                            vtxCount >= static_cast<u16>(s_minVerts) &&
+                            (s_markFilter == nullptr || g_sbLastMarker.find(s_markFilter) != std::string::npos);
+    if ((probeMatch || ndcDrawWindowed) && walkable) {
       ++s_printed;
       // Per-vertex offsets: attrs before POS are u8 matrix indices when DIRECT.
       u32 posOff = 0;
@@ -1913,7 +1948,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           clip[c] = P[4 * c] * mv[0] + P[4 * c + 1] * mv[1] + P[4 * c + 2] * mv[2] + P[4 * c + 3];
         if (clip[3] <= 0.f) {
           ++wneg;
-          if (g_gxState.projType != GX_ORTHOGRAPHIC && s_printedP < 6 && v < 4) {
+          if (ndcDrawWindowed ? v < 32 : (g_gxState.projType != GX_ORTHOGRAPHIC && s_printedP < 6 && v < 4)) {
             std::fprintf(stderr,
                          "[ndc-probe-behind]  v%u idx=%u pos=(%.1f,%.1f,%.1f) mtx=%u M=[%.3f %.3f %.3f %.3f | "
                          "%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f] mv=(%.1f,%.1f,%.1f) clipW=%.3f mark='%s'\n",
@@ -1930,7 +1965,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         // with unclippedDepth, so XY containment alone decides rasterization.
         if (nx >= -1.f && nx <= 1.f && ny >= -1.f && ny <= 1.f) ++in;
         if (nz >= -1.f && nz <= 0.f) ++zin;
-        if (s_printed <= 6 && v < 4) {
+        if (ndcDrawWindowed ? v < 32 : (s_printed <= 6 && v < 4)) {
           // Also fetch this vertex's CLR0 raw bytes (if indexed) — shading
           // ground truth for "geometry rasterizes but comes out black".
           u32 c0raw[4] = {0xAAAA, 0, 0, 0};
@@ -1977,7 +2012,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       std::fprintf(stderr,
                    "[ndc-probe] #%d verts=%u inXY=%u inZ=%u wneg=%u proj=%c ndcX=[%.2f..%.2f] ndcY=[%.2f..%.2f] "
                    "ndcZ=[%.4f..%.4f] mtx0=%u cull=%d aComp=%d/%u,%d/%u zc=%d zu=%d mark='%s'\n",
-                   s_printed, vtxCount, in, zin, wneg, g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', xmin, xmax,
+                   ndcDrawWindowed ? static_cast<int>(s_ndcDrawCounter) : s_printed,
+                   vtxCount, in, zin, wneg, g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', xmin, xmax,
                    ymin, ymax, zmin, zmax, firstMtx, static_cast<int>(g_gxState.cullMode),
                    static_cast<int>(g_gxState.alphaCompare.comp0), g_gxState.alphaCompare.ref0,
                    static_cast<int>(g_gxState.alphaCompare.comp1), g_gxState.alphaCompare.ref1,
@@ -2273,6 +2309,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // Per-drain draw/vertex tally for SB_DRAW_STATS (reported from fifo::drain).
   detail::sDrainDraws += 1;
   detail::sDrainVerts += vtxCount;
+  ++g_sbPushedDrawCount; // see decl above draw_prim: SB_NDC_DRAW window alignment
   // SB_DRAW_DUMP=1: one-shot per-draw identity dump for the first drain past
   // draw #200 — prim/verts/texture/position-matrix translation, enough to
   // recognize which shapes the frame contains (e.g. the 752-vert sky dome).
