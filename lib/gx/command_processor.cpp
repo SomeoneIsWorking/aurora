@@ -1923,11 +1923,34 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           for (u64 i = 0; i + 1 < nbytes; i += 2) { ++aSamp; if (td[i] == 0) ++aZero; else if (td[i] == 0xFF) ++aFull; }
         }
       }
+      // Mip-level alpha summary (RGB5A3): the cutout (GEQUAL 128) samples the mip
+      // matching on-screen size — a zero/stale mip chain makes SMALL instances
+      // vanish while big ones only wash out. Level offsets follow GC layout
+      // (levels packed contiguously after the base).
+      char mipbuf[160]; mipbuf[0] = 0;
+      if (td != nullptr && f == GX_TF_RGB5A3 && tobj.mip_count() > 1) {
+        u64 off = static_cast<u64>(w) * h * 2;
+        int mn = 0;
+        for (u32 lvl = 1; lvl < tobj.mip_count() && lvl <= 4; ++lvl) {
+          u32 lw = std::max(w >> lvl, 1u), lh = std::max(h >> lvl, 1u);
+          u64 lb = static_cast<u64>(lw) * lh * 2;
+          u32 z = 0, fu = 0, n = 0;
+          for (u64 i = 0; i + 1 < lb; i += 2) {
+            u16 v = static_cast<u16>((td[off + i] << 8) | td[off + i + 1]);
+            ++n;
+            if (v & 0x8000) ++fu;
+            else if ((v & 0x7000) == 0) ++z;
+          }
+          mn += std::snprintf(mipbuf + mn, sizeof(mipbuf) - mn, " L%u[n=%u z=%u f=%u]", lvl, n, z, fu);
+          off += lb;
+        }
+      }
       std::fprintf(stderr,
-                   "[tex-id] #%ld image3=0x%x data=%p %ux%u fmt=%u ver=%u hash=%016llx "
-                   "alpha[samp=%u zero=%u full=%u]\n",
+                   "[tex-id] #%ld image3=0x%x data=%p %ux%u fmt=%u ver=%u mips=%u hash=%016llx "
+                   "alpha[samp=%u zero=%u full=%u]%s\n",
                    s_ndcDrawCounter, tobj.image3, static_cast<const void*>(td), w, h, f,
-                   tobj.texDataVersion, static_cast<unsigned long long>(hash), aSamp, aZero, aFull);
+                   tobj.texDataVersion, tobj.mip_count(), static_cast<unsigned long long>(hash),
+                   aSamp, aZero, aFull, mipbuf);
     }
     const bool probeMatch = s_minVerts > 0 && s_printed < 400 && afterWindowOk &&
                             vtxCount >= static_cast<u16>(s_minVerts) &&
@@ -2022,11 +2045,40 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
             const u8* cd = static_cast<const u8*>(carr.data) + cidx * carr.stride;
             c0raw[0] = cd[0]; c0raw[1] = cd[1]; c0raw[2] = cd[2]; c0raw[3] = carr.stride > 3 ? cd[3] : 0;
           }
+          // TEX0 UVs (indexed) — which texture region this vertex samples. For an
+          // alpha-cutout material (aComp GEQUAL) wrong UVs land on transparent
+          // texels and the draw vanishes with every other state field correct
+          // (2026-07-14 seagull probe).
+          float t0u = -999.f, t0v = -999.f;
+          const auto t0desc = g_gxState.vtxDesc[GX_VA_TEX0];
+          if ((t0desc == GX_INDEX16 || t0desc == GX_INDEX8) && g_gxState.arrays[GX_VA_TEX0].data != nullptr) {
+            u32 t0off = 0;
+            for (int a = GX_VA_PNMTXIDX; a < GX_VA_TEX0; ++a) {
+              switch (g_gxState.vtxDesc[a]) {
+              case GX_NONE: break;
+              case GX_DIRECT: t0off += a < GX_VA_POS ? 1 : comp_type_size(static_cast<GXAttr>(a), g_gxState.vtxFmts[fmt].attrs[a].type) * comp_cnt_count(static_cast<GXAttr>(a), g_gxState.vtxFmts[fmt].attrs[a].cnt); break;
+              case GX_INDEX8: t0off += (a == GX_VA_NRM && g_gxState.vtxFmts[fmt].attrs[a].cnt == GX_NRM_NBT3) ? 3 : 1; break;
+              case GX_INDEX16: t0off += (a == GX_VA_NRM && g_gxState.vtxFmts[fmt].attrs[a].cnt == GX_NRM_NBT3) ? 6 : 2; break;
+              }
+            }
+            const u32 tidx = t0desc == GX_INDEX16 ? read_u16(vp + t0off, true) : vp[t0off];
+            const auto& tarr = g_gxState.arrays[GX_VA_TEX0];
+            const u8* tdp = static_cast<const u8*>(tarr.data) + tidx * tarr.stride;
+            const auto& tfmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0];
+            const bool tle = tarr.le;
+            if (tfmt.type == GX_F32) {
+              auto rf = [tle](const u8* p) { u32 u; std::memcpy(&u, p, 4); if (!tle) u = __builtin_bswap32(u); float f; std::memcpy(&f, &u, 4); return f; };
+              t0u = rf(tdp); t0v = rf(tdp + 4);
+            } else if (tfmt.type == GX_S16 || tfmt.type == GX_U16) {
+              auto rs = [tle, &tfmt](const u8* p) { u16 u; std::memcpy(&u, p, 2); if (!tle) u = static_cast<u16>((u << 8) | (u >> 8)); float f = tfmt.type == GX_S16 ? static_cast<float>(static_cast<s16>(u)) : static_cast<float>(u); return f / static_cast<float>(1u << tfmt.frac); };
+              t0u = rs(tdp); t0v = rs(tdp + 2);
+            }
+          }
           std::fprintf(stderr,
                        "[ndc-probe]   v%u idx=%u pos=(%.1f,%.1f,%.1f) mv=(%.1f,%.1f,%.1f) ndc=(%.3f,%.3f,%.4f) "
-                       "w=%.1f mtx=%u clr0=[%02x %02x %02x %02x] c0type=%d\n",
+                       "w=%.1f mtx=%u clr0=[%02x %02x %02x %02x] c0type=%d t0=(%.4f,%.4f)\n",
                        v, idx, x, y, z, mv[0], mv[1], mv[2], nx, ny, nz, clip[3], firstMtx, c0raw[0], c0raw[1],
-                       c0raw[2], c0raw[3], static_cast<int>(g_gxState.vtxFmts[fmt].attrs[GX_VA_CLR0].type));
+                       c0raw[2], c0raw[3], static_cast<int>(g_gxState.vtxFmts[fmt].attrs[GX_VA_CLR0].type), t0u, t0v);
         }
       }
       // TEV stage 0 combiner state — decides "vertex colors right but TEV

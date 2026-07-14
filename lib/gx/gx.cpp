@@ -843,7 +843,17 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
     config.shaderConfig.tcgs[i] = g_gxState.tcgs[i];
   }
   if (g_gxState.alphaCompare) {
-    config.shaderConfig.alphaCompare = g_gxState.alphaCompare;
+    // SB_NO_ACMP=1 (diagnostic): drop the alpha-compare from every pipeline —
+    // bisects "fragments generated but killed by the cutout" from "no
+    // fragments at all" for a draw that vanishes with correct state.
+    static int s_noAcmp = -1;
+    if (s_noAcmp < 0) {
+      const char* e = std::getenv("SB_NO_ACMP");
+      s_noAcmp = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+    }
+    if (!s_noAcmp) {
+      config.shaderConfig.alphaCompare = g_gxState.alphaCompare;
+    }
   }
   const auto cullMode = config.shaderConfig.lineMode == 0 ? g_gxState.cullMode : GX_CULL_NONE;
   const auto [polygonOffset, polygonOffsetScale] = polygon_offset_for_cull_mode(cullMode);
