@@ -2806,6 +2806,33 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   PipelineConfig config{};
   populate_pipeline_config(config, prim, fmt);
   const auto info = build_shader_info(config.shaderConfig);
+  // SB_SKIP_HASH=<hex>: drop every draw whose shader-config hash matches (the same
+  // hash SB_SHADER_HASH prints). The only way to isolate a specific draw on the raw
+  // .dff replay path, where game-side markers are absent (mark=''). Multiple hashes
+  // may be given comma-separated. Used to pin the sea-surface speckle draw.
+  {
+    static bool s_init = false;
+    static uint64_t s_skip[8] = {0};
+    static int s_skipN = 0;
+    if (!s_init) {
+      s_init = true;
+      if (const char* e = std::getenv("SB_SKIP_HASH"); e != nullptr && e[0] != '\0') {
+        const char* p = e;
+        while (*p != '\0' && s_skipN < 8) {
+          s_skip[s_skipN++] = std::strtoull(p, nullptr, 16);
+          const char* comma = std::strchr(p, ',');
+          if (comma == nullptr) break;
+          p = comma + 1;
+        }
+      }
+    }
+    if (s_skipN > 0) {
+      const uint64_t h = static_cast<uint64_t>(xxh3_hash(config.shaderConfig));
+      for (int k = 0; k < s_skipN; ++k) {
+        if (h == s_skip[k]) return;
+      }
+    }
+  }
   // SB_SHADER_HASH=1: per-draw shader-config hash (pairs with SB_SHADER_DUMP
   // to locate the exact WGSL a given marked draw uses).
   {
