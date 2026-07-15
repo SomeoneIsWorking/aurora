@@ -2647,6 +2647,25 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                    static_cast<int>(g_gxState.alphaCompare.comp1), g_gxState.alphaCompare.ref1,
                    pn[0], pn[1], pn[2], pn[3], pn[4], pn[5], pn[6], pn[7],
                    pn[8], pn[9], pn[10], pn[11], g_sbLastMarker.c_str());
+      // Active-light colors/positions for this draw (the fields the [draw-dump]
+      // line above can't fit) — needed to compare a lit draw's SHADING between
+      // native boot and .dff replay (e.g. the file-select Mario overalls washout,
+      // once ambient/matColor/texdims were shown to match). Emitted for every
+      // lit draw of the dumped frame; also dumps the KONST color regs.
+      if (cs.lightMask.any()) {
+        for (u32 li = 0; li < GX::MaxLights; ++li) {
+          if (!cs.lightMask.test(li)) continue;
+          const auto& L = g_gxState.lights[li];
+          std::fprintf(stderr, "   [dd-light] #%d L%u col=(%.3f,%.3f,%.3f) pos=(%.0f,%.0f,%.0f) cosAtt=(%.3f,%.3f,%.3f) distAtt=(%.4f,%.4f,%.4f)\n",
+                       s_dumped, li, L.color.x(), L.color.y(), L.color.z(), L.pos.x(), L.pos.y(), L.pos.z(),
+                       L.cosAtt.x(), L.cosAtt.y(), L.cosAtt.z(), L.distAtt.x(), L.distAtt.y(), L.distAtt.z());
+        }
+        for (u32 k = 0; k < 4; ++k) {
+          const auto& kc = g_gxState.kcolors[k];
+          std::fprintf(stderr, "   [dd-konst] #%d K%u=(%.3f,%.3f,%.3f,%.3f)\n",
+                       s_dumped, k, kc.x(), kc.y(), kc.z(), kc.w());
+        }
+      }
       // SB_TEV_DUMP=1: full TEV combiner state + texture format for this same
       // window, to pin down the exact stage math on a specific overbright
       // draw (e.g. the title logo quad) once SB_DRAW_DUMP has located it.
