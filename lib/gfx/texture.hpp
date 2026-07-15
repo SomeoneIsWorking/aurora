@@ -95,7 +95,23 @@ struct GXTexObj_ {
   }
   GXTexFilter mag_filter() const noexcept { return get_bits(mode0, 1, 4) != 0 ? GX_LINEAR : GX_NEAR; }
   GXBool has_mips() const noexcept { return (flags & 1u) != 0 ? GX_TRUE : GX_FALSE; }
-  u32 mip_count() const noexcept { return has_mips() ? std::max<u32>(static_cast<u32>(max_lod()) + 1, 1u) : 1; }
+  u32 mip_count() const noexcept {
+    if (has_mips() == GX_FALSE) {
+      return 1;
+    }
+    const u32 byLod = std::max<u32>(static_cast<u32>(max_lod()) + 1, 1u);
+    // A WxH texture has at most floor(log2(max(w,h)))+1 mip levels; creating/decoding
+    // beyond that reads GARBAGE past the level-0 data (the file-select sea-quad white
+    // SPECKLE: a 256x256 I4 texObj whose max_lod is clamped to 10 -> 11 levels, but 256
+    // supports only 9 — the extra levels sampled as noise). Clamp to the real maximum.
+    u32 dim = std::max<u32>(width(), height());
+    u32 byDim = 1;
+    while (dim > 1u) {
+      dim >>= 1u;
+      ++byDim;
+    }
+    return std::min(byLod, byDim);
+  }
   GXBool do_edge_lod() const noexcept { return get_bits(mode0, 1, 8) == 0 ? GX_TRUE : GX_FALSE; }
   float lod_bias() const noexcept { return static_cast<float>(static_cast<int8_t>(get_bits(mode0, 8, 9))) / 32.0f; }
   GXAnisotropy max_aniso() const noexcept { return static_cast<GXAnisotropy>(get_bits(mode0, 2, 19)); }
