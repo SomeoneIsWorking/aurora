@@ -2614,7 +2614,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       std::fprintf(stderr,
                    "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
                    "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
-                   "tev=%u ch0[light=%d matSrc=%d ambSrc=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
+                   "tev=%u ch0[light=%d matSrc=%d ambSrc=%d attnFn=%d diffFn=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
                    "a0[light=%d matSrc=%d ambSrc=%d mat=%.2f amb=%.2f mask=%02x] "
                    "prj=[%.4f %.4f %.4f %.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] clr0=%d clr1=%d mtxIdx=%u "
                    "cull=%d zfunc=%d acmp=[c0=%d r0=%u op=%d c1=%d r1=%u] "
@@ -2625,6 +2625,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                    static_cast<unsigned>(g_gxState.blendMode), vp.left, vp.top, vp.width, vp.height,
                    sc.x, sc.y, sc.width, sc.height, g_gxState.numTevStages,
                    static_cast<int>(cc.lightingEnabled), static_cast<int>(cc.matSrc), static_cast<int>(cc.ambSrc),
+                   static_cast<int>(cc.attnFn), static_cast<int>(cc.diffFn),
                    cs.matColor.x(),
                    cs.matColor.y(), cs.matColor.z(), cs.matColor.w(), cs.ambColor.x(), cs.ambColor.y(),
                    cs.ambColor.z(), static_cast<unsigned>(cs.lightMask.to_ulong() & 0xff),
@@ -2690,11 +2691,18 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                        static_cast<int>(s.kaSel), static_cast<int>(s.tevSwapRas),
                        static_cast<int>(s.tevSwapTex));
         }
-        const auto& tobj = g_gxState.textures[0].texObj;
-        std::fprintf(stderr, "  [tex] fmt=%d minFilt=%d magFilt=%d wrapS=%d wrapT=%d\n",
-                     static_cast<int>(tobj.format()), static_cast<int>(tobj.min_filter()),
-                     static_cast<int>(tobj.mag_filter()), static_cast<int>(tobj.wrap_s()),
-                     static_cast<int>(tobj.wrap_t()));
+        // Report ALL bound texmaps (0-7), not just texMap0: a multi-texmap
+        // material (Mario overalls = 4 texmaps) can wash if any texmap binds a
+        // wrong/empty texture. `hasTex` = a texture handle is actually bound.
+        for (unsigned tm = 0; tm < aurora::gx::MaxTextures; ++tm) {
+          const auto& tu = g_gxState.textures[tm];
+          const auto& tobj = tu.texObj;
+          std::fprintf(stderr, "  [tex] texMap=%u hasTex=%d fmt=%d %ux%u minFilt=%d magFilt=%d wrapS=%d wrapT=%d\n",
+                       tm, tu.ref ? 1 : 0, static_cast<int>(tobj.format()),
+                       tobj.width(), tobj.height(),
+                       static_cast<int>(tobj.min_filter()), static_cast<int>(tobj.mag_filter()),
+                       static_cast<int>(tobj.wrap_s()), static_cast<int>(tobj.wrap_t()));
+        }
         for (unsigned r = 0; r < aurora::gx::MaxTevRegs; ++r) {
           const auto& c = g_gxState.colorRegs[r];
           std::fprintf(stderr, "  [tevreg] %u = (%.3f, %.3f, %.3f, %.3f)\n", r, c.x(), c.y(), c.z(), c.w());

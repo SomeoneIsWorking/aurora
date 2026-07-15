@@ -34,6 +34,17 @@ static bool sb_nrm_viz_enabled() {
   return v;
 }
 
+// SB_RASC_VIZ: env-gated lit-channel visualization. When set, every lit shader
+// outputs its computed COLOR0 channel color (`in.cc0`, the RASC that feeds the
+// TEV) as the final pixel — so a framedump shows the post-lighting/pre-TEV vertex
+// color directly. Used to split "lighting eval wrong" (RASC already blown/washed)
+// from "TEV combine wrong" (RASC correct, TEV washes it) on the Mario overalls
+// paleness. Read once (thread-safe).
+static bool sb_rasc_viz_enabled() {
+  static const bool v = std::getenv("SB_RASC_VIZ") != nullptr;
+  return v;
+}
+
 // SB_TEV_STOP=<N>: TEV-stage bisector. Truncates the per-draw TEV combiner chain
 // after stage N and outputs that stage's color register as the final pixel — so
 // rendering the same scene at N=0,1,2,... shows the combiner state after each stage
@@ -1658,6 +1669,12 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
   }
   if (sb_nrm_viz_enabled()) {
     fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
+  }
+  // SB_RASC_VIZ: overwrite the final color with the lit COLOR0 channel (in.cc0).
+  // Only meaningful for lit draws (per-vertex lighting writes out.cc0); unlit
+  // draws leave cc0 at the material color, which is still informative.
+  if (sb_rasc_viz_enabled() && info.sampledColorChannels.test(0)) {
+    fragmentFn += "\n    prev = vec4f(in.cc0.rgb, prev.a);";
   }
 
   const auto shaderSource = fmt::format(R"""(
