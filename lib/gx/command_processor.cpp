@@ -1537,12 +1537,28 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
         break;
       case 0x0A:
         // Ambient color 0
+        {
+          static const bool s_ambTrace = std::getenv("SB_AMB_TRACE") != nullptr;
+          if (s_ambTrace) {
+            static long n = 0;
+            std::fprintf(stderr, "[amb-trace] n=%ld reg=0A val=%08x mark='%s'\n",
+                         ++n, val, g_sbLastMarker.c_str());
+          }
+        }
         g_gxState.colorChannelState[GX_COLOR0].ambColor = unpack_color(val);
         g_gxState.colorChannelState[GX_ALPHA0].ambColor = unpack_color(val);
         g_gxState.stateDirty = true;
         break;
       case 0x0B:
         // Ambient color 1
+        {
+          static const bool s_ambTrace = std::getenv("SB_AMB_TRACE") != nullptr;
+          if (s_ambTrace) {
+            static long n = 0;
+            std::fprintf(stderr, "[amb-trace] n=%ld reg=0B val=%08x mark='%s'\n",
+                         ++n, val, g_sbLastMarker.c_str());
+          }
+        }
         g_gxState.colorChannelState[GX_COLOR1].ambColor = unpack_color(val);
         g_gxState.colorChannelState[GX_ALPHA1].ambColor = unpack_color(val);
         g_gxState.stateDirty = true;
