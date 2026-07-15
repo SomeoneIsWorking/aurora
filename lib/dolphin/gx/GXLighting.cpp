@@ -279,9 +279,12 @@ void GXSetChanCtrl(GXChannelID id, bool lightingEnabled, GXColorSrc ambSrc, GXCo
   SET_REG_FIELD(0, reg, 1, 1, lightingEnabled);
   SET_REG_FIELD(0, reg, 4, 2, lightState & 0xF); // lights 0-3
   SET_REG_FIELD(0, reg, 1, 6, ambSrc);
-  SET_REG_FIELD(0, reg, 2, 7, (attnFn == GX_AF_NONE) ? 0 : diffFn);
-  SET_REG_FIELD(0, reg, 1, 9, (attnFn != GX_AF_SPEC));   // attn enable
-  SET_REG_FIELD(0, reg, 1, 10, (attnFn != GX_AF_NONE));  // attn select
+  // Match the real GC/decomp encoding (reference/sms GXLight.c GXSetChanCtrl),
+  // so this round-trips with the command_processor decode and matches hardware
+  // bits: diffFn zeroed when attn==SPEC; bit9=(attn!=NONE), bit10=(attn!=SPEC).
+  SET_REG_FIELD(0, reg, 2, 7, (attnFn == GX_AF_SPEC) ? 0 : diffFn);
+  SET_REG_FIELD(0, reg, 1, 9, (attnFn != GX_AF_NONE));   // attn enable
+  SET_REG_FIELD(0, reg, 1, 10, (attnFn != GX_AF_SPEC));  // attn select
   SET_REG_FIELD(0, reg, 4, 11, (lightState >> 4) & 0xF); // lights 4-7
 
   // XF channel control registers: 0x100E-0x1011

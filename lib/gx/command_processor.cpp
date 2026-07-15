@@ -1588,13 +1588,23 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           u32 lightsLo = bp_get(val, 4, 2);
           chan.ambSrc = static_cast<GXColorSrc>(bp_get(val, 1, 6));
           chan.diffFn = static_cast<GXDiffuseFn>(bp_get(val, 2, 7));
-          // Encoding: bit 9 = (attnFn != GX_AF_SPEC), bit 10 = (attnFn != GX_AF_NONE)
+          // Real GC/decomp XF chanctrl attn encoding (reference/sms
+          // src/dolphin/gx/GXLight.c GXSetChanCtrl, cross-checked vs Dolphin
+          // XFMemory.h attnfunc BitField<9,2> {None,Spec,Dir,Spot}):
+          //   bit 9  = (attn_fn != GX_AF_NONE)
+          //   bit 10 = (attn_fn != GX_AF_SPEC)
+          // The prior decode had bit9/bit10 SWAPPED, so a SPEC channel
+          // (bit9=1,bit10=0) was misread as NONE — which forces attn=diff=1 and
+          // adds the light's FULL color as a constant instead of an attenuated
+          // specular highlight. That over-brightened Mario at file-select (his
+          // COLOR1 is a GX_AF_SPEC highlight light; TEV stage 4 pulls COLOR1
+          // RASC in, and the phantom full-white add blew him toward white).
           bool bit9 = bp_get(val, 1, 9) != 0;
           bool bit10 = bp_get(val, 1, 10) != 0;
           u32 lightsHi = bp_get(val, 4, 11);
-          if (!bit10) {
-            chan.attnFn = GX_AF_NONE;
-          } else if (!bit9) {
+          if (!bit9) {
+            chan.attnFn = GX_AF_NONE;  // GX_AF_NONE (or hw "Dir": attn=1, diffuse applies)
+          } else if (!bit10) {
             chan.attnFn = GX_AF_SPEC;
           } else {
             chan.attnFn = GX_AF_SPOT;
@@ -2653,9 +2663,31 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       // native boot and .dff replay (e.g. the file-select Mario overalls washout,
       // once ambient/matColor/texdims were shown to match). Emitted for every
       // lit draw of the dumped frame; also dumps the KONST color regs.
-      if (cs.lightMask.any()) {
+      // COLOR1 (GX_COLOR1==1) + ALPHA1 (GX_ALPHA1==3): the SECOND lit channel,
+      // never dumped before. Mario's material pulls channel-1 RASC into TEV
+      // stage 4 (chan=5=COLOR1A1); if ch1 lighting is over-bright it blows the
+      // final to white while ch0 looks fine. (2026-07-15 Mario paleness.)
+      {
+        const auto& c1 = g_gxState.colorChannelConfig[GX_COLOR1];
+        const auto& s1 = g_gxState.colorChannelState[GX_COLOR1];
+        const auto& c1a = g_gxState.colorChannelConfig[GX_ALPHA1];
+        const auto& s1a = g_gxState.colorChannelState[GX_ALPHA1];
+        std::fprintf(stderr,
+                     "   [dd-ch1] #%d ch1[light=%d matSrc=%d ambSrc=%d attnFn=%d diffFn=%d mat=(%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
+                     "a1[light=%d matSrc=%d ambSrc=%d mask=%02x]\n",
+                     s_dumped, static_cast<int>(c1.lightingEnabled), static_cast<int>(c1.matSrc),
+                     static_cast<int>(c1.ambSrc), static_cast<int>(c1.attnFn), static_cast<int>(c1.diffFn),
+                     s1.matColor.x(), s1.matColor.y(), s1.matColor.z(), s1.ambColor.x(), s1.ambColor.y(),
+                     s1.ambColor.z(), static_cast<unsigned>(s1.lightMask.to_ulong() & 0xff),
+                     static_cast<int>(c1a.lightingEnabled), static_cast<int>(c1a.matSrc),
+                     static_cast<int>(c1a.ambSrc), static_cast<unsigned>(s1a.lightMask.to_ulong() & 0xff));
+      }
+      // Dump lights referenced by EITHER color channel (ch0 mask=cs, ch1 mask):
+      // Mario's ch1 uses L2 (mask=04) which the ch0-only loop below never showed.
+      const auto ch1Mask = g_gxState.colorChannelState[GX_COLOR1].lightMask;
+      if (cs.lightMask.any() || ch1Mask.any()) {
         for (u32 li = 0; li < GX::MaxLights; ++li) {
-          if (!cs.lightMask.test(li)) continue;
+          if (!cs.lightMask.test(li) && !ch1Mask.test(li)) continue;
           const auto& L = g_gxState.lights[li];
           std::fprintf(stderr, "   [dd-light] #%d L%u col=(%.3f,%.3f,%.3f) pos=(%.0f,%.0f,%.0f) cosAtt=(%.3f,%.3f,%.3f) distAtt=(%.4f,%.4f,%.4f)\n",
                        s_dumped, li, L.color.x(), L.color.y(), L.color.z(), L.pos.x(), L.pos.y(), L.pos.z(),
