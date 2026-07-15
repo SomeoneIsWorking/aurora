@@ -2482,6 +2482,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // `== target` test then never fires — the 2026-07-10 "0 draws dumped despite
   // retrace passing 1000" bug). Latch onto the first retrace value >= target
   // and dump only that latched frame — robust to the step size.
+  //
+  // s_ddFrameActive: true ONLY during the SB_DRAW_DUMP_FRAME target frame's draws.
+  // Shared with the SB_DRAW_DUMP block below so `SB_DRAW_DUMP=1 SB_DRAW_DUMP_FRAME=<N>`
+  // emits the FULL ch0 [draw-dump] line for exactly frame N (uncapped, ONE frame) —
+  // the previous s_fullFrame path uncapped but then firehosed EVERY frame after the
+  // retrace threshold, so a clean full-frame render-state dump (for draw_diff) wasn't
+  // possible. Declared at function scope so both blocks see it.
+  static bool s_ddFrameActive = false;
   if (const char* fe = std::getenv("SB_DRAW_DUMP_FRAME"); fe != nullptr && fe[0] != '\0') {
     // SB_DRAW_DUMP_FRAME=<N>: dump every draw of the Nth RENDERED FRAME. "Frame"
     // is counted by retrace-value CHANGES, not by an absolute retrace target:
@@ -2497,6 +2505,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     if (s_targetFrame == -2) s_targetFrame = std::atol(fe);
     const long rc = static_cast<long>(sb_gx_vi_retrace_count());
     if (rc != s_prevRetrace) { s_prevRetrace = rc; ++s_frameIdx; }
+    s_ddFrameActive = (s_frameIdx == s_targetFrame);
     if (s_frameIdx == s_targetFrame) {
       static long s_frameDumped = 0;
       const auto& vp = g_gxState.logicalViewport;
@@ -2530,8 +2539,12 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     // its retrace count once boot has run for a while).
     const bool windowed = s_afterRetrace >= 0;
     const bool afterWindowOk = !windowed || static_cast<long>(sb_gx_vi_retrace_count()) >= s_afterRetrace;
-    const bool inRange = windowed ? (afterWindowOk && (s_fullFrame || s_windowDumped < 200))
-                                   : (s_dumped >= s_start && (s_fullFrame || s_dumped < s_start + 200));
+    // s_fullFrame (SB_DRAW_DUMP_FRAME set): dump the full ch0 line for exactly the
+    // target frame's draws (gated by s_ddFrameActive) — uncapped, one frame. Else the
+    // legacy 200-cap windowed / draw-index behavior.
+    const bool inRange = s_fullFrame ? s_ddFrameActive
+                       : windowed ? (afterWindowOk && s_windowDumped < 200)
+                                   : (s_dumped >= s_start && s_dumped < s_start + 200);
     if (inRange) {
       if (windowed) ++s_windowDumped;
       const auto& obj = g_gxState.textures[0].texObj;
