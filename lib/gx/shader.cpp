@@ -10,6 +10,7 @@
 
 #include <absl/container/flat_hash_set.h>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <string_view>
@@ -23,6 +24,15 @@ using namespace std::string_literals;
 using namespace std::string_view_literals;
 
 static Module Log("aurora::gfx::gx");
+
+// SB_NRM_VIZ: env-gated normal visualization diagnostic. When set, every lit shader
+// outputs its model-view normal `mv_nrm` as fragment color (prev.rgb = normal) — so a
+// framedump shows per-vertex normals as color. Used to check SKINNED normals (Mario)
+// vs static ones (cubes) when diagnosing lit-object paleness. Read once (thread-safe).
+static bool sb_nrm_viz_enabled() {
+  static const bool v = std::getenv("SB_NRM_VIZ") != nullptr;
+  return v;
+}
 
 absl::flat_hash_set<gfx::ShaderRef> g_seenShaders;
 
@@ -1078,7 +1088,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
       "\n    let nrm_tmp = vec4f({}, 0.0) * ubuf.nrm_mtx[in_pnmtxidx];"
       "\n    let mv_nrm = select(nrm_tmp, normalize(nrm_tmp), dot(nrm_tmp, nrm_tmp) > 1e-10);",
       vtx_attr(config, GX_VA_NRM));
-  if constexpr (EnableNormalVisualization) {
+  if (sb_nrm_viz_enabled()) {
     vtxOutAttrs += fmt::format("\n    @location({}) nrm: vec3f,", vtxOutIdx++);
     vtxXfrAttrsPre += "\n    out.nrm = mv_nrm;";
   }
@@ -1621,7 +1631,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
       fragmentFn += fmt::format("\n    if ({}) {{ discard; }}", discard.expr);
     }
   }
-  if constexpr (EnableNormalVisualization) {
+  if (sb_nrm_viz_enabled()) {
     fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
   }
 
