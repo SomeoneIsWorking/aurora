@@ -1106,6 +1106,15 @@ wgpu::SamplerDescriptor aurora::gfx::TextureBind::get_descriptor() const noexcep
     minFilter = wgpu::FilterMode::Linear;
     mipFilter = wgpu::MipmapFilterMode::Linear;
   }
+  // SB_FORCE_LOD0=1 (diagnostic): clamp every sampler to LOD 0 (no mip
+  // selection). Tests whether mip-LOD over-selection is washing/blurring a
+  // draw (e.g. the Mario overalls paleness vs the GC oracle). Not a fix.
+  static const bool s_forceLod0 = std::getenv("SB_FORCE_LOD0") != nullptr;
+  if (s_forceLod0) {
+    minLod = 0.f;
+    maxLod = 0.f;
+    mipFilter = wgpu::MipmapFilterMode::Undefined;
+  }
   return {
       .label = "Generated Filtering Sampler",
       .addressModeU = wgpu_address_mode(texObj.wrap_s()),
