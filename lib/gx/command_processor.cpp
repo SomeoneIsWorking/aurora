@@ -2459,6 +2459,35 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       return;
     }
   }
+  // SB_LIGHT_DBG=1: dump the ch0 lighting setup (diffFn/attnFn/mask/amb/mat) + each
+  // active light's color/pos/attn for LIT high-vertex draws (Mario's skinned strips
+  // are ~20-23 verts, lit). Used to find the ~2x dynamic-diffuse over-brighten on Mario.
+  {
+    static const bool s_lightDbg = std::getenv("SB_LIGHT_DBG") != nullptr;
+    if (s_lightDbg) {
+      const auto& lc = g_gxState.colorChannelConfig[0];
+      const auto& ls = g_gxState.colorChannelState[0];
+      if (lc.lightingEnabled && vtxCount >= 15) {
+        static int s_ln = 0;
+        if (s_ln++ < 16) {
+          std::fprintf(stderr,
+              "[light-dbg] verts=%u diffFn=%d attnFn=%d matSrc=%d ambSrc=%d mask=%02x amb=(%.2f,%.2f,%.2f) mat=(%.2f,%.2f,%.2f)\n",
+              vtxCount, static_cast<int>(lc.diffFn), static_cast<int>(lc.attnFn), static_cast<int>(lc.matSrc),
+              static_cast<int>(lc.ambSrc), static_cast<unsigned>(ls.lightMask.to_ulong() & 0xff),
+              ls.ambColor.x(), ls.ambColor.y(), ls.ambColor.z(), ls.matColor.x(), ls.matColor.y(), ls.matColor.z());
+          for (u32 i = 0; i < GX::MaxLights; ++i) {
+            if (!ls.lightMask.test(i)) continue;
+            const auto& L = g_gxState.lights[i];
+            std::fprintf(stderr,
+                "   L%u color=(%.3f,%.3f,%.3f) pos=(%.0f,%.0f,%.0f) dir=(%.2f,%.2f,%.2f) cosAtt=(%.3f,%.3f,%.3f) distAtt=(%.4f,%.4f,%.4f)\n",
+                i, L.color.x(), L.color.y(), L.color.z(), L.pos.x(), L.pos.y(), L.pos.z(),
+                L.dir.x(), L.dir.y(), L.dir.z(), L.cosAtt.x(), L.cosAtt.y(), L.cosAtt.z(),
+                L.distAtt.x(), L.distAtt.y(), L.distAtt.z());
+          }
+        }
+      }
+    }
+  }
   // SB_DRAW_DUMP=1: one-shot per-draw identity dump for the first drain past
   // draw #200 — prim/verts/texture/position-matrix translation, enough to
   // recognize which shapes the frame contains (e.g. the 752-vert sky dome).
