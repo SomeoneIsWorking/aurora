@@ -34,6 +34,20 @@ static bool sb_nrm_viz_enabled() {
   return v;
 }
 
+// SB_TEV_STOP=<N>: TEV-stage bisector. Truncates the per-draw TEV combiner chain
+// after stage N and outputs that stage's color register as the final pixel — so
+// rendering the same scene at N=0,1,2,... shows the combiner state after each stage
+// and reveals exactly WHICH stage a wrong color first appears at (e.g. Mario's blue
+// overalls washing white). Materials with fewer than N stages show their full output.
+// -1 = off. Read once (set it from run start; shaders are cached per config).
+static int sb_tev_stop() {
+  static const int v = [] {
+    const char* e = std::getenv("SB_TEV_STOP");
+    return (e != nullptr && e[0] != '\0') ? std::atoi(e) : -1;
+  }();
+  return v;
+}
+
 absl::flat_hash_set<gfx::ShaderRef> g_seenShaders;
 
 static inline std::string_view chan_comp(GXTevColorChan chan) noexcept {
@@ -1100,6 +1114,7 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
   std::string fragmentFn;
 
   static std::array regName{"prev"sv, "tevreg0"sv, "tevreg1"sv, "tevreg2"sv};
+  u32 sbLastEmittedStage = config.tevStageCount - 1;
   for (u32 idx = 0; idx < config.tevStageCount; ++idx) {
     const auto& stage = config.tevStages[idx];
     {
@@ -1118,10 +1133,16 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
           alpha_arg_reg(stage.alphaPass.c, idx, config, stage), alpha_arg_reg(stage.alphaPass.d, idx, config, stage));
       fragmentFn += fmt::format("\n    {0}.a = {1};", outReg, op);
     }
+    sbLastEmittedStage = idx;
+    // SB_TEV_STOP=<N>: bisector — stop after stage N so `prev` shows this stage's output.
+    if (sb_tev_stop() >= 0 && static_cast<int>(idx) >= sb_tev_stop()) {
+      break;
+    }
   }
 
   {
-    const auto& lastStage = config.tevStages[config.tevStageCount - 1];
+    // Normally the FINAL stage feeds prev; with SB_TEV_STOP the truncated stage does.
+    const auto& lastStage = config.tevStages[sbLastEmittedStage];
     if (lastStage.colorOp.outReg != 0) {
       fragmentFn += fmt::format("\n    prev = vec4f({0}.rgb, prev.a);", regName[lastStage.colorOp.outReg]);
     }
