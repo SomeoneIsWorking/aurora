@@ -1670,7 +1670,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           f32 p5 = read_f32(xfData + 20, bigEndian);
           u32 projType = read_u32(xfData + 24, bigEndian);
           g_gxState.projType = static_cast<GXProjectionType>(projType);
-          if (std::getenv("SB_DRAW_DUMP") != nullptr) {
+          if (std::getenv("SB_PROJ_DUMP") != nullptr) {
             std::fprintf(stderr, "[proj-set] type=%c p=(%.4f %.4f %.4f %.4f %.4f %.4f) mark='%s'\n",
                          projType == GX_ORTHOGRAPHIC ? 'O' : 'P', p0, p1, p2, p3, p4, p5,
                          g_sbLastMarker.c_str());
@@ -2562,6 +2562,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       }
       s_fullFrame = std::getenv("SB_DRAW_DUMP_FRAME") != nullptr;
     }
+    // SB_DRAW_DUMP_ALL=1: dump EVERY draw, uncapped, no frame gate. The only
+    // frame-targeting scheme that works in BOTH boot and .dff-replay: replay
+    // bypasses the game's waitForRetrace, so sb_gx_vi_retrace_count() never
+    // advances and the retrace-ordinal SB_DRAW_DUMP_FRAME gate never fires
+    // (0 draws dumped). This mode depends on no counter — for a short replay
+    // (3 frames) it dumps each settled frame's full draw list, and every draw
+    // is prefixed with the emitting frame's marker so consumers can split.
+    static const bool s_dumpAll = std::getenv("SB_DRAW_DUMP_ALL") != nullptr;
     // SB_DRAW_DUMP_AFTER present: replace the draw-index window with "first 200
     // draws once the retrace counter clears the threshold" — the two schemes
     // are mutually exclusive (a present's absolute draw index is unrelated to
@@ -2571,7 +2579,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     // s_fullFrame (SB_DRAW_DUMP_FRAME set): dump the full ch0 line for exactly the
     // target frame's draws (gated by s_ddFrameActive) — uncapped, one frame. Else the
     // legacy 200-cap windowed / draw-index behavior.
-    const bool inRange = s_fullFrame ? s_ddFrameActive
+    const bool inRange = s_dumpAll ? true
+                       : s_fullFrame ? s_ddFrameActive
                        : windowed ? (afterWindowOk && s_windowDumped < 200)
                                    : (s_dumped >= s_start && s_dumped < s_start + 200);
     if (inRange) {
