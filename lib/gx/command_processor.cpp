@@ -2650,7 +2650,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                    "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
                    "tev=%u ch0[light=%d matSrc=%d ambSrc=%d attnFn=%d diffFn=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
                    "a0[light=%d matSrc=%d ambSrc=%d mat=%.2f amb=%.2f mask=%02x] "
-                   "prj=[%.4f %.4f %.4f %.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] clr0=%d clr1=%d mtxIdx=%u "
+                   "prj=[%.4f %.4f %.4f %.4f cx=%.4f cy=%.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] clr0=%d clr1=%d mtxIdx=%u "
                    "cull=%d zfunc=%d acmp=[c0=%d r0=%u op=%d c1=%d r1=%u] "
                    "posmtx=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] mark='%s'\n",
                    s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(),
@@ -2669,6 +2669,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                    reinterpret_cast<const float*>(&g_gxState.proj)[5],
                    reinterpret_cast<const float*>(&g_gxState.proj)[10],
                    reinterpret_cast<const float*>(&g_gxState.proj)[11],
+                   reinterpret_cast<const float*>(&g_gxState.proj)[2],
+                   reinterpret_cast<const float*>(&g_gxState.proj)[6],
                    g_gxState.colorUpdate ? 1 : 0, g_gxState.alphaUpdate ? 1 : 0,
                    static_cast<int>(g_gxState.blendMode), static_cast<int>(g_gxState.blendFacSrc),
                    static_cast<int>(g_gxState.blendFacDst), static_cast<int>(posDesc),
