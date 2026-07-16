@@ -2741,6 +2741,23 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                   s_dumped, mi, n[0], n[1], n[2], n[4], n[5], n[6], n[8], n[9], n[10]);
         }
       }
+      // SB_LOG=vtxarr: bound vertex-array identity per dumped draw — attr,
+      // stride, endianness, and the first 16 bytes of the array. A replay
+      // carries retail's recorded arrays; live-native binds game memory. A
+      // content mismatch here (with identical draw STATE) localizes a
+      // BE-swap/layout gap in a specific attribute stream (2026-07-16 Mario
+      // black patches: suspect TEX1 marking-overlay UVs).
+      if (sb_gx_log_on("vtxarr")) {
+        for (u32 at = GX_VA_POS; at <= GX_VA_TEX7; ++at) {
+          if (g_gxState.vtxDesc[at] != GX_INDEX8 && g_gxState.vtxDesc[at] != GX_INDEX16) continue;
+          const auto& arr = g_gxState.arrays[at];
+          if (arr.data == nullptr) continue;
+          const u8* d = (const u8*)arr.data;
+          sb_logf("vtxarr", "#%d attr=%u stride=%u le=%d first16=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                  s_dumped, at, arr.stride, arr.le ? 1 : 0, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
+                  d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]);
+        }
+      }
       // SB_TEV_DUMP=1: full TEV combiner state + texture format for this same
       // window, to pin down the exact stage math on a specific overbright
       // draw (e.g. the title logo quad) once SB_DRAW_DUMP has located it.
