@@ -2753,9 +2753,45 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
           const auto& arr = g_gxState.arrays[at];
           if (arr.data == nullptr) continue;
           const u8* d = (const u8*)arr.data;
-          sb_logf("vtxarr", "#%d attr=%u stride=%u le=%d first16=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
-                  s_dumped, at, arr.stride, arr.le ? 1 : 0, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
+          // Full-array FNV hash, endianness-normalized to BE so a native
+          // (host-LE) array and a replay (BE) array with the same VALUES hash
+          // the same — a mismatch means content divergence ANYWHERE in the
+          // array (e.g. a partially-bounded byteswap), not just the head.
+          const u32 nbytes = arr.size != 0 ? arr.size : arr.sizeAuto;
+          u64 hash = 1469598103934665603ull;
+          if (nbytes != 0) {
+            const u32 esz = (arr.stride >= 4 && (arr.stride % 4) == 0) ? 4u : 2u;
+            for (u32 off = 0; off + esz <= nbytes; off += esz) {
+              u8 b[4];
+              for (u32 k = 0; k < esz; ++k) b[k] = d[off + (arr.le ? esz - 1 - k : k)];
+              for (u32 k = 0; k < esz; ++k) { hash ^= b[k]; hash *= 1099511628211ull; }
+            }
+          }
+          sb_logf("vtxarr", "#%d attr=%u stride=%u le=%d n=%u hash=%016llx first16=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                  s_dumped, at, arr.stride, arr.le ? 1 : 0, nbytes, (unsigned long long)hash,
+                  d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
                   d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]);
+        }
+      }
+      // SB_LOG=texgen: per-coord texgen config + the referenced texmatrix rows
+      // for this same window — the state dimension the [draw-dump]/[tev] lines
+      // never covered (wrong texgen src/mtx moves an overlay texture across
+      // the model: 2026-07-16 Mario marking-layer patch suspect).
+      if (sb_gx_log_on("texgen")) {
+        for (u32 tc = 0; tc < aurora::gx::MaxTexCoord; ++tc) {
+          const auto& t = g_gxState.tcgs[tc];
+          if (t.src == GX_MAX_TEXGENSRC) continue;
+          sb_logf("texgen", "#%d coord=%u type=%d src=%d mtx=%d post=%d norm=%d",
+                  s_dumped, tc, (int)t.type, (int)t.src, (int)t.mtx, (int)t.postMtx,
+                  t.normalize ? 1 : 0);
+          if (t.mtx != GX_IDENTITY) {
+            const u32 mi = ((u32)t.mtx - GX_TEXMTX0) / 3;
+            if (mi < aurora::gx::MaxTexMtx) {
+              const float* m = reinterpret_cast<const float*>(&g_gxState.texMtxs[mi]);
+              sb_logf("texgen", "#%d   texmtx%u=[%.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f]",
+                      s_dumped, mi, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]);
+            }
+          }
         }
       }
       // SB_TEV_DUMP=1: full TEV combiner state + texture format for this same
@@ -2797,6 +2833,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         for (unsigned r = 0; r < aurora::gx::MaxTevRegs; ++r) {
           const auto& c = g_gxState.colorRegs[r];
           std::fprintf(stderr, "  [tevreg] %u = (%.3f, %.3f, %.3f, %.3f)\n", r, c.x(), c.y(), c.z(), c.w());
+        }
+        // Swap-table CONTENTS (the per-stage swapRas/swapTex indices above
+        // are meaningless without them).
+        for (unsigned sw = 0; sw < aurora::gx::MaxTevSwap; ++sw) {
+          const auto& t = g_gxState.tevSwapTable[sw];
+          std::fprintf(stderr, "  [tevswap] %u = r%d g%d b%d a%d\n", sw, (int)t.red, (int)t.green,
+                       (int)t.blue, (int)t.alpha);
         }
       }
     }
