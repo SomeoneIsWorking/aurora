@@ -686,6 +686,18 @@ void process(const u8* data, u32 size, bool bigEndian) {
           }
           Log.error("  recent draws (oldest first):{}", trail);
         }
+        {
+          // Raw hexdump around the desync point: the bytes BEFORE pos show what
+          // payload the decoder just mis-consumed.
+          std::string hex;
+          const size_t lo = (pos >= 129) ? pos - 129 : 0;
+          const size_t hi = (pos + 31 < size) ? pos + 31 : size;
+          for (size_t i = lo; i < hi; ++i) {
+            if ((i - lo) % 16 == 0) hex += fmt::format("\n    {:07}:", i);
+            hex += fmt::format(" {:02x}", data[i]);
+          }
+          Log.error("  bytes around pos {}:{}", pos - 1, hex);
+        }
         FATAL("command_processor: unknown opcode 0x{:02X} at pos {} (total fifo size {})",
               cmd, pos - 1, size);
       }
@@ -2475,8 +2487,35 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
   push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices);
 }
 
+// Identity of the most recent draw, for the staging-overflow fatal in
+// gfx/common.hpp (names the runaway upload instead of leaving it anonymous).
+static char s_lastDrawDesc[160] = "(none)";
+// Ring of the most recent draw identities: the overflow fatal prints all of
+// them so the runaway is visible in context (one bad draw vs death-by-1000).
+static char s_drawDescRing[16][160];
+static unsigned s_drawDescRingPos = 0;
+const char* sb_last_draw_desc()
+{
+  static char all[16 * 176];
+  char* w = all;
+  for (unsigned i = 0; i < 16; ++i) {
+    const char* d = s_drawDescRing[(s_drawDescRingPos + i) % 16];
+    if (d[0] != '\0')
+      w += std::snprintf(w, 176, "\n  %s", d);
+  }
+  std::snprintf(w, 176, "\n  %s <- OVERFLOWED", s_lastDrawDesc);
+  return all;
+}
+
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices) {
+  std::snprintf(s_lastDrawDesc, sizeof(s_lastDrawDesc),
+                "prim=0x%02x fmt=%d verts=%u idx=%u vertBytes=%u mark='%s' drawIdx=%ld",
+                (unsigned)prim, (int)fmt, (unsigned)vtxCount, (unsigned)numIndices,
+                (unsigned)vertRange.size, g_sbLastMarker.c_str(),
+                (long)g_sbPushedDrawCount);
+  std::snprintf(s_drawDescRing[s_drawDescRingPos], 160, "%s", s_lastDrawDesc);
+  s_drawDescRingPos = (s_drawDescRingPos + 1) % 16;
   // Per-drain draw/vertex tally for SB_DRAW_STATS (reported from fifo::drain).
   detail::sDrainDraws += 1;
   detail::sDrainVerts += vtxCount;
@@ -3642,3 +3681,9 @@ extern "C" uint32_t aurora_gx_scan_dl(const uint8_t* data, uint32_t size, uint32
   }
   return 0xFFFFFFFFu;
 }
+
+// Accessor for gfx/common.hpp's staging-overflow fatal (declared there inside
+// namespace aurora, so define it in that namespace).
+namespace aurora {
+const char* aurora_gfx_last_draw_desc() { return aurora::gx::fifo::sb_last_draw_desc(); }
+} // namespace aurora
