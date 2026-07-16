@@ -37,6 +37,12 @@ extern "C" const char* sb_gx_last_marker() { return g_sbLastMarker.c_str(); }
 // standalone unit tests (which don't link the game) still build.
 extern "C" unsigned VIGetRetraceCount(void) __attribute__((weak));
 static unsigned sb_gx_vi_retrace_count() { return (&VIGetRetraceCount) ? VIGetRetraceCount() : 0; }
+// sms-boot's SB_LOG channel registry (sb_log.h) — weak so aurora still links
+// standalone; in-tree the sms-boot runtime always provides it.
+extern "C" int sb_log_enabled(const char* chan) __attribute__((weak));
+extern "C" void sb_logf(const char* chan, const char* fmt, ...)
+    __attribute__((weak, format(printf, 2, 3)));
+static bool sb_gx_log_on(const char* chan) { return (&sb_log_enabled) ? sb_log_enabled(chan) != 0 : false; }
 
 // SB_TIMELINE: ordered per-frame event log shared across TUs (marker changes,
 // copies, clears, present) to reconstruct the GC multi-pass frame sequence.
@@ -560,6 +566,24 @@ void process(const u8* data, u32 size, bool bigEndian) {
       // rendering with stale state. (Was an NDEBUG-gated Log.debug.)
       ASSERT(copy_xf_data(dstAddr, srcData, len, !array.le),
              "unimplemented indexed XF load (opcode 0x{:02X}, dstAddr={:04x}, len={})", opcode, dstAddr, len);
+      // SB_LOG=pnzero: an indexed pos/nrm matrix load whose source rotation
+      // row is all-zero — the upload that poisons the XF palette slot (black
+      // patches on later packets that "keep" the slot via 0xFFFF). Logs the
+      // ARRAY BASE so the culprit J3DModel can be matched to the game-side
+      // [nrmmtx] zeroDrawMtx report (same buffer pointer).
+      if (arrayType <= GX_NRM_MTX_ARRAY && sb_gx_log_on("pnzero")) {
+        float r0[3];
+        for (int i = 0; i < 3; ++i) {
+          u32 u;
+          std::memcpy(&u, srcData + i * 4, 4);
+          if (!array.le) u = __builtin_bswap32(u);
+          std::memcpy(&r0[i], &u, 4);
+        }
+        if (r0[0] == 0.f && r0[1] == 0.f && r0[2] == 0.f)
+          sb_logf("pnzero", "%s idx=%u dst=%03x base=%p mark='%s'",
+                  arrayType == GX_POS_MTX_ARRAY ? "pos" : "nrm", srcArrayIdx, dstAddr,
+                  array.data, g_sbLastMarker.c_str());
+      }
       break;
     }
 
@@ -2697,6 +2721,24 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
           const auto& kc = g_gxState.kcolors[k];
           std::fprintf(stderr, "   [dd-konst] #%d K%u=(%.3f,%.3f,%.3f,%.3f)\n",
                        s_dumped, k, kc.x(), kc.y(), kc.z(), kc.w());
+        }
+      }
+      // SB_LOG=pn: full pos/nrm matrix PALETTE (all 10 PnMtx slots) for this
+      // same window. Skinned draws (GX_VA_PNMTXIDX per-vertex) index into
+      // this palette; a replay carries retail's recorded XF loads = ground
+      // truth, while live-native computes the palette in J3D — a per-slot
+      // diff localizes wrong skinned normals (2026-07-16 file-select Mario
+      // black-patch investigation) to the exact matrix slot.
+      if (sb_gx_log_on("pn")) {
+        const bool skinned = g_gxState.vtxDesc[GX_VA_PNMTXIDX] != GX_NONE;
+        sb_logf("pn", "#%d skinned=%d cur=%u", s_dumped, skinned ? 1 : 0, g_gxState.currentPnMtx);
+        for (u32 mi = 0; mi < MaxPnMtx; ++mi) {
+          const auto* p = reinterpret_cast<const float*>(&g_gxState.pnMtx[mi].pos);
+          const auto* n = reinterpret_cast<const float*>(&g_gxState.pnMtx[mi].nrm);
+          sb_logf("pn", "pos #%d %u [%.4f %.4f %.4f %.2f | %.4f %.4f %.4f %.2f | %.4f %.4f %.4f %.2f]",
+                  s_dumped, mi, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]);
+          sb_logf("pn", "nrm #%d %u [%.4f %.4f %.4f | %.4f %.4f %.4f | %.4f %.4f %.4f]",
+                  s_dumped, mi, n[0], n[1], n[2], n[4], n[5], n[6], n[8], n[9], n[10]);
         }
       }
       // SB_TEV_DUMP=1: full TEV combiner state + texture format for this same
