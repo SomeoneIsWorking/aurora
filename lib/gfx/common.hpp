@@ -158,11 +158,13 @@ private:
         // silently abort on. Report which by how much (see the *BufferSize
         // constants) so it can be sized to the workload / this points at a
         // runaway upload.
+        extern const char* aurora_gfx_last_draw_desc(); // command_processor.cpp
         std::fprintf(stderr,
             "[aurora FATAL gfx] mapped ByteBuffer overflow: have %zu bytes "
             "(capacity %zu), need %zu more -> %zu total. A per-frame staging "
-            "region is too small for this scene (or a runaway upload).\n",
-            m_length, m_capacity, size - m_length, size);
+            "region is too small for this scene (or a runaway upload). "
+            "last draw: %s\n",
+            m_length, m_capacity, size - m_length, size, aurora_gfx_last_draw_desc());
         abort();
       }
       // Exponential expansion to avoid O(n^2) time complexity.
@@ -186,7 +188,7 @@ inline constexpr bool UseTextureBuffer = true;
 inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
 inline constexpr uint64_t VertexBufferSize = 3145728;    // 3mb
 inline constexpr uint64_t IndexBufferSize = 1048576;     // 1mb
-inline constexpr uint64_t StorageBufferSize = 33554432;  // 32mb (was 8mb, a
+inline constexpr uint64_t StorageBufferSize = 50331648;  // 48mb (was 8mb, a
 // title-era size). Measured: a single Delfino Plaza pass (SB_SKIP_GHOST=1, ghost
 // pass OFF) overflows 8MB — gameplay map geometry genuinely needs more indexed-
 // array storage per frame than the title ever did. 32MB fits the single pass
@@ -194,7 +196,12 @@ inline constexpr uint64_t StorageBufferSize = 33554432;  // 32mb (was 8mb, a
 // phase-1 ghost pass ON (default) storage ~doubles to ~33MB and still overflows
 // this — that doubling is a SEPARATE wart to remove (see
 // sunbright debug_journal/2026-07-15_delfino_storage_overflow_ghost_pass.md), not
-// a reason to keep growing this cap.
+// a reason to keep growing this cap. 2026-07-16: grown 32->48mb anyway — the
+// title/file-select frame already sat at 33.44mb (99.7% of 32mb, ghost-pass
+// doubling included) and the faithful TMBindShadowManager volume passes tipped
+// it over. The ghost-pass wart REMAINS the real fix; this headroom just stops
+// capacity from gating unrelated ports. The overflow fatal now prints the last
+// 16 draw identities, so a future runaway is self-diagnosing.
 inline constexpr uint64_t TextureUploadSize = 25165824;  // 24mb
 
 extern AuroraStats g_stats;
