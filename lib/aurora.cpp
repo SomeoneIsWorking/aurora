@@ -32,6 +32,7 @@
 #include "system_info.hpp"
 #include "tracy/Tracy.hpp"
 
+extern "C" double g_sbGxProf[7];
 namespace aurora {
 AuroraConfig g_config;
 uint32_t g_sdlCustomEventsStart;
@@ -335,8 +336,17 @@ bool begin_frame() noexcept {
 void end_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
+  // SB_PROFILE_GFX=N: split end_frame's CPU cost into drain (GX fifo ->
+  // wgpu draw records), finish (finalize render passes), and submit (encode
+  // + hand to render worker). Localizes where the ~frame-dominating cost is.
+  static const int s_profGfx = [] { const char* e = std::getenv("SB_PROFILE_GFX"); return e ? std::atoi(e) : 0; }();
+  static long s_pn = 0; static double s_pd = 0, s_pf = 0, s_ps = 0;
+  auto pnow = [] { return std::chrono::steady_clock::now(); };
+  auto t0 = s_profGfx ? pnow() : std::chrono::steady_clock::time_point{};
   gx::fifo::drain();
+  auto t1 = s_profGfx ? pnow() : std::chrono::steady_clock::time_point{};
   gfx::finish();
+  auto t2 = s_profGfx ? pnow() : std::chrono::steady_clock::time_point{};
   auto imguiDrawData = imgui::freeze();
 
   const auto& presentSource = webgpu::present_source();
@@ -661,6 +671,22 @@ void end_frame() noexcept {
     TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
   });
+
+  if (s_profGfx) {
+    auto t3 = pnow();
+    auto us = [](auto a, auto b) { return std::chrono::duration<double, std::micro>(b - a).count(); };
+    s_pd += us(t0, t1); s_pf += us(t1, t2); s_ps += us(t2, t3);
+    if (++s_pn >= s_profGfx) {
+      double d = s_pn;
+      std::fprintf(stderr, "[profile-gfx] frames=%ld avg μs: drain=%.0f finish=%.0f submit/record=%.0f | draws=%u merged=%u createdPipelines=%u\n"
+                   "              per-draw-build μs/frame: arrayUpload=%.0f shaderinfo+cfg=%.0f bindgroups=%.0f pipeline_ref=%.0f build_uniform=%.0f push_cmd=%.0f resolve_tex=%.0f\n",
+                   s_pn, s_pd / d, s_pf / d, s_ps / d,
+                   gfx::g_stats.drawCallCount, gfx::g_stats.mergedDrawCallCount, gfx::g_stats.createdPipelines,
+                   g_sbGxProf[5] / d, g_sbGxProf[0] / d, g_sbGxProf[1] / d, g_sbGxProf[2] / d, g_sbGxProf[3] / d, g_sbGxProf[4] / d, g_sbGxProf[6] / d);
+      s_pn = 0; s_pd = s_pf = s_ps = 0;
+      for (auto& v : g_sbGxProf) v = 0;
+    }
+  }
 
 #endif
   // SB_RDOC frame delimiter — unconditional (headless included): every

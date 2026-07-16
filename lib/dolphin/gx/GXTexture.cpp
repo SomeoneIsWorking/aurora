@@ -28,6 +28,30 @@ u32 next_tex_obj_id() {
   return sNextTexObjId++;
 }
 
+// Content-derived texObj id: a stable 32-bit hash of the texture's IDENTITY
+// (data address + dims + format + mip flag). GXInitTexObj is called once per
+// material per draw by J3D, so a monotonic-counter id (next_tex_obj_id) churns
+// a fresh id on every draw — which made the texObjId-keyed static-texture cache
+// (gx.cpp s_textureObjectCaches) MISS every draw and re-convert+re-upload the
+// SAME texture ~once per draw (measured: resolve_sampled_textures = ~90% of
+// frame time, ~150us/draw). Deriving the id from the texture's identity makes
+// re-inits over the same texture collapse to one cache entry, so the cache
+// persists across frames and conversions drop to ~zero after warmup. Content
+// changes at the same address are still caught by texDataVersion (checked
+// alongside the id in the cache); dynamic/EFB textures bypass this cache
+// (no_cache / copyTextures) and are unaffected.
+u32 content_tex_obj_id(const void* data, u16 width, u16 height, u32 format, GXBool mipmap) {
+  u64 h = 1469598103934665603ull; // FNV-1a
+  auto mix = [&](u64 v) {
+    for (int i = 0; i < 8; ++i) { h ^= (v >> (i * 8)) & 0xff; h *= 1099511628211ull; }
+  };
+  mix(reinterpret_cast<uintptr_t>(data));
+  mix((static_cast<u64>(width) << 32) | (static_cast<u64>(height) << 16) | (format & 0xffffu));
+  mix(mipmap ? 1u : 0u);
+  u32 id = static_cast<u32>(h ^ (h >> 32));
+  return id == 0 ? 1u : id; // 0 is the "no id" sentinel
+}
+
 u32 next_tlut_obj_id() {
   if (sNextTlutObjId == 0) {
     FATAL("tlutObj ID overflow");
@@ -62,7 +86,7 @@ void init_texobj_common(GXTexObj_& obj, const void* data, u16 width, u16 height,
   obj.mFormat = format;
   obj.tlut = GX_TLUT0;
   obj.flags = 2;
-  obj.texObjId = next_tex_obj_id();
+  obj.texObjId = content_tex_obj_id(data, width, height, format, mipmap);
   obj.texDataVersion = 1;
 
   SET_REG_FIELD(0, obj.mode0, 2, 0, wrapS);
