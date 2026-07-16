@@ -1,3 +1,4 @@
+#include <chrono>
 #include "command_processor.hpp"
 #include <cstdarg>
 
@@ -30,6 +31,12 @@ static thread_local int g_sbMarkerDrawIdx = 0; // Nth draw since the current mar
 // Exposed for cross-TU diagnostics (e.g. copy_tex logging which J3D buffer/2D
 // element a GXCopyTex follows).
 extern "C" const char* sb_gx_last_marker() { return g_sbLastMarker.c_str(); }
+
+// SB_PROFILE_GFX per-draw build-phase accumulators (0=shaderinfo+config,
+// 1=bind_groups, 2=pipeline_ref, 3=build_uniform, 4=push_draw_command).
+// Printed and reset by the frame profiler in aurora.cpp.
+extern "C" { double g_sbGxProf[7] = {0, 0, 0, 0, 0, 0, 0};
+void sb_gx_prof_add(int slot, double us) { if (slot >= 0 && slot < 7) g_sbGxProf[slot] += us; } }
 
 // VIGetRetraceCount is defined game-side (sms-boot/runtime/sdk_stubs.cpp) and
 // advanced once per sb_frame_present (sms-boot/runtime/frame_seam.cpp) — same
@@ -2553,7 +2560,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // retrace threshold, so a clean full-frame render-state dump (for draw_diff) wasn't
   // possible. Declared at function scope so both blocks see it.
   static bool s_ddFrameActive = false;
-  if (const char* fe = std::getenv("SB_DRAW_DUMP_FRAME"); fe != nullptr && fe[0] != '\0') {
+  static const char* const s_ddFrameEnv = std::getenv("SB_DRAW_DUMP_FRAME");
+  if (const char* fe = s_ddFrameEnv; fe != nullptr && fe[0] != '\0') {
     // SB_DRAW_DUMP_FRAME=<N>: dump every draw of the Nth RENDERED FRAME. "Frame"
     // is counted by retrace-value CHANGES, not by an absolute retrace target:
     // VIGetRetraceCount neither steps by 1 nor advances at a fixed rate vs
@@ -2580,7 +2588,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                    g_gxState.alphaUpdate ? 1 : 0, g_sbLastMarker.c_str());
     }
   }
-  if (const char* e = std::getenv("SB_DRAW_DUMP"); e != nullptr) {
+  static const char* const s_ddEnv = std::getenv("SB_DRAW_DUMP");
+  if (const char* e = s_ddEnv; e != nullptr) {
     // SB_DRAW_DUMP=<startDraw>: dump 200 draws starting at that global draw
     // index (draw counts run ~160/frame at title; pick start = frame*160).
     // SB_DRAW_DUMP=0 dumps from the very first draw.
@@ -2853,7 +2862,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // TDrawBufObj marker is active. Dumps that stage's texgen (src/mtx/type)
   // and the texture's actual wrap mode, to compare against the oracle's
   // "identity texgen, raw-UV passthrough, wrap Clamp/Clamp" ground truth.
-  if (std::getenv("SB_CLOUD_TC_DBG") != nullptr) {
+  static const bool s_cloudTcDbg = std::getenv("SB_CLOUD_TC_DBG") != nullptr;
+  if (s_cloudTcDbg) {
     static long s_nSky = 0, s_nOther = 0;
     bool isSky = g_sbLastMarker.find("Sky") != std::string::npos;
     if (isSky ? s_nSky < 4000 : s_nOther < 5) {
@@ -2886,7 +2896,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // whatever draws the crosshatch must be a DIFFERENT material entering the
   // same shared "DrawBuf Sky Xlu" — this dump identifies it by its GPU-side
   // texture binding, independent of which CPU material baked it).
-  if (std::getenv("SB_XH_GPU_DBG") != nullptr
+  static const bool s_xhGpuDbg = std::getenv("SB_XH_GPU_DBG") != nullptr;
+  if (s_xhGpuDbg
       && g_sbLastMarker.find("Sky Xlu") != std::string::npos) {
     static long s_n = 0;
     if (s_n < 200) {
@@ -2924,6 +2935,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
   }
   // Build pipeline, bind groups, and push draw command
+  static const bool s_profArr = std::getenv("SB_PROFILE_GFX") != nullptr;
+  auto _pArr = s_profArr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   BindGroupRanges ranges{};
   static int s_arrDbg = -1;
   if (s_arrDbg < 0) {
@@ -2975,9 +2988,17 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
   }
 
+  // SB_PROFILE_GFX perf breakdown of the per-draw GPU-command build (sb_gx_prof_add defined above).
+  static const bool s_prof = std::getenv("SB_PROFILE_GFX") != nullptr;
+  auto _pt = [] { return std::chrono::steady_clock::now(); };
+  auto _pa = s_prof ? _pt() : std::chrono::steady_clock::time_point{};
+
+  if (s_profArr) sb_gx_prof_add(5, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - _pArr).count());
+
   PipelineConfig config{};
   populate_pipeline_config(config, prim, fmt);
   const auto info = build_shader_info(config.shaderConfig);
+  if (s_prof) { auto n = _pt(); sb_gx_prof_add(0, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
   // SB_SKIP_HASH=<hex>: drop every draw whose shader-config hash matches (the same
   // hash SB_SHADER_HASH prints). The only way to isolate a specific draw on the raw
   // .dff replay path, where game-side markers are absent (mark=''). Multiple hashes
@@ -3022,7 +3043,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
   }
   g_sbDrawSamplesCopy = false;
+  if (s_prof) _pa = _pt();
   resolve_sampled_textures(info);
+  if (s_prof) { auto n = _pt(); sb_gx_prof_add(6, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
   // SB_SKIP_COPY_QUAD=1 (diagnostic): drop draws that sample an EFB-copy
   // texture (the screen-texture repaint quads) — separates "scene hidden
   // under the quad overdraw" from "scene never rendered".
@@ -3111,7 +3134,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       s_init = 1;
       s_skipTexDim = std::getenv("SB_SKIP_TEXDIM");
     }
-    if (std::getenv("SB_SKY_DIM_DBG") != nullptr && g_sbLastMarker.find("Sky") != std::string::npos) {
+    static const bool s_skyDimDbg = std::getenv("SB_SKY_DIM_DBG") != nullptr;
+    if (s_skyDimDbg && g_sbLastMarker.find("Sky") != std::string::npos) {
       static long n = 0;
       const auto& obj0 = g_gxState.textures[0].texObj;
       if (++n <= 4000000)
@@ -3228,8 +3252,11 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       }
     }
   }
+  if (s_prof) _pa = _pt();
   const auto bindGroups = build_bind_groups(info);
+  if (s_prof) { auto n = _pt(); sb_gx_prof_add(1, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
   const auto pipeline = gfx::pipeline_ref(config);
+  if (s_prof) { auto n = _pt(); sb_gx_prof_add(2, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
 
   uint32_t instanceCount = 1;
   if (prim == GX_LINES) {
@@ -3239,17 +3266,21 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   } else if (prim == GX_POINTS) {
     instanceCount = vtxCount;
   }
+  if (s_prof) _pa = _pt();
+  auto uniformRange = build_uniform(info, vertRange.offset, ranges);
+  if (s_prof) { auto n = _pt(); sb_gx_prof_add(3, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
   gfx::push_draw_command(DrawData{
       .pipeline = pipeline,
       .vertRange = vertRange,
       .idxRange = idxRange,
-      .uniformRange = build_uniform(info, vertRange.offset, ranges),
+      .uniformRange = uniformRange,
       .vtxCount = vtxCount,
       .indexCount = numIndices,
       .instanceCount = instanceCount,
       .bindGroups = bindGroups,
       .dstAlpha = g_gxState.dstAlpha,
   });
+  if (s_prof) { auto n = _pt(); sb_gx_prof_add(4, std::chrono::duration<double, std::micro>(n - _pa).count()); }
 }
 
 std::string read_string(const u8* data, u32& pos, u32 size, bool bigEndian) {
