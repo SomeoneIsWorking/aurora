@@ -1,3 +1,5 @@
+#include <cstdio>
+#include <cstdlib>
 #include "dvd.hpp"
 
 #include <algorithm>
@@ -79,6 +81,11 @@ u32 fstCallback(u32 index, NodNodeKind kind, const char* name, u32 size, void* u
 
   while (index >= ctx->dirStack.back().second) {
     ctx->dirStack.pop_back();
+  }
+
+  if (const char* e = std::getenv("SB_DUMP_FST"); e != nullptr && e[0] != '\0') {
+    std::fprintf(stderr, "[fst] idx=%u %s '%s' size=%u\n", index,
+                 (kind == NOD_NODE_KIND_DIRECTORY) ? "DIR " : "FILE", name, size);
   }
 
   const auto newEntry = std::make_shared<IterateNode>(
