@@ -1694,9 +1694,16 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           f32 oz = read_f32(xfData + 20, bigEndian);
           f32 width = sx * 2.0f;
           f32 height = -sy * 2.0f;
+          // The hardware viewport-origin bias is 342, not 340: GXSetViewport encodes
+          // ox = xOrig + width/2 + 342, so recovering xOrig must subtract the same 342.
+          // With 340 every viewport reconstructed from the FIFO landed 2 pixels down and
+          // right of where the game asked for it — measured as vp=(2,2 640x448) via the raw
+          // FIFO path against vp=(0,0 640x448) for the identical frame through GXSetViewport,
+          // which does not go through this reconstruction and so was never affected.
+          constexpr f32 kViewportOriginBias = 342.0f;
           set_logical_viewport({
-              .left = ox - 340.0f - width / 2.0f,
-              .top = oy - 340.0f - height / 2.0f,
+              .left = ox - kViewportOriginBias - width / 2.0f,
+              .top = oy - kViewportOriginBias - height / 2.0f,
               .width = width,
               .height = height,
               .znear = (oz - sz) / 1.6777215e7f,
@@ -2699,20 +2706,35 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       const auto& csa = g_gxState.colorChannelState[GX_ALPHA0];
       const auto& posFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
       const auto posDesc = g_gxState.vtxDesc[GX_VA_POS];
+      // ALL bound texmaps, not just tex0. A draw routinely samples several maps, and the
+      // single tex0 field cannot answer "which draw samples texture X" — asking that of a
+      // render-to-texture result (an EFB copy) and seeing no match on tex0 says nothing,
+      // since the copy may well be bound to a higher map.
+      char texbuf[128];
+      {
+        int o = 0;
+        texbuf[0] = '\0';
+        for (int m = 0; m < GX_MAX_TEXMAP && o < static_cast<int>(sizeof(texbuf)) - 16; ++m) {
+          const auto& to = g_gxState.textures[m];
+          if (!to.ref) continue;   // not bound on this map
+          o += std::snprintf(texbuf + o, sizeof(texbuf) - o, "%s%d:%ux%u", o ? "," : "", m,
+                             to.texObj.width(), to.texObj.height());
+        }
+      }
       // clr0Desc/clr1Desc: whether this draw's VCD actually supplies CLR0/CLR1
       // (GX_NONE=0 -> vtx_attr() default-white fallback fires; GX_DIRECT=1/
       // GX_INDEX8=2/GX_INDEX16=3 -> real per-vertex color stream is bound).
       const auto clr0Desc = g_gxState.vtxDesc[GX_VA_CLR0];
       const auto clr1Desc = g_gxState.vtxDesc[GX_VA_CLR1];
       std::fprintf(stderr,
-                   "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
+                   "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u texs=[%s] zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
                    "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
                    "tev=%u ch0[light=%d matSrc=%d ambSrc=%d attnFn=%d diffFn=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
                    "a0[light=%d matSrc=%d ambSrc=%d mat=%.2f amb=%.2f mask=%02x] "
                    "prj=[%.4f %.4f %.4f %.4f cx=%.4f cy=%.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] clr0=%d clr1=%d mtxIdx=%u "
                    "cull=%d zfunc=%d acmp=[c0=%d r0=%u op=%d c1=%d r1=%u] "
                    "posmtx=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] mark='%s'\n",
-                   s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(),
+                   s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(), texbuf,
                    static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
                    pn[3], pn[7], pn[11], g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
                    static_cast<unsigned>(g_gxState.blendMode), vp.left, vp.top, vp.width, vp.height,
