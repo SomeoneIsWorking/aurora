@@ -11,6 +11,12 @@
 #include <algorithm>
 #include <cmath>
 
+// Frame ordinal for SB_COPY_DBG_AFTER. Provided by the runtime (sms-boot's frame seam, or the
+// recomp's present counter); weak so aurora still links standalone, where it reads 0 and the
+// window simply opens immediately.
+extern "C" unsigned VIGetRetraceCount(void) __attribute__((weak));
+static unsigned sb_gx_vi_retrace_count() { return (&VIGetRetraceCount) ? VIGetRetraceCount() : 0; }
+
 namespace {
 // GXCopyDisp is the GC-HW operation that actually defines the displayed TV
 // image (real HW: the same "PE copy" op as GXCopyTex, selected by a
@@ -183,7 +189,20 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   g_gxState.copyTextures[dest] = handle;
   if (std::getenv("SB_COPY_DBG") != nullptr) {
     static long n = 0;
-    if (n < 40) {
+    // SB_COPY_DBG_AFTER=<retrace>: don't start logging until the run reaches that frame.
+    // The 40-line budget is otherwise spent entirely on boot's display copies, long before
+    // any scene of interest — the copies worth inspecting (render-to-texture content such as
+    // the file-select sea reflection) happen thousands of frames later and were unobservable.
+    static long s_after = -2;
+    if (s_after == -2) {
+      const char* a = std::getenv("SB_COPY_DBG_AFTER");
+      s_after = (a != nullptr && a[0] != '\0') ? std::atol(a) : -1;
+    }
+    const bool windowOpen = s_after < 0 || static_cast<long>(sb_gx_vi_retrace_count()) >= s_after;
+    // Copies before the window must not consume the budget — counting them is what made the
+    // first version of this gate print nothing at all: boot exhausted n past 40 long before
+    // the window opened.
+    if (windowOpen && n < 40) {
       const auto [lw, lh] = aurora::gx::logical_fb_size();
       const auto [tw, th] = gfx::get_render_target_size();
       std::fprintf(stderr,
@@ -194,9 +213,9 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
                    g_gxState.texCopySrc.width, g_gxState.texCopySrc.height, lw, lh, tw, th,
                    static_cast<int>(g_gxState.viewportPolicy), static_cast<int>(gfx::is_offscreen()),
                    sb_gx_last_marker());
-    }
-    else
+    } else if (windowOpen) {
       ++n;
+    }
   }
 }
 } // namespace aurora::gx
