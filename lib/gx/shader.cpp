@@ -386,8 +386,16 @@ static std::string alpha_arg_reg(GXTevAlphaArg arg, size_t stageIdx, const Shade
   }
 }
 
+// `swz` is the channel suffix used by the GX_TEV_COMP_* comparison ops: ".r"/".rg"/".rgb"
+// on the vec3 COLOR path, and EMPTY on the scalar ALPHA path. Emitting ".r" on an f32 is
+// invalid WGSL and produced a hard CreateShaderModule failure:
+//   :396:72 error: cannot index into expression of type 'f32'
+//   round(tev_overflow_f32(sampled0.a).r * 255.0) > ...
+// which intermittently killed Delfino (whether the offending material is reached before the
+// watchdog fires is timing-dependent, so it looked like a flaky/unrelated crash).
 static std::string tev_op(GXTevOp op, std::string_view bias, std::string_view scale, std::string_view a,
-                          std::string_view b, std::string_view c, std::string_view d, std::string_view zero) {
+                          std::string_view b, std::string_view c, std::string_view d, std::string_view zero,
+                          std::string_view swz = ".r"sv) {
   switch (op) {
     DEFAULT_FATAL("unimplemented tev op {}", underlying(op));
   case GX_TEV_ADD:
@@ -396,25 +404,38 @@ static std::string tev_op(GXTevOp op, std::string_view bias, std::string_view sc
     return fmt::format("(({0}mix({1}, {2}, {3}) + {4}){5}){6}", neg, a, b, c, d, bias, scale);
   }
   case GX_TEV_COMP_R8_GT:
-    return fmt::format("select({3}, {2}, round({0}.r * 255.0) > round({1}.r * 255.0)) + {4}", a, b, c, zero, d);
+    return fmt::format("select({3}, {2}, round({0}{5} * 255.0) > round({1}{5} * 255.0)) + {4}", a, b, c, zero, d, swz);
   case GX_TEV_COMP_R8_EQ:
-    return fmt::format("select({3}, {2}, round({0}.r * 255.0) == round({1}.r * 255.0)) + {4}", a, b, c, zero, d);
+    return fmt::format("select({3}, {2}, round({0}{5} * 255.0) == round({1}{5} * 255.0)) + {4}", a, b, c, zero, d,
+                       swz);
   case GX_TEV_COMP_GR16_GT:
+    if (swz.empty()) {
+      return fmt::format("select({3}, {2}, round({0} * 255.0) > round({1} * 255.0)) + {4}", a, b, c, zero, d);
+    }
     return fmt::format(
         "select({3}, {2}, round(dot({0}.rg * 255.0, vec2(1.0, 256.0))) > round(dot({1}.rg * 255.0, vec2(1.0, 256.0))))"
         " + {4}",
         a, b, c, zero, d);
   case GX_TEV_COMP_GR16_EQ:
+    if (swz.empty()) {
+      return fmt::format("select({3}, {2}, round({0} * 255.0) == round({1} * 255.0)) + {4}", a, b, c, zero, d);
+    }
     return fmt::format(
         "select({3}, {2}, round(dot({0}.rg * 255.0, vec2(1.0, 256.0))) == round(dot({1}.rg * 255.0, vec2(1.0, 256.0))))"
         " + {4}",
         a, b, c, zero, d);
   case GX_TEV_COMP_BGR24_GT:
+    if (swz.empty()) {
+      return fmt::format("select({3}, {2}, round({0} * 255.0) > round({1} * 255.0)) + {4}", a, b, c, zero, d);
+    }
     return fmt::format(
         "select({3}, {2}, round(dot({0}.rgb * 255.0, vec3(1.0, 256.0, 65536.0))) > round(dot({1}.rgb * 255.0, "
         "vec3(1.0, 256.0, 65536.0)))) + {4}",
         a, b, c, zero, d);
   case GX_TEV_COMP_BGR24_EQ:
+    if (swz.empty()) {
+      return fmt::format("select({3}, {2}, round({0} * 255.0) == round({1} * 255.0)) + {4}", a, b, c, zero, d);
+    }
     return fmt::format(
         "select({3}, {2}, round(dot({0}.rgb * 255.0, vec3(1.0, 256.0, 65536.0))) == round(dot({1}.rgb * 255.0, "
         "vec3(1.0, 256.0, 65536.0)))) + {4}",
@@ -437,7 +458,23 @@ static std::string tev_color_op(GXTevOp op, std::string_view bias, std::string_v
 static std::string tev_alpha_op(GXTevOp op, std::string_view bias, std::string_view scale, bool clamp,
                                 std::string_view a, std::string_view b, std::string_view c, std::string_view d) {
   const auto overflow = [](std::string_view reg) { return fmt::format("tev_overflow_f32({})", reg); };
-  std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d, "0.0"sv);
+  // Scalar path: no channel swizzle. NOTE: on real GX the R8/GR16/BGR24 comparison ops in the
+  // ALPHA stage compare the COLOR operands, which are not plumbed here - we compare the alpha
+  // scalars instead. That is an approximation, but a VALID one; the previous code emitted
+  // syntactically invalid WGSL and killed the whole shader module. Logged once below so this
+  // stays visible rather than silently wrong.
+  if (op == GX_TEV_COMP_R8_GT || op == GX_TEV_COMP_R8_EQ || op == GX_TEV_COMP_GR16_GT ||
+      op == GX_TEV_COMP_GR16_EQ || op == GX_TEV_COMP_BGR24_GT || op == GX_TEV_COMP_BGR24_EQ) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      Log.report(LOG_WARNING,
+                 FMT_STRING("TEV alpha stage uses a colour-channel comparison op ({}); comparing alpha "
+                            "scalars instead (colour operands are not plumbed into the alpha path)"),
+                 underlying(op));
+    }
+  }
+  std::string expr = tev_op(op, bias, scale, overflow(a), overflow(b), overflow(c), d, "0.0"sv, ""sv);
   return clamp ? fmt::format("clamp({}, 0.0, 1.0)", expr) : fmt::format("clamp({}, -4.0, 4.0)", expr);
 }
 
