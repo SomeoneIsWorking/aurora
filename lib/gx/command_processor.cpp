@@ -2516,6 +2516,17 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                 (long)g_sbPushedDrawCount);
   std::snprintf(s_drawDescRing[s_drawDescRingPos], 160, "%s", s_lastDrawDesc);
   s_drawDescRingPos = (s_drawDescRingPos + 1) % 16;
+  // GX_CULL_ALL culls both faces: the draw produces no fragments at all. WebGPU has no
+  // equivalent rasterizer state, so it cannot be expressed in the pipeline — drop the draw
+  // here instead, which is what the hardware does with it.
+  //
+  // Reached via the FIFO path with masked BP writes: a genMode write that sets only bit 15,
+  // merged with a cached bit 14, yields cull 3 without any raw write containing 3. Before
+  // this, to_primitive_state FATAL'd on it.
+  if (g_gxState.cullMode == GX_CULL_ALL) {
+    return;
+  }
+
   // Per-drain draw/vertex tally for SB_DRAW_STATS (reported from fifo::drain).
   detail::sDrainDraws += 1;
   detail::sDrainVerts += vtxCount;

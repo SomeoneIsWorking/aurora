@@ -695,6 +695,13 @@ static inline wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
     break;
   case GX_CULL_NONE:
     break;
+  case GX_CULL_ALL:
+    // Both faces culled: the draw produces nothing. WebGPU cannot express that as a
+    // rasterizer state, so such draws are dropped in push_gx_draw and this pipeline is
+    // never actually used — but the config may still be built when state changes, so it
+    // must not be fatal. Any cull mode is fine here for that reason.
+    cullMode = wgpu::CullMode::Back;
+    break;
   }
   // SB_NO_CULL=1 (diagnostic): disable face culling on every pipeline —
   // isolates per-material cull-orientation bugs (a culled-away sky dome is
