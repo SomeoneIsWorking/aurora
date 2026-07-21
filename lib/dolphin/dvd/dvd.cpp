@@ -809,7 +809,24 @@ BOOL DVDFastOpen(s32 entrynum, DVDFileInfo* fileInfo) {
   HostAllocScope hostAlloc;
   std::lock_guard lock(s_fstLock);
 
-  if (!s_initialized || fileInfo == nullptr || !isValidEntryNum(entrynum) || s_partition == nullptr) {
+  if (fileInfo == nullptr) {
+    return FALSE;
+  }
+
+  // Clear the caller's DVDFileInfo BEFORE any failure path, not just on success.
+  // Callers routinely declare a DVDFileInfo on the stack and DVDClose() it
+  // regardless of whether the open succeeded. Our native DVDClose owns
+  // cb.userData (`delete static_cast<CommandDataBase*>(...)`) — an ownership
+  // scheme the real SDK's DVDClose does not have, since it only sets state. So a
+  // failed open that left the struct as stack garbage made the following
+  // DVDClose delete a junk pointer:
+  //     SIGSEGV fault=0x1 in DVDClose (dvd.cpp) <- cb.userData == 0x1
+  // which is what killed SB_STAGE=10. Zeroing up front makes a failed open leave
+  // a well-defined, safely-closable handle, which is what our ownership scheme
+  // requires.
+  std::memset(fileInfo, 0, sizeof(*fileInfo));
+
+  if (!s_initialized || !isValidEntryNum(entrynum) || s_partition == nullptr) {
     return FALSE;
   }
 
@@ -821,7 +838,6 @@ BOOL DVDFastOpen(s32 entrynum, DVDFileInfo* fileInfo) {
     return FALSE;
   }
 
-  std::memset(fileInfo, 0, sizeof(*fileInfo));
   fileInfo->startAddr = 0;
   fileInfo->length = entry.nextOrLength;
 
@@ -847,6 +863,16 @@ BOOL DVDFastOpen(s32 entrynum, DVDFileInfo* fileInfo) {
 }
 
 BOOL DVDOpen(const char* fileName, DVDFileInfo* fileInfo) {
+  // Same defined-state guarantee as DVDFastOpen, and it must be HERE too: a
+  // failed path lookup returns before DVDFastOpen is ever reached, so clearing
+  // only inside DVDFastOpen still left the caller's stack DVDFileInfo as garbage
+  // for the (common) "file not on the disc" case — which is exactly what
+  // SB_STAGE=10 hit. See the note in DVDFastOpen for why our DVDClose needs this.
+  if (fileInfo == nullptr) {
+    return FALSE;
+  }
+  std::memset(fileInfo, 0, sizeof(*fileInfo));
+
   s32 entrynum = DVDConvertPathToEntrynum(fileName);
   if (entrynum < 0) {
     return FALSE;
