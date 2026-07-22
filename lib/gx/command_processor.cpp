@@ -2272,13 +2272,25 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           const auto& st = g_gxState.tevStages[g_gxState.numTevStages ? g_gxState.numTevStages - 1 : 0];
           std::fprintf(stderr,
                        "[pixel-watch] %s draw#%ld %s verts=%u wneg=%u box=[%.0f..%.0f x %.0f..%.0f] "
-                       "tex0=%ux%u tev=%u bm=%d bf=%d/%d cU=%d aU=%d zc=%d zu=%d cull=%d "
+                       "tex0=%ux%u fmt=%u mips=%u hasMip=%d maxlod=%.1f minf=%d mode0=%08x id=%u "
+                       "tev=%u bm=%d bf=%d/%d cU=%d aU=%d zc=%d zu=%d cull=%d "
                        "lastTEV=c(%d,%d,%d,%d)op=%d,%d,%d mark='%s'\n",
                        covers ? "COVERS"
                               : (wneg == 0 ? "       "
                                            : (wneg < vtxCount ? "PARTIAL" : "BEHIND ")),
                        g_sbPushedDrawCount, g_gxState.projType == GX_ORTHOGRAPHIC ? "O" : "P",
                        vtxCount, wneg, sx0, sx1, sy0, sy1, t0.width(), t0.height(),
+                       // Mip state, because over-mipping is a KNOWN cause of exactly this
+                       // symptom: a texture decoded with more levels than its dimensions
+                       // support samples GARBAGE past the level-0 data and reads as white
+                       // speckle (see the clamp in gfx/texture.hpp mip_count()).
+                       t0.format(), t0.mip_count(), t0.has_mips() ? 1 : 0, (float)t0.max_lod(),
+                       // Real HW has no 'has mips' bit: mip usage is encoded in TexMode0's
+                       // min-filter field. If the recomp's registers say a MIP filter while
+                       // aurora's flag says no mips, the flag simply isn't derived on the
+                       // register path — which is a derivation gap, not missing game data.
+                       (int)t0.min_filter(), t0.mode0,
+                       t0.texObjId,
                        g_gxState.numTevStages, (int)g_gxState.blendMode,
                        (int)g_gxState.blendFacSrc, (int)g_gxState.blendFacDst,
                        g_gxState.colorUpdate ? 1 : 0, g_gxState.alphaUpdate ? 1 : 0,
