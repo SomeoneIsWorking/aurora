@@ -218,11 +218,17 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
       const auto [tw, th] = gfx::get_render_target_size();
       std::fprintf(stderr,
                    "[copy-tex] n=%ld dest=%p %ux%u fmt=%u clear=%d rect=(%d,%d %ux%u) src=(%d,%d %ux%u) "
-                   "logical=%ux%u target=%ux%u policy=%d offscreen=%d mark='%s'\n",
+                   "logical=%ux%u target=%ux%u policy=%d offscreen=%d dstAlpha=%d aU=%d cU=%d pixFmt=%d "
+                   "mark='%s'\n",
                    ++n, dest, dstWidth, dstHeight, static_cast<unsigned>(texCopyFmt), static_cast<int>(clear), rect.x,
                    rect.y, rect.width, rect.height, g_gxState.texCopySrc.x, g_gxState.texCopySrc.y,
                    g_gxState.texCopySrc.width, g_gxState.texCopySrc.height, lw, lh, tw, th,
                    static_cast<int>(g_gxState.viewportPolicy), static_cast<int>(gfx::is_offscreen()),
+                   // The copy's alpha is what a sampling draw's TEXA reads, and with a
+                   // src-alpha blend that value sets the gain of any feedback loop through
+                   // this copy. It is invisible in every other diagnostic.
+                   static_cast<int>(g_gxState.dstAlpha), g_gxState.alphaUpdate ? 1 : 0,
+                   g_gxState.colorUpdate ? 1 : 0, static_cast<int>(g_gxState.pixelFmt),
                    sb_gx_last_marker());
     } else if (windowOpen) {
       ++n;
