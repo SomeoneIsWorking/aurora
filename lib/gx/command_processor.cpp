@@ -51,7 +51,35 @@ static unsigned sb_gx_vi_retrace_count() { return (&VIGetRetraceCount) ? VIGetRe
 extern "C" int sb_log_enabled(const char* chan) __attribute__((weak));
 extern "C" void sb_logf(const char* chan, const char* fmt, ...)
     __attribute__((weak, format(printf, 2, 3)));
-static bool sb_gx_log_on(const char* chan) { return (&sb_log_enabled) ? sb_log_enabled(chan) != 0 : false; }
+// A weak symbol that resolves to null answers "channel off" — which is INDISTINGUISHABLE from
+// "channel on but the condition never occurred". That silence cost a whole investigation: an
+// SB_LOG=pnzero run reported zero zero-rotation matrix uploads while the provider simply was not
+// linked, and the zero was read as a measurement. (It is also easy to hit by accident: a weak
+// UNDEFINED reference does not pull a member out of a static archive, so shipping the provider in
+// a library is not enough — it must be linked into the executable.)
+//
+// If SB_LOG is set, the user has explicitly asked for diagnostics, and quietly delivering none is
+// never the right answer. Fail fast at the seam instead of returning a plausible-looking false.
+static bool sb_gx_log_on(const char* chan) {
+  if (&sb_log_enabled == nullptr) {
+    static int s_checked = 0;
+    if (s_checked == 0) {
+      s_checked = 1;
+      if (const char* e = std::getenv("SB_LOG"); e != nullptr && e[0] != '\0') {
+        std::fprintf(stderr,
+                     "[aurora] FATAL: SB_LOG=%s was requested but this runtime provides no "
+                     "sb_log_enabled — every aurora diagnostic channel would silently report "
+                     "nothing, which reads exactly like 'the condition never occurred'. Link a "
+                     "channel registry INTO THE EXECUTABLE (a weak undefined reference does not "
+                     "pull it out of a static archive).\n",
+                     e);
+        std::abort();
+      }
+    }
+    return false;
+  }
+  return sb_log_enabled(chan) != 0;
+}
 
 // SB_TIMELINE: ordered per-frame event log shared across TUs (marker changes,
 // copies, clears, present) to reconstruct the GC multi-pass frame sequence.
@@ -519,6 +547,34 @@ void process(const u8* data, u32 size, bool bigEndian) {
                      pos + 2 < size ? data[pos + 2] : 0, pos + 3 < size ? data[pos + 3] : 0,
                      pos + 4 < size ? data[pos + 4] : 0, pos + 5 < size ? data[pos + 5] : 0,
                      pos + 6 < size ? data[pos + 6] : 0, pos + 7 < size ? data[pos + 7] : 0);
+      }
+    }
+
+    // SB_OPCODE_CENSUS=N: every N presents, tally which FIFO opcodes this runtime actually
+    // emits. "Feature X never happens" is otherwise indistinguishable from "the diagnostic for
+    // feature X is dead" — this counts the raw stream, so a zero is a measured zero. Compare
+    // between runtimes: the decomp runtime is the known-positive for indexed matrix loads
+    // (0x20/0x28/0x30/0x38), which is how a zero here is read as a real absence.
+    {
+      static int s_init = 0;
+      static long s_period = 0;
+      static long s_counts[32] = {};
+      static long s_frames = -1;
+      if (!s_init) {
+        s_init = 1;
+        if (const char* e = std::getenv("SB_OPCODE_CENSUS"); e != nullptr && e[0] != '\0')
+          s_period = std::atol(e);
+      }
+      if (s_period > 0) {
+        ++s_counts[(opcode >> 3) & 31];
+        const long f = (long)sb_gx_vi_retrace_count();
+        if (f != s_frames && (f % s_period) == 0) {
+          s_frames = f;
+          std::fprintf(stderr, "[opcode-census] frame %ld:", f);
+          for (int i = 0; i < 32; ++i)
+            if (s_counts[i] != 0) std::fprintf(stderr, " %02x=%ld", i << 3, s_counts[i]);
+          std::fprintf(stderr, "\n");
+        }
       }
     }
 
