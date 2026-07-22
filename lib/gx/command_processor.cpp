@@ -1969,8 +1969,11 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
             for (int a = GX_VA_PNMTXIDX; a < target; ++a) off += attrBytes(a);
             const u32 vsz = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize
                                                         : calculate_last_vtx_size(fmt);
-            std::fprintf(stderr, "[uv-probe] n=%d tex%d verts=%u vsz=%u off=%u uv:", n, which,
-                         vtxCount, vsz, off);
+            // Stamp the frame ordinal: two probe lines could be consecutive FRAMES or two
+            // draws within one frame, and a per-frame rate cannot be read off the sequence
+            // without knowing which.
+            std::fprintf(stderr, "[uv-probe] n=%d rc=%u tex%d verts=%u vsz=%u off=%u uv:", n,
+                         sb_gx_vi_retrace_count(), which, vtxCount, vsz, off);
             const unsigned show = vtxCount < 4 ? vtxCount : 4;
             for (unsigned v = 0; v < show; ++v) {
               const u32 base = pos + v * vsz + off;
@@ -2601,7 +2604,43 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // merged with a cached bit 14, yields cull 3 without any raw write containing 3. Before
   // this, to_primitive_state FATAL'd on it.
   if (g_gxState.cullMode == GX_CULL_ALL) {
+    // Dropping a draw is invisible by construction, so count it: a runtime whose cull state
+    // is wrong loses geometry silently and the result looks like "the game never drew it".
+    // SB_CULL_STATS=1 reports the running total per frame ordinal.
+    static const bool s_stats = std::getenv("SB_CULL_STATS") != nullptr;
+    if (s_stats) {
+      static long n = 0, lastFrame = -1;
+      ++n;
+      const long frame = static_cast<long>(sb_gx_vi_retrace_count());
+      if (frame != lastFrame && frame % 200 == 0) {
+        lastFrame = frame;
+        std::fprintf(stderr, "[cull-all] %ld draws dropped by frame %ld\n", n, frame);
+      }
+    }
     return;
+  }
+
+  // SB_SKIP_VERTS=<n>[,<n>...] (diagnostic): drop draws with exactly those vertex counts.
+  // A draw that writes only alpha (colorUpdate off) is invisible on its own, so its effect on
+  // the frame can only be established by removing it and seeing what changes.
+  {
+    static int s_init = 0;
+    static const char* s_want = nullptr;
+    if (!s_init) { s_init = 1; s_want = std::getenv("SB_SKIP_VERTS"); }
+    if (s_want != nullptr && s_want[0] != '\0') {
+      char buf[16];
+      std::snprintf(buf, sizeof(buf), "%u", vtxCount);
+      const std::string_view want(s_want);
+      size_t start = 0;
+      while (start <= want.size()) {
+        const size_t comma = want.find(',', start);
+        const auto tok = want.substr(start, comma == std::string_view::npos
+                                                ? std::string_view::npos : comma - start);
+        if (!tok.empty() && tok == buf) return;
+        if (comma == std::string_view::npos) break;
+        start = comma + 1;
+      }
+    }
   }
 
   // Per-drain draw/vertex tally for SB_DRAW_STATS (reported from fifo::drain).
