@@ -15,6 +15,11 @@
 // recomp's present counter); weak so aurora still links standalone, where it reads 0 and the
 // window simply opens immediately.
 extern "C" unsigned VIGetRetraceCount(void) __attribute__((weak));
+// Global draw ordinal, incremented per pushed draw in command_processor.cpp. Logging it with
+// each copy puts copies and draws on ONE timeline, which is the only way to see whether a
+// render-to-texture grab happens before or after the draw that samples it - the difference
+// between a feedback loop with no gain and one that compounds.
+namespace aurora::gx::fifo { extern long g_sbPushedDrawCount; }
 static unsigned sb_gx_vi_retrace_count() { return (&VIGetRetraceCount) ? VIGetRetraceCount() : 0; }
 
 namespace {
@@ -219,6 +224,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
       std::fprintf(stderr,
                    "[copy-tex] n=%ld dest=%p %ux%u fmt=%u clear=%d rect=(%d,%d %ux%u) src=(%d,%d %ux%u) "
                    "logical=%ux%u target=%ux%u policy=%d offscreen=%d dstAlpha=%d aU=%d cU=%d pixFmt=%d "
+                   "afterDraw=%ld "
                    "mark='%s'\n",
                    ++n, dest, dstWidth, dstHeight, static_cast<unsigned>(texCopyFmt), static_cast<int>(clear), rect.x,
                    rect.y, rect.width, rect.height, g_gxState.texCopySrc.x, g_gxState.texCopySrc.y,
@@ -229,6 +235,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
                    // this copy. It is invisible in every other diagnostic.
                    static_cast<int>(g_gxState.dstAlpha), g_gxState.alphaUpdate ? 1 : 0,
                    g_gxState.colorUpdate ? 1 : 0, static_cast<int>(g_gxState.pixelFmt),
+                   aurora::gx::fifo::g_sbPushedDrawCount,
                    sb_gx_last_marker());
     } else if (windowOpen) {
       ++n;
