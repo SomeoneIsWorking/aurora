@@ -34,12 +34,27 @@
 
 extern "C" double g_sbGxProf[7];
 namespace aurora {
+
 AuroraConfig g_config;
 uint32_t g_sdlCustomEventsStart;
 char g_gameName[4];
 
 namespace {
 Module Log("aurora");
+
+// On-screen picture aspect (see aurora_set_present_aspect). 4:3 = the GameCube TV picture.
+static uint32_t g_presentAspectW = 640;
+static uint32_t g_presentAspectH = 480;
+
+void set_present_aspect(uint32_t width, uint32_t height) {
+  if (width == 0 || height == 0) {
+    Log.error("aurora_set_present_aspect({}, {}): neither may be zero", width, height);
+    return;
+  }
+  g_presentAspectW = width;
+  g_presentAspectH = height;
+}
+
 
 // ---- SB_RDOC: RenderDoc in-application capture trigger ----------------------
 // SB_RDOC=<present#> arms a single-frame RenderDoc capture: present 0 = the
@@ -358,9 +373,12 @@ void end_frame() noexcept {
   // real TV and the Dolphin oracle both show the full 4:3 picture.
   // presentSource.size stays authoritative for sampling inside the resample
   // pass; only the on-screen rectangle's aspect is the TV's.
+  // g_presentAspect defaults to the TV's 4:3; a runtime rendering anamorphically
+  // (widescreen) sets it via aurora_set_present_aspect so the wide picture is not
+  // presented squeezed back into a 4:3 rectangle.
   const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
                                                            webgpu::g_graphicsConfig.surfaceConfiguration.height,
-                                                           640, 480);
+                                                           g_presentAspectW, g_presentAspectH);
 
   wgpu::BindGroup rmlBindGroup;
   bool rmlOverlay = false;
@@ -704,6 +722,8 @@ void aurora_shutdown() { aurora::shutdown(); }
 const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(); }
 void aurora_end_frame() { aurora::end_frame(); }
+void aurora_set_present_aspect(uint32_t width, uint32_t height) { aurora::set_present_aspect(width, height); }
+
 void aurora_discard_frame() {
 #ifdef AURORA_ENABLE_GX
   aurora::gx::fifo::clear_buffer();

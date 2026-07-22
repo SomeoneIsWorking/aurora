@@ -137,6 +137,18 @@ void aurora_end_frame();
  * to be emptied or it grows without bound. */
 void aurora_discard_frame();
 
+/* Aspect ratio of the on-screen picture, as a width:height pair.
+ *
+ * The default is the TV's 4:3, which is right for a console-faithful present:
+ * VI scan-out stretches whatever XFB the display copy produced across the
+ * physical picture, so the XFB's own texel size never decides the aspect.
+ *
+ * A runtime that renders the scene ANAMORPHICALLY — squeezing the projection
+ * horizontally so a wider field of view lands in the same EFB — must say so
+ * here, otherwise the wide picture is presented into a 4:3 rectangle and comes
+ * out horizontally compressed. Pass 16, 9 for widescreen. */
+void aurora_set_present_aspect(uint32_t width, uint32_t height);
+
 /* Replay a raw GX FIFO command byte stream through the renderer's command
  * processor (the same path aurora_end_frame's internal drain() takes, but
  * synchronous and without draining the live FIFO buffer). Diagnostic ONLY --
