@@ -17,6 +17,8 @@
 #include <tracy/Tracy.hpp>
 
 #include <cmath>
+#include <array>
+#include <vector>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -2033,7 +2035,12 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   // SB_SKIP_COVERING then drops exactly those draws, so identification and causality come from
   // ONE instrument in ONE run — no comparing draw indices between two different counters.
   bool sb_covers_watch = false;
-  bool sb_wneg_watch = false;
+  // A prim with EVERY vertex behind the eye is clipped away by the GPU and is visually inert;
+  // a prim with only SOME vertices behind rasterizes as a smear far outside the box of the ones
+  // in front. Conflating the two made the eye-crossing skip over-broad — the oracle's crossing
+  // prims are almost entirely the harmless full kind.
+  bool sb_wneg_partial = false;
+  bool sb_wneg_full = false;
 
   // SB_PIXEL_WATCH=<x>,<y>[,<frame>] — THE ATTRIBUTION HARNESS.
   //
@@ -2110,6 +2117,13 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
 
         float sx0 = 1e30f, sx1 = -1e30f, sy0 = 1e30f, sy1 = -1e30f;
         bool any = false;
+        // Clip-space positions, kept so coverage can be answered by CLIPPING the primitive the
+        // way the GPU does, instead of by a bounding box of whichever vertices happened to be in
+        // front. A box over the in-front vertices is not a coverage test: for a primitive that
+        // straddles the eye plane the clipped polygon extends far outside it, so the box says
+        // "does not cover" about a prim that rasterizes straight across the point.
+        std::vector<std::array<float, 4>> clips;
+        clips.reserve(vtxCount);
         // Vertices behind the eye plane. Dropping them silently was a false-negative mode:
         // with some vertices behind, the clipped polygon smears far outside the bounding box
         // of the ones in front, so the box says "does not cover" about a draw that does.
@@ -2147,7 +2161,11 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           float clip[4];
           for (int c = 0; c < 4; ++c)
             clip[c] = P2[4 * c] * mv[0] + P2[4 * c + 1] * mv[1] + P2[4 * c + 2] * mv[2] + P2[4 * c + 3];
-          if (clip[3] <= 0.f) { ++wneg; continue; }
+          clips.push_back({clip[0], clip[1], clip[2], clip[3]});
+          if (clip[3] <= 0.f) {
+            ++wneg;
+            continue;
+          }
           const float nx = clip[0] / clip[3], ny = clip[1] / clip[3];
           // NDC -> screen pixels, origin top-left.
           const float px = vp2.left + (nx * 0.5f + 0.5f) * vp2.width;
@@ -2156,11 +2174,85 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           sy0 = std::min(sy0, py); sy1 = std::max(sy1, py);
           any = true;
         }
+
+        // TRUE COVERAGE: triangulate the primitive, clip each triangle against the near plane
+        // (w >= eps) in homogeneous space, and test the watch point against the resulting
+        // polygon. This answers "does this draw rasterize this pixel" exactly, for straddling
+        // primitives as well as wholly-visible ones — which a bounding box cannot do, and which
+        // is the difference between attributing a pixel and merely correlating with one.
+        bool hits = false;
+        if (clips.size() >= 3) {
+          const float kEps = 1e-5f;
+          auto scr = [&](const std::array<float, 4>& c, float& px, float& py) {
+            const float nx = c[0] / c[3], ny = c[1] / c[3];
+            px = vp2.left + (nx * 0.5f + 0.5f) * vp2.width;
+            py = vp2.top + (0.5f - ny * 0.5f) * vp2.height;
+          };
+          auto lerp4 = [](const std::array<float, 4>& a, const std::array<float, 4>& b, float t) {
+            std::array<float, 4> r{};
+            for (int i = 0; i < 4; ++i) r[i] = a[i] + (b[i] - a[i]) * t;
+            return r;
+          };
+          auto triHits = [&](std::array<float, 4> a, std::array<float, 4> b, std::array<float, 4> c) {
+            // Sutherland-Hodgman against the single plane w = eps.
+            std::vector<std::array<float, 4>> poly{a, b, c}, out;
+            for (size_t i = 0; i < poly.size(); ++i) {
+              const auto& cur = poly[i];
+              const auto& nxt = poly[(i + 1) % poly.size()];
+              const bool curIn = cur[3] >= kEps, nxtIn = nxt[3] >= kEps;
+              if (curIn) out.push_back(cur);
+              if (curIn != nxtIn) {
+                const float d = nxt[3] - cur[3];
+                if (std::fabs(d) > 1e-20f) out.push_back(lerp4(cur, nxt, (kEps - cur[3]) / d));
+              }
+            }
+            if (out.size() < 3) return false;
+            // Fan-triangulate the clipped polygon and do an exact point-in-triangle test.
+            float px0, py0;
+            scr(out[0], px0, py0);
+            for (size_t i = 1; i + 1 < out.size(); ++i) {
+              float px1, py1, px2, py2;
+              scr(out[i], px1, py1);
+              scr(out[i + 1], px2, py2);
+              const float d1 = (s_wx - px1) * (py0 - py1) - (px0 - px1) * (s_wy - py1);
+              const float d2 = (s_wx - px2) * (py1 - py2) - (px1 - px2) * (s_wy - py2);
+              const float d3 = (s_wx - px0) * (py2 - py0) - (px2 - px0) * (s_wy - py0);
+              const bool neg = d1 < 0 || d2 < 0 || d3 < 0;
+              const bool pos = d1 > 0 || d2 > 0 || d3 > 0;
+              if (!(neg && pos)) return true;   // no sign mix -> inside
+            }
+            return false;
+          };
+          const size_t n = clips.size();
+          switch (prim) {
+          case GX_QUADS:
+            for (size_t i = 0; i + 3 < n && !hits; i += 4)
+              hits = triHits(clips[i], clips[i + 1], clips[i + 2]) ||
+                     triHits(clips[i], clips[i + 2], clips[i + 3]);
+            break;
+          case GX_TRIANGLES:
+            for (size_t i = 0; i + 2 < n && !hits; i += 3)
+              hits = triHits(clips[i], clips[i + 1], clips[i + 2]);
+            break;
+          case GX_TRIANGLESTRIP:
+            for (size_t i = 0; i + 2 < n && !hits; ++i)
+              hits = triHits(clips[i], clips[i + 1], clips[i + 2]);
+            break;
+          case GX_TRIANGLEFAN:
+            for (size_t i = 1; i + 1 < n && !hits; ++i)
+              hits = triHits(clips[0], clips[i], clips[i + 1]);
+            break;
+          default:
+            break;   // lines/points: no area, cannot cover a pixel
+          }
+        }
         // Report when the box covers the point OR when the quad crosses the eye plane (where
         // the box is not trustworthy). Also report EVERY 4-vertex prim, covered or not — the
         // culprit is known to be a 4-vertex draw, so an exhaustive list for one frame is
         // small and cannot hide it.
-        const bool covers = any && s_wx >= sx0 && s_wx <= sx1 && s_wy >= sy0 && s_wy <= sy1;
+        const bool boxCovers = any && s_wx >= sx0 && s_wx <= sx1 && s_wy >= sy0 && s_wy <= sy1;
+        const bool covers = hits;   // exact, clip-correct coverage
+        (void)boxCovers;
         // A prim with vertices at or behind the eye plane has NO trustworthy screen box: the
         // in-front vertices alone give a box that can exclude the watch point while the clipped
         // triangle still rasterizes across it, and a prim with EVERY vertex behind the eye
@@ -2168,7 +2260,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         // invisible to a coverage test by construction, so they get their own class rather than
         // being silently counted as "does not cover".
         sb_covers_watch = covers;
-        sb_wneg_watch = wneg > 0;
+        sb_wneg_partial = wneg > 0 && wneg < vtxCount;
+        sb_wneg_full = wneg > 0 && wneg == vtxCount;
         // The frame gate applies to REPORTING only. `covers` must be computed on every frame,
         // because SB_SKIP_COVERING has to drop the draw in every frame to change the picture —
         // gating the computation would skip in one frame and leave the dumped one untouched.
@@ -2181,7 +2274,9 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
                        "[pixel-watch] %s draw#%ld %s verts=%u wneg=%u box=[%.0f..%.0f x %.0f..%.0f] "
                        "tex0=%ux%u tev=%u bm=%d bf=%d/%d cU=%d aU=%d zc=%d zu=%d cull=%d "
                        "lastTEV=c(%d,%d,%d,%d)op=%d,%d,%d mark='%s'\n",
-                       covers ? "COVERS" : (wneg ? "CROSSES" : "      "),
+                       covers ? "COVERS"
+                              : (wneg == 0 ? "       "
+                                           : (wneg < vtxCount ? "PARTIAL" : "BEHIND ")),
                        g_sbPushedDrawCount, g_gxState.projType == GX_ORTHOGRAPHIC ? "O" : "P",
                        vtxCount, wneg, sx0, sx1, sy0, sy1, t0.width(), t0.height(),
                        g_gxState.numTevStages, (int)g_gxState.blendMode,
@@ -2775,12 +2870,53 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       if (const char* e = std::getenv("SB_SKIP_WNEG_BF"); e != nullptr && e[0] != '\0')
         std::sscanf(e, "%d,%d", &s_bfSrc, &s_bfDst);
     }
-    const bool bfMatch = s_bfSrc < 0 || ((int)g_gxState.blendFacSrc == s_bfSrc &&
+    // The blend FACTORS are stale whenever blending is off — they keep whatever was last set.
+    // Matching on them without checking blendMode silently sweeps in opaque draws, which is
+    // how two supposedly disjoint blend-pair filters ended up selecting overlapping sets.
+    const bool bfMatch = s_bfSrc < 0 || (g_gxState.blendMode == GX_BM_BLEND &&
+                                         (int)g_gxState.blendFacSrc == s_bfSrc &&
                                          (int)g_gxState.blendFacDst == s_bfDst);
+
+    // SB_SKIP_WNEG_KIND=partial|full selects which half of the crossing class to drop.
+    // 'full' is the SHAM SURGERY control: those prims are clipped away by the GPU anyway, so
+    // dropping them must be a visual no-op. If the image moves, the skip mechanism itself
+    // perturbs unrelated rendering and every skip result here is contaminated.
+    static int s_kindInit = 0;
+    static int s_kind = 0;   // 0 = both, 1 = partial only, 2 = full only
+    if (!s_kindInit) {
+      s_kindInit = 1;
+      if (const char* e = std::getenv("SB_SKIP_WNEG_KIND"); e != nullptr && e[0] != '\0')
+        s_kind = (e[0] == 'p') ? 1 : (e[0] == 'f') ? 2 : 0;
+    }
+    const bool wnegMatch = s_kind == 1 ? sb_wneg_partial
+                         : s_kind == 2 ? sb_wneg_full
+                                       : (sb_wneg_partial || sb_wneg_full);
     // With a blend filter set the test is about THAT family alone, so the coverage clause is
     // dropped — otherwise the 393k harmless covering draws ride along and blur the answer.
-    const bool coversClause = sb_covers_watch && s_bfSrc < 0;
-    if (s_on && (coversClause || (s_mode >= 2 && sb_wneg_watch && bfMatch))) {
+    // SB_SKIP_BF=<src>,<dst> (diagnostic): drop EVERY draw using that blend pair, with no
+    // eye-crossing precondition. Separates "this blend family paints it" from "the crossing
+    // geometry paints it" — the two were confounded because the guilty family is mostly
+    // crossing geometry.
+    static int s_allBfInit = 0;
+    static int s_allBfSrc = -1, s_allBfDst = -1;
+    if (!s_allBfInit) {
+      s_allBfInit = 1;
+      if (const char* e = std::getenv("SB_SKIP_BF"); e != nullptr && e[0] != '\0')
+        std::sscanf(e, "%d,%d", &s_allBfSrc, &s_allBfDst);
+    }
+    if (s_allBfSrc >= 0 && g_gxState.blendMode == GX_BM_BLEND &&
+        (int)g_gxState.blendFacSrc == s_allBfSrc && (int)g_gxState.blendFacDst == s_allBfDst) {
+      static long nbf = 0;
+      if ((++nbf % 500) == 1) std::fprintf(stderr, "[skip-bf] dropped %ld draws\n", nbf);
+      pos += totalVtxBytes;
+      return;
+    }
+
+    // With a blend filter or a kind filter set the test is about THAT family alone, so the
+    // coverage clause is dropped — otherwise the harmless covering draws ride along and blur
+    // the answer.
+    const bool coversClause = sb_covers_watch && s_bfSrc < 0 && s_kind == 0;
+    if (s_on && (coversClause || (s_mode >= 2 && wnegMatch && bfMatch))) {
       static long n = 0;
       if ((++n % 100) == 1) std::fprintf(stderr, "[skip-covering] dropped %ld covering draws\n", n);
       pos += totalVtxBytes;
