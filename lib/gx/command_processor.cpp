@@ -1868,6 +1868,7 @@ static ByteBuffer handle_draw_idx_buf;
 // draw_prim's SB_NDC_DRAW window so a [draw-dump] index can be probed at the
 // vertex level (a prim that MERGES into the previous draw executes while the
 // counter already points one past its draw, hence the window's +1 slack).
+long g_skippedBigQuads = 0;
 long g_sbPushedDrawCount = 0; // exported: SB_NO_ZWRITE_DRAWS window check in gx.cpp
 
 static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size) {
@@ -1911,6 +1912,286 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
                        "[pos-probe] n=%d verts=%u idx=%u stride=%u arr=%p le=%d xyz=(%g, %g, %g)\n", n,
                        vtxCount, idx, arr.stride, arr.data, static_cast<int>(arr.le),
                        p ? p[0] : 0.f, p ? p[1] : 0.f, p ? p[2] : 0.f);
+        }
+      }
+    }
+  }
+
+  // SB_QUAD_RECT=1 (diagnostic): for ORTHOGRAPHIC 4-vertex draws, decode the quad's corners
+  // from the vertex stream and report its screen rectangle. When a 2D overlay is covering the
+  // scene, its EXTENT is what identifies it — texture and blend state are shared by dozens of
+  // unrelated UI quads, but only one of them spans the washed band.
+  {
+    // SB_QUAD_RECT=<frame>: start logging only once that frame ordinal is reached. A plain
+    // count-capped log fills with boot-logo quads and never reaches the scene under
+    // investigation — that has now happened often enough to be worth gating properly.
+    static int s_init = 0;
+    static long s_after = -1;
+    if (!s_init) {
+      s_init = 1;
+      const char* e = std::getenv("SB_QUAD_RECT");
+      s_after = (e != nullptr && e[0] != '\0') ? std::atol(e) : -1;
+    }
+    // Both projections: an orthographic sweep found nothing larger than a text glyph, so a
+    // PERSPECTIVE quad is the remaining shape. Identical state and multiplicity between two
+    // runtimes says nothing about where a quad actually lands.
+    if (s_after >= 0 && static_cast<long>(sb_gx_vi_retrace_count()) >= s_after &&
+        vtxCount == 4) {
+      const auto& pf = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
+      const auto pd = g_gxState.vtxDesc[GX_VA_POS];
+      // Decode the quad's corners whatever format the positions arrive in. Handling only
+      // DIRECT F32 silently skipped 85 of 123 four-vertex draws here (43 orthographic S16 and
+      // 42 indexed perspective ones), which is how a sweep "found no large quad" while looking
+      // at a third of them.
+      const bool indexed = (pd == GX_INDEX8 || pd == GX_INDEX16);
+      const bool decodable = (pd == GX_DIRECT || indexed) &&
+                             (pf.type == GX_F32 || pf.type == GX_S16 || pf.type == GX_U16 ||
+                              pf.type == GX_S8 || pf.type == GX_U8);
+      if (decodable) {
+        const unsigned comps = pf.cnt == GX_POS_XYZ ? 3 : 2;
+        const float scale = 1.0f / (float)(1u << pf.frac);
+        const auto& arr = g_gxState.arrays[GX_VA_POS];
+
+        // Byte offset of POS within a vertex: preceding attributes, sized by their own
+        // descriptors (matrix indices are one byte each; indexed attrs are their index width).
+        u32 off = 0;
+        for (int a = GX_VA_PNMTXIDX; a < GX_VA_POS; ++a) {
+          const auto d = g_gxState.vtxDesc[a];
+          if (d == GX_NONE) continue;
+          off += (d == GX_INDEX16) ? 2 : 1;
+        }
+
+        auto component = [&](const u8* base, unsigned i) -> float {
+          switch (pf.type) {
+          case GX_F32: return read_f32(base + i * 4, true);
+          case GX_S16: return (float)(s16)read_u16(base + i * 2, true) * scale;
+          case GX_U16: return (float)read_u16(base + i * 2, true) * scale;
+          case GX_S8:  return (float)(s8)base[i] * scale;
+          default:     return (float)base[i] * scale;
+          }
+        };
+
+        float xs[4], ys[4];
+        bool ok = true;
+        for (unsigned v = 0; v < 4 && ok; ++v) {
+          const u32 vsz = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize
+                                                      : calculate_last_vtx_size(fmt);
+          const u32 base = pos + v * vsz + off;
+          const u8* src = nullptr;
+          if (indexed) {
+            const u32 need = (pd == GX_INDEX16) ? 2u : 1u;
+            if (base + need > size || arr.data == nullptr) { ok = false; break; }
+            const u32 idx = (pd == GX_INDEX16) ? read_u16(data + base, true) : data[base];
+            src = static_cast<const u8*>(arr.data) + (size_t)idx * arr.stride;
+          } else {
+            const u32 width = (pf.type == GX_F32) ? 4u : (pf.type == GX_S16 || pf.type == GX_U16) ? 2u : 1u;
+            if (base + comps * width > size) { ok = false; break; }
+            src = data + base;
+          }
+          xs[v] = component(src, 0);
+          ys[v] = component(src, 1);
+        }
+        if (ok) {
+          float x0 = xs[0], x1 = xs[0], y0 = ys[0], y1 = ys[0];
+          for (unsigned v = 1; v < 4; ++v) {
+            x0 = xs[v] < x0 ? xs[v] : x0; x1 = xs[v] > x1 ? xs[v] : x1;
+            y0 = ys[v] < y0 ? ys[v] : y0; y1 = ys[v] > y1 ? ys[v] : y1;
+          }
+          // SB_SKIP_BIGQUAD=<extent>: drop 4-vertex quads whose decoded extent exceeds this,
+          // i.e. the scene-covering ones, without touching the hundreds of small UI quads that
+          // share their vertex count. Targeted where SB_SKIP_VERTS=4 is not.
+          {
+            static int s_bqInit = 0;
+            static float s_bq = -1.f;
+            if (!s_bqInit) {
+              s_bqInit = 1;
+              const char* e = std::getenv("SB_SKIP_BIGQUAD");
+              s_bq = (e != nullptr && e[0] != '\0') ? (float)std::atof(e) : -1.f;
+            }
+            if (s_bq > 0.f && (x1 - x0) >= s_bq && (y1 - y0) >= s_bq) {
+              g_skippedBigQuads++;
+              return;
+            }
+          }
+          const auto& t0 = g_gxState.textures[0].texObj;
+          static long n = 0;
+          if (++n <= 200)
+            std::fprintf(stderr,
+                         "[quad-rect] #%ld %c x=[%.0f..%.0f] y=[%.0f..%.0f] w=%.0f h=%.0f "
+                         "tex0=%ux%u tev=%u bm=%d bf=%d/%d cU=%d aU=%d\n",
+                         n, g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
+                         x0, x1, y0, y1, x1 - x0, y1 - y0, t0.width(), t0.height(),
+                         g_gxState.numTevStages, (int)g_gxState.blendMode,
+                         (int)g_gxState.blendFacSrc, (int)g_gxState.blendFacDst,
+                         g_gxState.colorUpdate ? 1 : 0, g_gxState.alphaUpdate ? 1 : 0);
+        }
+      }
+    }
+  }
+
+  // Set by the pixel-watch block below when THIS draw's screen box contains the watch point.
+  // SB_SKIP_COVERING then drops exactly those draws, so identification and causality come from
+  // ONE instrument in ONE run — no comparing draw indices between two different counters.
+  bool sb_covers_watch = false;
+  bool sb_wneg_watch = false;
+
+  // SB_PIXEL_WATCH=<x>,<y>[,<frame>] — THE ATTRIBUTION HARNESS.
+  //
+  // Answers "which draws cover this pixel, in order, with what state" directly, instead of
+  // bisecting by skipping draw groups and re-running (2.5 minutes per guess). Every draw's
+  // vertices are transformed through the SAME matrices the GPU uses — per-vertex PNMTXIDX,
+  // the position matrix, then the projection — divided by w, and mapped to screen pixels via
+  // the logical viewport. A draw whose screen-space bounding box contains the watch point is
+  // reported with the state that decides what it writes there.
+  //
+  // Coordinates are logical framebuffer pixels (the 640x448 the game draws in), origin top-left.
+  {
+    static int s_init = 0;
+    static float s_wx = -1.f, s_wy = -1.f;
+    static long s_wframe = -1;
+    if (!s_init) {
+      s_init = 1;
+      if (const char* e = std::getenv("SB_PIXEL_WATCH"); e != nullptr && e[0] != '\0') {
+        s_wx = (float)std::atof(e);
+        const char* c1 = std::strchr(e, ',');
+        if (c1 != nullptr) {
+          s_wy = (float)std::atof(c1 + 1);
+          const char* c2 = std::strchr(c1 + 1, ',');
+          if (c2 != nullptr) s_wframe = std::atol(c2 + 1);
+        }
+      }
+    }
+    if (s_wx >= 0.f && s_wy >= 0.f) {
+      const auto& pf = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
+      const auto pd2 = g_gxState.vtxDesc[GX_VA_POS];
+      const auto& arr2 = g_gxState.arrays[GX_VA_POS];
+      const bool idxed = (pd2 == GX_INDEX8 || pd2 == GX_INDEX16);
+      const bool ok_fmt = (pf.type == GX_F32 || pf.type == GX_S16 || pf.type == GX_U16);
+      const bool decodable = ok_fmt && (!idxed || arr2.data != nullptr);
+
+      // A probe that silently ignores what it cannot parse reports a confident NOTHING. This
+      // one accounts for every draw it saw: covered, not covered, or NOT DECODED — and prints
+      // the undecoded tally with the formats responsible, so a null result can be trusted or
+      // distrusted on the evidence rather than on faith.
+      {
+        static long s_seen = 0, s_undec = 0;
+        static u32 s_badDesc = 0, s_badType = 0;
+        ++s_seen;
+        if (!decodable) {
+          ++s_undec;
+          s_badDesc = (u32)pd2;
+          s_badType = (u32)pf.type;
+        }
+        // Report periodically rather than on a frame boundary: the watch is gated to ONE
+        // frame, so a frame-change trigger inside that gate can never fire — the first
+        // version of this accounting printed nothing at all, which is exactly the silence it
+        // exists to prevent.
+        if ((s_seen % 50) == 0)
+          std::fprintf(stderr,
+                       "[pixel-watch] coverage so far: %ld draws examined, %ld NOT DECODED "
+                       "(last undecodable posDesc=%u posType=%u)\n",
+                       s_seen, s_undec, s_badDesc, s_badType);
+      }
+
+      if (decodable) {
+        // Offset of POS and of the matrix index within a vertex.
+        u32 posOff2 = 0; int pnOff2 = -1;
+        for (int a = GX_VA_PNMTXIDX; a < GX_VA_POS; ++a) {
+          const auto d = g_gxState.vtxDesc[a];
+          if (d == GX_NONE) continue;
+          if (a == GX_VA_PNMTXIDX) pnOff2 = (int)posOff2;
+          posOff2 += (d == GX_INDEX16) ? 2 : 1;
+        }
+        const float invFrac2 = 1.0f / (float)(1u << pf.frac);
+        const float* P2 = reinterpret_cast<const float*>(&g_gxState.proj);
+        const u32 vsz2 = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize
+                                                     : calculate_last_vtx_size(fmt);
+        const auto& vp2 = g_gxState.logicalViewport;
+
+        float sx0 = 1e30f, sx1 = -1e30f, sy0 = 1e30f, sy1 = -1e30f;
+        bool any = false;
+        // Vertices behind the eye plane. Dropping them silently was a false-negative mode:
+        // with some vertices behind, the clipped polygon smears far outside the bounding box
+        // of the ones in front, so the box says "does not cover" about a draw that does.
+        u32 wneg = 0;
+        for (u32 v = 0; v < vtxCount; ++v) {
+          const u32 base = pos + v * vsz2;
+          if (base + vsz2 > size) break;
+          const u8* vp = data + base;
+          u32 mtxIdx = g_gxState.currentPnMtx;
+          if (pnOff2 >= 0) mtxIdx = vp[pnOff2] / 3u;
+          const u8* src;
+          if (idxed) {
+            const u32 i2 = (pd2 == GX_INDEX16) ? read_u16(vp + posOff2, true) : vp[posOff2];
+            src = static_cast<const u8*>(arr2.data) + (size_t)i2 * arr2.stride;
+          } else {
+            src = vp + posOff2;
+          }
+          // Vertex-stream data is always big-endian (it came off the FIFO), but ARRAY data
+          // carries its own endianness — a little-endian array read as big-endian yields
+          // garbage positions and therefore garbage coverage answers, silently. This matters
+          // the moment the harness is pointed at a runtime whose arrays are host-endian.
+          const bool be = !idxed || !arr2.le;
+          float x, y, z;
+          if (pf.type == GX_F32) {
+            x = read_f32(src, be); y = read_f32(src + 4, be);
+            z = pf.cnt == GX_POS_XYZ ? read_f32(src + 8, be) : 0.f;
+          } else {
+            auto rs = [&](const u8* q) { return (float)(s16)read_u16(q, be) * invFrac2; };
+            x = rs(src); y = rs(src + 2); z = pf.cnt == GX_POS_XYZ ? rs(src + 4) : 0.f;
+          }
+          const float* M = reinterpret_cast<const float*>(&g_gxState.pnMtx[mtxIdx % MaxPnMtx].pos);
+          float mv[3];
+          for (int c = 0; c < 3; ++c)
+            mv[c] = M[4 * c] * x + M[4 * c + 1] * y + M[4 * c + 2] * z + M[4 * c + 3];
+          float clip[4];
+          for (int c = 0; c < 4; ++c)
+            clip[c] = P2[4 * c] * mv[0] + P2[4 * c + 1] * mv[1] + P2[4 * c + 2] * mv[2] + P2[4 * c + 3];
+          if (clip[3] <= 0.f) { ++wneg; continue; }
+          const float nx = clip[0] / clip[3], ny = clip[1] / clip[3];
+          // NDC -> screen pixels, origin top-left.
+          const float px = vp2.left + (nx * 0.5f + 0.5f) * vp2.width;
+          const float py = vp2.top + (0.5f - ny * 0.5f) * vp2.height;
+          sx0 = std::min(sx0, px); sx1 = std::max(sx1, px);
+          sy0 = std::min(sy0, py); sy1 = std::max(sy1, py);
+          any = true;
+        }
+        // Report when the box covers the point OR when the quad crosses the eye plane (where
+        // the box is not trustworthy). Also report EVERY 4-vertex prim, covered or not — the
+        // culprit is known to be a 4-vertex draw, so an exhaustive list for one frame is
+        // small and cannot hide it.
+        const bool covers = any && s_wx >= sx0 && s_wx <= sx1 && s_wy >= sy0 && s_wy <= sy1;
+        // A prim with vertices at or behind the eye plane has NO trustworthy screen box: the
+        // in-front vertices alone give a box that can exclude the watch point while the clipped
+        // triangle still rasterizes across it, and a prim with EVERY vertex behind the eye
+        // produces no box at all (`any` stays false, so `covers` can never fire). Those are
+        // invisible to a coverage test by construction, so they get their own class rather than
+        // being silently counted as "does not cover".
+        sb_covers_watch = covers;
+        sb_wneg_watch = wneg > 0;
+        // The frame gate applies to REPORTING only. `covers` must be computed on every frame,
+        // because SB_SKIP_COVERING has to drop the draw in every frame to change the picture —
+        // gating the computation would skip in one frame and leave the dumped one untouched.
+        const bool report = (s_wframe < 0 ||
+                             static_cast<long>(sb_gx_vi_retrace_count()) == s_wframe);
+        if (report && (covers || wneg > 0 || vtxCount == 4)) {
+          const auto& t0 = g_gxState.textures[0].texObj;
+          const auto& st = g_gxState.tevStages[g_gxState.numTevStages ? g_gxState.numTevStages - 1 : 0];
+          std::fprintf(stderr,
+                       "[pixel-watch] %s draw#%ld %s verts=%u wneg=%u box=[%.0f..%.0f x %.0f..%.0f] "
+                       "tex0=%ux%u tev=%u bm=%d bf=%d/%d cU=%d aU=%d zc=%d zu=%d cull=%d "
+                       "lastTEV=c(%d,%d,%d,%d)op=%d,%d,%d mark='%s'\n",
+                       covers ? "COVERS" : (wneg ? "CROSSES" : "      "),
+                       g_sbPushedDrawCount, g_gxState.projType == GX_ORTHOGRAPHIC ? "O" : "P",
+                       vtxCount, wneg, sx0, sx1, sy0, sy1, t0.width(), t0.height(),
+                       g_gxState.numTevStages, (int)g_gxState.blendMode,
+                       (int)g_gxState.blendFacSrc, (int)g_gxState.blendFacDst,
+                       g_gxState.colorUpdate ? 1 : 0, g_gxState.alphaUpdate ? 1 : 0,
+                       (int)g_gxState.depthCompare, (int)g_gxState.depthUpdate,
+                       (int)g_gxState.cullMode,
+                       (int)st.colorPass.a, (int)st.colorPass.b, (int)st.colorPass.c,
+                       (int)st.colorPass.d, (int)st.colorOp.op, (int)st.colorOp.bias,
+                       (int)st.colorOp.scale, g_sbLastMarker.c_str());
         }
       }
     }
@@ -2463,6 +2744,50 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     }
   }
 
+  // SB_SKIP_COVERING=1 (diagnostic): drop precisely the draws whose transformed screen box
+  // contains the SB_PIXEL_WATCH point. This is the direct attribution test — the same code that
+  // NAMES a covering draw also removes it, so "which draw paints this pixel" is answered by one
+  // run, with no index translation between two instruments and no state-predicate guessing.
+  //
+  // It must live HERE, in draw_prim, not at the push_gx_draw skip site: a prim that merges into
+  // the previous draw returns before ever reaching push_gx_draw, so a skip down there silently
+  // misses the merged majority. The stream is still consumed (pos advanced) — a skip must drop
+  // the DRAW, never desynchronize the FIFO parse.
+  {
+    static int s_init = 0;
+    static bool s_on = false;
+    static int s_mode = 1;
+    if (!s_init) {
+      s_init = 1;
+      const char* e = std::getenv("SB_SKIP_COVERING");
+      s_on = e != nullptr && e[0] != '\0';
+      if (s_on) s_mode = std::atoi(e);
+    }
+    // =1 drops only draws whose box contains the point; =2 ALSO drops eye-plane-crossing
+    // draws, whose box is not a valid coverage answer at all.
+    //
+    // SB_SKIP_WNEG_BF=<src>,<dst> narrows =2 to eye-crossing draws using that blend pair, so a
+    // family proven guilty in bulk can be split by the state that decides what it writes.
+    static int s_bfSrc = -1, s_bfDst = -1;
+    static int s_bfInit = 0;
+    if (!s_bfInit) {
+      s_bfInit = 1;
+      if (const char* e = std::getenv("SB_SKIP_WNEG_BF"); e != nullptr && e[0] != '\0')
+        std::sscanf(e, "%d,%d", &s_bfSrc, &s_bfDst);
+    }
+    const bool bfMatch = s_bfSrc < 0 || ((int)g_gxState.blendFacSrc == s_bfSrc &&
+                                         (int)g_gxState.blendFacDst == s_bfDst);
+    // With a blend filter set the test is about THAT family alone, so the coverage clause is
+    // dropped — otherwise the 393k harmless covering draws ride along and blur the answer.
+    const bool coversClause = sb_covers_watch && s_bfSrc < 0;
+    if (s_on && (coversClause || (s_mode >= 2 && sb_wneg_watch && bfMatch))) {
+      static long n = 0;
+      if ((++n % 100) == 1) std::fprintf(stderr, "[skip-covering] dropped %ld covering draws\n", n);
+      pos += totalVtxBytes;
+      return;
+    }
+  }
+
   // SB_NO_MERGE=1 (diagnostic): never merge draws. A merged draw reuses the
   // merge-head's uniform (array_start offsets) + bind groups; if the head's
   // indexed-array upload doesn't cover a later merged prim's indices, the GPU
@@ -2620,6 +2945,68 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     return;
   }
 
+  // SB_SKIP_ADD_OVERLAY=1 (diagnostic): drop the single additive orthographic quad that a
+  // dump diff showed exists in this runtime and NOT in the reference one — orthographic,
+  // 4 vertices, destination factor ONE (additive), alpha writes off. That combination is
+  // unique in the frame, so this isolates one draw without needing a stable draw index.
+  {
+    static int s_init = 0;
+    static bool s_on = false;
+    if (!s_init) { s_init = 1; s_on = std::getenv("SB_SKIP_ADD_OVERLAY") != nullptr; }
+    if (s_on && vtxCount == 4 && g_gxState.projType == GX_ORTHOGRAPHIC &&
+        g_gxState.blendFacDst == GX_BL_ONE && !g_gxState.alphaUpdate) {
+      return;
+    }
+  }
+
+  // SB_SKIP_OPAQUE_P4=1 (diagnostic): drop OPAQUE perspective 4-vertex quads (blending off).
+  // Neither previous targeted skip could touch this family, and an opaque quad partially
+  // behind the eye plane rasterizes as a large smear — the one mechanism that both buries the
+  // sea regardless of alpha and evades a bounding-box coverage test.
+  {
+    static int s_init = 0;
+    static bool s_on = false;
+    if (!s_init) { s_init = 1; s_on = std::getenv("SB_SKIP_OPAQUE_P4") != nullptr; }
+    if (s_on && vtxCount == 4 && g_gxState.projType != GX_ORTHOGRAPHIC &&
+        g_gxState.blendMode == GX_BM_NONE) {
+      static long n = 0;
+      if ((++n % 200) == 1) std::fprintf(stderr, "[skip-opaque-p4] skipped %ld draws\n", n);
+      return;
+    }
+  }
+
+  // SB_SKIP_SCENEQUAD=1 (diagnostic): drop the scene-covering PERSPECTIVE 4-vertex quad —
+  // additive both factors (ONE/ONE), colour writes off, alpha writes on. The pixel-attribution
+  // harness shows only two 4-vertex draws cover the washed pixel, and this is the other one.
+  {
+    static int s_init = 0;
+    static bool s_on = false;
+    if (!s_init) { s_init = 1; s_on = std::getenv("SB_SKIP_SCENEQUAD") != nullptr; }
+    if (s_on && vtxCount == 4 && g_gxState.projType != GX_ORTHOGRAPHIC &&
+        g_gxState.blendFacSrc == GX_BL_ONE && g_gxState.blendFacDst == GX_BL_ONE &&
+        !g_gxState.colorUpdate) {
+      static long n = 0;
+      if ((++n % 200) == 1) std::fprintf(stderr, "[skip-scenequad] skipped %ld draws\n", n);
+      return;
+    }
+  }
+
+  // SB_SKIP_FADER=1 (diagnostic): drop the untextured full-screen orthographic quad — no
+  // texgens, TEXMAP_NULL, GX_PASSCLR — which is the screen fader's fill_rect signature.
+  {
+    static int s_init = 0;
+    static bool s_on = false;
+    if (!s_init) { s_init = 1; s_on = std::getenv("SB_SKIP_FADER") != nullptr; }
+    if (s_on && vtxCount == 4 && g_gxState.projType == GX_ORTHOGRAPHIC &&
+        g_gxState.numTexGens == 0) {
+      // A skip that matches nothing produces a null result indistinguishable from "this draw
+      // is not the cause". Count and report, so the null can be told apart from the no-op.
+      static long n = 0;
+      if ((++n % 200) == 1) std::fprintf(stderr, "[skip-fader] skipped %ld draws\n", n);
+      return;
+    }
+  }
+
   // SB_SKIP_VERTS=<n>[,<n>...] (diagnostic): drop draws with exactly those vertex counts.
   // A draw that writes only alpha (colorUpdate off) is invisible on its own, so its effect on
   // the frame can only be established by removing it and seeing what changes.
@@ -2630,6 +3017,30 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     if (s_want != nullptr && s_want[0] != '\0') {
       char buf[16];
       std::snprintf(buf, sizeof(buf), "%u", vtxCount);
+      const std::string_view want(s_want);
+      size_t start = 0;
+      while (start <= want.size()) {
+        const size_t comma = want.find(',', start);
+        const auto tok = want.substr(start, comma == std::string_view::npos
+                                                ? std::string_view::npos : comma - start);
+        if (!tok.empty() && tok == buf) return;
+        if (comma == std::string_view::npos) break;
+        start = comma + 1;
+      }
+    }
+  }
+
+  // SB_SKIP_TEX=<W>x<H>[,...] (diagnostic): drop draws binding a texture of those dimensions
+  // on texmap 0. Ungated, unlike SB_SKIP_TEXDIM which only applies to draws whose marker
+  // contains "Sky" — a marker the FIFO path does not set at all.
+  {
+    static int s_init = 0;
+    static const char* s_want = nullptr;
+    if (!s_init) { s_init = 1; s_want = std::getenv("SB_SKIP_TEX"); }
+    if (s_want != nullptr && s_want[0] != '\0') {
+      const auto& t0 = g_gxState.textures[0].texObj;
+      char buf[24];
+      std::snprintf(buf, sizeof(buf), "%ux%u", t0.width(), t0.height());
       const std::string_view want(s_want);
       size_t start = 0;
       while (start <= want.size()) {

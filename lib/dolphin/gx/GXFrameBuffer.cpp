@@ -161,8 +161,31 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
                     static_cast<unsigned>(texCopyFmt), static_cast<int>(clear), effClear ? 0 : (clear ? 1 : 0),
                     sb_gx_last_marker());
   }
-  gfx::resolve_pass(handle.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor, clear_depth_value(),
-                    texCopyFmt);
+  // SB_CLEAR_RGB=r,g,b (0-255, diagnostic): force the EFB clear colour. If a region of the
+  // frame is the wrong colour because nothing ever DRAWS there, it is showing the clear, and
+  // forcing an unmistakable colour makes that visible immediately — the one hypothesis a
+  // draw-skipping test can never reach, since there is no draw to skip.
+  static bool s_useForced = false;
+  static Vec4<float> s_forced{};
+  {
+    static int s_init = 0;
+    static bool s_on = false;
+    static Vec4<float> s_col{};
+    if (!s_init) {
+      s_init = 1;
+      if (const char* e = std::getenv("SB_CLEAR_RGB"); e != nullptr && e[0] != '\0') {
+        int r = 255, g = 0, b = 255;
+        std::sscanf(e, "%d,%d,%d", &r, &g, &b);
+        s_col = Vec4<float>{r / 255.f, g / 255.f, b / 255.f, 1.f};
+        s_on = true;
+        std::fprintf(stderr, "[clear-rgb] forcing EFB clear to %d,%d,%d\n", r, g, b);
+      }
+    }
+    s_useForced = s_on;
+    if (s_on) s_forced = s_col;
+  }
+  gfx::resolve_pass(handle.handle, rect, clearColor, clearAlpha, clearDepth,
+                    s_useForced ? s_forced : g_gxState.clearColor, clear_depth_value(), texCopyFmt);
   // SB_PRESENT_PASS1: stash the FIRST clear=true copy's resolved texture as a
   // candidate present source (the EFB captured just before it was cleared =
   // the pre-clear pass's full content). Lets end_frame present that pass
