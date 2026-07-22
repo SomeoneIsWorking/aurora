@@ -2710,15 +2710,18 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       // single tex0 field cannot answer "which draw samples texture X" — asking that of a
       // render-to-texture result (an EFB copy) and seeing no match on tex0 says nothing,
       // since the copy may well be bound to a higher map.
-      char texbuf[128];
+      char texbuf[256];
       {
         int o = 0;
         texbuf[0] = '\0';
         for (int m = 0; m < GX_MAX_TEXMAP && o < static_cast<int>(sizeof(texbuf)) - 16; ++m) {
           const auto& to = g_gxState.textures[m];
           if (!to.ref) continue;   // not bound on this map
-          o += std::snprintf(texbuf + o, sizeof(texbuf) - o, "%s%d:%ux%u", o ? "," : "", m,
-                             to.texObj.width(), to.texObj.height());
+          // Include the texel pointer: two textures of identical dimensions can be entirely
+          // different resources (a raw-RAM texture vs an EFB-copy result), and dimensions
+          // alone cannot tell them apart.
+          o += std::snprintf(texbuf + o, sizeof(texbuf) - o, "%s%d:%ux%u@%p", o ? "," : "", m,
+                             to.texObj.width(), to.texObj.height(), to.texObj.data);
         }
       }
       // clr0Desc/clr1Desc: whether this draw's VCD actually supplies CLR0/CLR1
