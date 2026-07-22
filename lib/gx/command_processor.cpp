@@ -2180,6 +2180,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         // "does not cover" about a prim that rasterizes straight across the point.
         std::vector<std::array<float, 4>> clips;
         clips.reserve(vtxCount);
+        u32 firstMtxIdx = 0xFFFF;
         // Vertices behind the eye plane. Dropping them silently was a false-negative mode:
         // with some vertices behind, the clipped polygon smears far outside the bounding box
         // of the ones in front, so the box says "does not cover" about a draw that does.
@@ -2190,6 +2191,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           const u8* vp = data + base;
           u32 mtxIdx = g_gxState.currentPnMtx;
           if (pnOff2 >= 0) mtxIdx = vp[pnOff2] / 3u;
+          if (firstMtxIdx == 0xFFFF) firstMtxIdx = mtxIdx;
           const u8* src;
           if (idxed) {
             const u32 i2 = (pd2 == GX_INDEX16) ? read_u16(vp + posOff2, true) : vp[posOff2];
@@ -2318,6 +2320,36 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         sb_covers_watch = covers;
         sb_wneg_partial = wneg > 0 && wneg < vtxCount;
         sb_wneg_full = wneg > 0 && wneg == vtxCount;
+        // SB_DEGEN_DRAW=1: report draws whose transformed geometry COLLAPSES — a screen box
+        // under 2px across with 3+ vertices. A skinned limb that renders as a sliver instead of
+        // an arm is exactly this, and it names the position matrix responsible, which is the
+        // thing to compare against the other runtime. Reports the matrix VALUES, because a
+        // matrix can be non-zero (so a zero-row check passes) and still be garbage.
+        {
+          static int s_dinit = 0;
+          static bool s_don = false;
+          if (!s_dinit) { s_dinit = 1; s_don = std::getenv("SB_DEGEN_DRAW") != nullptr; }
+          // Restricted to boxes that land ON SCREEN: a prim projecting to a single point far
+          // outside the viewport is simply offscreen geometry, not a collapsed limb.
+          const bool onScreen = sx0 > -64.f && sx1 < 704.f && sy0 > -64.f && sy1 < 512.f;
+          if (s_don && any && onScreen && vtxCount >= 3 && (sx1 - sx0) < 8.f && (sy1 - sy0) < 8.f) {
+            static long n = 0;
+            if (++n <= 40) {
+              const float* M = reinterpret_cast<const float*>(
+                  &g_gxState.pnMtx[firstMtxIdx % MaxPnMtx].pos);
+              std::fprintf(stderr,
+                           "[degen] draw#%ld verts=%u mtx=%u box=[%.1f..%.1f x %.1f..%.1f] "
+                           "M=[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f] "
+                           "tex0=%ux%u mark='%s'\n",
+                           g_sbPushedDrawCount, vtxCount, firstMtxIdx, sx0, sx1, sy0, sy1,
+                           M[0], M[1], M[2], M[3], M[4], M[5], M[6], M[7],
+                           M[8], M[9], M[10], M[11],
+                           g_gxState.textures[0].texObj.width(),
+                           g_gxState.textures[0].texObj.height(), g_sbLastMarker.c_str());
+            }
+          }
+        }
+
         // The frame gate applies to REPORTING only. `covers` must be computed on every frame,
         // because SB_SKIP_COVERING has to drop the draw in every frame to change the picture —
         // gating the computation would skip in one frame and leave the dumped one untouched.
