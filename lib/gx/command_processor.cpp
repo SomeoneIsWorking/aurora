@@ -1916,6 +1916,76 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     }
   }
 
+  // SB_UV_PROBE=<W>x<H>: for draws binding a texture of those dimensions on texmap 0, decode
+  // the first vertices' DIRECT texcoords straight out of the vertex stream. Configuration
+  // comparisons (texgen, VAT, descriptors) can all match while the VALUES differ, and nothing
+  // else reports what a draw actually samples.
+  {
+    static int s_uvInit = 0;
+    static const char* s_uvWant = nullptr;
+    if (!s_uvInit) { s_uvInit = 1; s_uvWant = std::getenv("SB_UV_PROBE"); }
+    if (s_uvWant != nullptr && s_uvWant[0] != '\0' && vtxCount > 0) {
+      const auto& t0obj = g_gxState.textures[0].texObj;
+      char dims[32];
+      std::snprintf(dims, sizeof(dims), "%ux%u", t0obj.width(), t0obj.height());
+      if (std::strcmp(dims, s_uvWant) == 0) {
+        static int n = 0;
+        if (n < 12) {
+          ++n;
+          // Byte offset of each attribute within a vertex, in GX attribute order.
+          const auto attrBytes = [&](int a) -> u32 {
+            const auto d = g_gxState.vtxDesc[a];
+            if (d == GX_NONE) return 0;
+            if (d == GX_INDEX8) return 1;
+            if (d == GX_INDEX16) return 2;
+            if (a >= GX_VA_PNMTXIDX && a <= GX_VA_TEX7MTXIDX) return 1;
+            const auto& af = g_gxState.vtxFmts[fmt].attrs[a];
+            u32 comps = 0;
+            if (a == GX_VA_POS) comps = af.cnt == GX_POS_XYZ ? 3 : 2;
+            else if (a == GX_VA_NRM) comps = 3;
+            else if (a == GX_VA_CLR0 || a == GX_VA_CLR1) comps = 0;  // handled below
+            else comps = af.cnt == GX_TEX_ST ? 2 : 1;
+            if (a == GX_VA_CLR0 || a == GX_VA_CLR1) {
+              switch (af.type) {
+              case GX_RGB565: case GX_RGBA4: return 2;
+              case GX_RGB8: case GX_RGBA6: return 3;
+              default: return 4;
+              }
+            }
+            u32 csz = 0;
+            switch (af.type) {
+            case GX_U8: case GX_S8: csz = 1; break;
+            case GX_U16: case GX_S16: csz = 2; break;
+            default: csz = 4; break;
+            }
+            return comps * csz;
+          };
+          for (int which = 0; which < 2; ++which) {
+            const int target = GX_VA_TEX0 + which;
+            if (g_gxState.vtxDesc[target] != GX_DIRECT) continue;
+            const auto& af = g_gxState.vtxFmts[fmt].attrs[target];
+            if (af.type != GX_F32) continue;   // only decode what is unambiguous
+            u32 off = 0;
+            for (int a = GX_VA_PNMTXIDX; a < target; ++a) off += attrBytes(a);
+            const u32 vsz = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize
+                                                        : calculate_last_vtx_size(fmt);
+            std::fprintf(stderr, "[uv-probe] n=%d tex%d verts=%u vsz=%u off=%u uv:", n, which,
+                         vtxCount, vsz, off);
+            const unsigned show = vtxCount < 4 ? vtxCount : 4;
+            for (unsigned v = 0; v < show; ++v) {
+              const u32 base = pos + v * vsz + off;
+              if (base + 8 > size) break;
+              const float u = read_f32(data + base, true);
+              const float vv = read_f32(data + base + 4, true);
+              std::fprintf(stderr, " (%.4f,%.4f)", u, vv);
+            }
+            std::fprintf(stderr, "\n");
+          }
+        }
+      }
+    }
+  }
+
   // SB_NDC_PROBE=<minVerts> [+ SB_NDC_MARK=<marker substring>] [+ SB_NDC_PROBE_AFTER=<retraceCount>]:
   // CPU-side replication of the vertex shader transform for indexed-position draws —
   // projects EVERY vertex through the exact matrices the GPU will use
@@ -2771,15 +2841,30 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       // GX_INDEX8=2/GX_INDEX16=3 -> real per-vertex color stream is bound).
       const auto clr0Desc = g_gxState.vtxDesc[GX_VA_CLR0];
       const auto clr1Desc = g_gxState.vtxDesc[GX_VA_CLR1];
+      // Texcoord descriptors and formats. Whether a texcoord is DIRECT or INDEXED decides
+      // which path supplies its values - inline vertex bytes, or an array base that has to be
+      // registered separately - and the two fail in completely different ways.
+      char tcvbuf[192];
+      {
+        int o = 0;
+        tcvbuf[0] = '\0';
+        for (int t = 0; t < 4 && o < static_cast<int>(sizeof(tcvbuf)) - 40; ++t) {
+          const auto d = g_gxState.vtxDesc[GX_VA_TEX0 + t];
+          if (d == GX_NONE) continue;
+          const auto& a = g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0 + t];
+          o += std::snprintf(tcvbuf + o, sizeof(tcvbuf) - o, "%st%d:d=%d cnt=%d ty=%d fr=%u",
+                             o ? "," : "", t, (int)d, (int)a.cnt, (int)a.type, a.frac);
+        }
+      }
       std::fprintf(stderr,
-                   "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u texs=[%s] tevp=[%s] tcg=[%s] zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
+                   "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u texs=[%s] tevp=[%s] tcg=[%s] tcv=[%s] zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
                    "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
                    "tev=%u ch0[light=%d matSrc=%d ambSrc=%d attnFn=%d diffFn=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
                    "a0[light=%d matSrc=%d ambSrc=%d mat=%.2f amb=%.2f mask=%02x] "
                    "prj=[%.4f %.4f %.4f %.4f cx=%.4f cy=%.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] clr0=%d clr1=%d mtxIdx=%u "
                    "cull=%d zfunc=%d acmp=[c0=%d r0=%u op=%d c1=%d r1=%u] "
                    "posmtx=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] mark='%s'\n",
-                   s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(), texbuf, tevbuf, tcgbuf,
+                   s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(), texbuf, tevbuf, tcgbuf, tcvbuf,
                    static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
                    pn[3], pn[7], pn[11], g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
                    static_cast<unsigned>(g_gxState.blendMode), vp.left, vp.top, vp.width, vp.height,
