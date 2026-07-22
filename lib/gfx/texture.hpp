@@ -94,7 +94,37 @@ struct GXTexObj_ {
     return kHwToGxFilter[get_bits(mode0, 3, 5)];
   }
   GXTexFilter mag_filter() const noexcept { return get_bits(mode0, 1, 4) != 0 ? GX_LINEAR : GX_NEAR; }
-  GXBool has_mips() const noexcept { return (flags & 1u) != 0 ? GX_TRUE : GX_FALSE; }
+  // Real GC hardware has no "this texture has mips" bit. Whether the TX unit walks a mip chain
+  // is decided by TexMode0's MIN FILTER field: the odd/mip variants (NEAR_MIP_NEAR,
+  // LIN_MIP_NEAR, NEAR_MIP_LIN, LIN_MIP_LIN) sample a chain, NEAR and LINEAR do not.
+  //
+  // flags-bit0 is an aurora-ism, set only by init_texobj_common and by the aurora extension
+  // opcode — i.e. only on the path where a runtime hands aurora a texture through the SDK. A
+  // runtime that drives textures the way the hardware does, by writing BP registers, sets a mip
+  // min-filter and a correct mode1 max_lod but never touches that flag, so mip_count() collapsed
+  // to 1 and every mipmapped texture was bound single-level. Minified ground-plane surfaces then
+  // alias into bright shimmer instead of filtering down (measured: the file-select surf band and
+  // the save-block shadow decals rendering near-white).
+  //
+  // Deriving from the min filter is the hardware's own rule and agrees with the flag wherever the
+  // flag is set: init_texobj_common writes min filter 0xC0 (LIN_MIP_LIN) exactly when it sets
+  // bit0, and 0x80 (LINEAR) otherwise. mip_count() still clamps the level count to what the
+  // dimensions actually support, so a texture whose registers request mips it has no data for
+  // cannot read past its level-0 buffer.
+  GXBool has_mips() const noexcept {
+    if ((flags & 1u) != 0) {
+      return GX_TRUE;
+    }
+    switch (min_filter()) {
+    case GX_NEAR_MIP_NEAR:
+    case GX_LIN_MIP_NEAR:
+    case GX_NEAR_MIP_LIN:
+    case GX_LIN_MIP_LIN:
+      return GX_TRUE;
+    default:
+      return GX_FALSE;
+    }
+  }
   u32 mip_count() const noexcept {
     if (has_mips() == GX_FALSE) {
       return 1;
