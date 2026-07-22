@@ -347,7 +347,8 @@ const TextureWithSampler& present_source() noexcept {
   if (g_sbDisplayPresent.view != nullptr && std::getenv("SB_NO_COPYDISP") == nullptr) {
     return g_sbDisplayPresent;
   }
-  if (g_sbPass1Present.view != nullptr && std::getenv("SB_PRESENT_PASS1") != nullptr) {
+  if (g_sbPass1Present.view != nullptr && (std::getenv("SB_PRESENT_PASS1") != nullptr ||
+                                           std::getenv("SB_PRESENT_COPY") != nullptr)) {
     return g_sbPass1Present;
   }
   return g_graphicsConfig.msaaSamples > 1 ? g_frameBufferResolved : g_frameBuffer;

@@ -2710,6 +2710,31 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       // single tex0 field cannot answer "which draw samples texture X" — asking that of a
       // render-to-texture result (an EFB copy) and seeing no match on tex0 says nothing,
       // since the copy may well be bound to a higher map.
+      // The TEV PROGRAM, not just the stage count. Two draws can both report tev=2 and
+      // compute entirely different things; without the per-stage args and ops there is no way
+      // to tell whether a suspect draw's shading matches a reference runtime's.
+      char tevbuf[512];
+      {
+        int o = 0;
+        tevbuf[0] = '\0';
+        const unsigned nst = g_gxState.numTevStages < MaxTevStages ? g_gxState.numTevStages
+                                                                   : MaxTevStages;
+        for (unsigned st = 0; st < nst && o < static_cast<int>(sizeof(tevbuf)) - 72; ++st) {
+          const auto& t = g_gxState.tevStages[st];
+          o += std::snprintf(tevbuf + o, sizeof(tevbuf) - o,
+                             "%s%u:c(%d,%d,%d,%d)o=%d,%d,%d,r%d a(%d,%d,%d,%d)o=%d,%d,%d,r%d "
+                             "tm=%d tc=%d ch=%d k=%d/%d",
+                             o ? " | " : "", st,
+                             (int)t.colorPass.a, (int)t.colorPass.b, (int)t.colorPass.c,
+                             (int)t.colorPass.d, (int)t.colorOp.op, (int)t.colorOp.bias,
+                             (int)t.colorOp.scale, (int)t.colorOp.outReg,
+                             (int)t.alphaPass.a, (int)t.alphaPass.b, (int)t.alphaPass.c,
+                             (int)t.alphaPass.d, (int)t.alphaOp.op, (int)t.alphaOp.bias,
+                             (int)t.alphaOp.scale, (int)t.alphaOp.outReg,
+                             (int)t.texMapId, (int)t.texCoordId, (int)t.channelId,
+                             (int)t.kcSel, (int)t.kaSel);
+        }
+      }
       char texbuf[256];
       {
         int o = 0;
@@ -2730,14 +2755,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       const auto clr0Desc = g_gxState.vtxDesc[GX_VA_CLR0];
       const auto clr1Desc = g_gxState.vtxDesc[GX_VA_CLR1];
       std::fprintf(stderr,
-                   "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u texs=[%s] zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
+                   "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u texs=[%s] tevp=[%s] zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
                    "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
                    "tev=%u ch0[light=%d matSrc=%d ambSrc=%d attnFn=%d diffFn=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
                    "a0[light=%d matSrc=%d ambSrc=%d mat=%.2f amb=%.2f mask=%02x] "
                    "prj=[%.4f %.4f %.4f %.4f cx=%.4f cy=%.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] clr0=%d clr1=%d mtxIdx=%u "
                    "cull=%d zfunc=%d acmp=[c0=%d r0=%u op=%d c1=%d r1=%u] "
                    "posmtx=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] mark='%s'\n",
-                   s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(), texbuf,
+                   s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(), texbuf, tevbuf,
                    static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
                    pn[3], pn[7], pn[11], g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
                    static_cast<unsigned>(g_gxState.blendMode), vp.left, vp.top, vp.width, vp.height,

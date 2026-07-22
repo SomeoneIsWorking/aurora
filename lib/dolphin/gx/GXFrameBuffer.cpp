@@ -162,7 +162,18 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   // candidate present source (the EFB captured just before it was cleared =
   // the pre-clear pass's full content). Lets end_frame present that pass
   // instead of the accumulated EFB, to test where the main scene lives.
-  if (clear && std::getenv("SB_PRESENT_PASS1") != nullptr) {
+  // SB_PRESENT_COPY=<W>x<H>: present the resolved texture of the copy with those DESTINATION
+  // dimensions instead of the finished frame. SB_PRESENT_PASS1 only reaches the first
+  // clear=true copy, so a render-to-texture result taken with clear=0 — a water reflection,
+  // say — could not be inspected at all, and its content had to be inferred. With this, a
+  // frame dump shows the copy itself.
+  bool presentThisCopy = false;
+  if (const char* want = std::getenv("SB_PRESENT_COPY"); want != nullptr && want[0] != '\0') {
+    char dims[32];
+    std::snprintf(dims, sizeof(dims), "%ux%u", dstWidth, dstHeight);
+    presentThisCopy = std::strcmp(dims, want) == 0;
+  }
+  if ((presentThisCopy || (clear && std::getenv("SB_PRESENT_PASS1") != nullptr))) {
     if (handle.handle && handle.handle->sampleTextureView) {
       webgpu::g_sbPass1Present = webgpu::TextureWithSampler{
           .texture = handle.handle->texture,
