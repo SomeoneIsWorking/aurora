@@ -2735,6 +2735,23 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                              (int)t.kcSel, (int)t.kaSel);
         }
       }
+      // Texgen configuration. A stage naming a GENERATED texcoord (tc=N) says nothing about
+      // WHERE it samples without this: the type, source, and matrices are what map a vertex
+      // onto the texture, and a draw can match in every other respect while sampling an
+      // entirely different part of the image.
+      char tcgbuf[256];
+      {
+        int o = 0;
+        tcgbuf[0] = '\0';
+        const unsigned ntc = g_gxState.numTexGens < MaxTexCoord ? g_gxState.numTexGens
+                                                                : MaxTexCoord;
+        for (unsigned t = 0; t < ntc && o < static_cast<int>(sizeof(tcgbuf)) - 40; ++t) {
+          const auto& c = g_gxState.tcgs[t];
+          o += std::snprintf(tcgbuf + o, sizeof(tcgbuf) - o, "%s%u:ty=%d src=%d mtx=%d pm=%d n=%d",
+                             o ? "," : "", t, (int)c.type, (int)c.src, (int)c.mtx,
+                             (int)c.postMtx, c.normalize ? 1 : 0);
+        }
+      }
       char texbuf[256];
       {
         int o = 0;
@@ -2755,14 +2772,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       const auto clr0Desc = g_gxState.vtxDesc[GX_VA_CLR0];
       const auto clr1Desc = g_gxState.vtxDesc[GX_VA_CLR1];
       std::fprintf(stderr,
-                   "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u texs=[%s] tevp=[%s] zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
+                   "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u texs=[%s] tevp=[%s] tcg=[%s] zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
                    "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
                    "tev=%u ch0[light=%d matSrc=%d ambSrc=%d attnFn=%d diffFn=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
                    "a0[light=%d matSrc=%d ambSrc=%d mat=%.2f amb=%.2f mask=%02x] "
                    "prj=[%.4f %.4f %.4f %.4f cx=%.4f cy=%.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] clr0=%d clr1=%d mtxIdx=%u "
                    "cull=%d zfunc=%d acmp=[c0=%d r0=%u op=%d c1=%d r1=%u] "
                    "posmtx=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] mark='%s'\n",
-                   s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(), texbuf, tevbuf,
+                   s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(), texbuf, tevbuf, tcgbuf,
                    static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
                    pn[3], pn[7], pn[11], g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
                    static_cast<unsigned>(g_gxState.blendMode), vp.left, vp.top, vp.width, vp.height,
