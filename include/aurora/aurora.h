@@ -159,6 +159,20 @@ void aurora_set_present_aspect(uint32_t width, uint32_t height);
  * bytes as GC-native big-endian (the .dff wire format). */
 void aurora_fifo_replay(const uint8_t* data, uint32_t size, int bigEndian);
 
+/* Frame sink: receive the presented frame as tightly-packed RGBA8 (top-left
+ * origin), the same pixels SB_DUMP_FRAME writes, delivered to a callback
+ * instead of a file. Intended for IN-PROCESS parity comparison, where a second
+ * renderer's output can be scored against aurora's on the SAME frame with no
+ * file round-trip and no hand-aligned frame indices.
+ *
+ * The capture rides the existing asynchronous readback: the copy is encoded at
+ * one present and mapped at the next, so the callback arrives a frame or two
+ * later and the GPU is never stalled. `everyNFrames` <= 0 disables. Passing a
+ * null fn also disables. The bytes are only valid for the duration of the call.
+ */
+typedef void (*AuroraFrameSink)(const uint8_t* rgba, uint32_t width, uint32_t height, void* user);
+void aurora_set_frame_sink(AuroraFrameSink fn, void* user, int everyNFrames);
+
 void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);
 void aurora_set_background_input(bool value);

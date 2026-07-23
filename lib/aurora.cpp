@@ -34,6 +34,9 @@
 
 extern "C" double g_sbGxProf[7];
 namespace aurora {
+static AuroraFrameSink g_frameSink = nullptr;
+static void* g_frameSinkUser = nullptr;
+static int g_frameSinkEvery = 0;
 
 AuroraConfig g_config;
 uint32_t g_sdlCustomEventsStart;
@@ -409,7 +412,9 @@ void end_frame() noexcept {
       wgpu::Buffer buffer;
       uint32_t width = 0, height = 0;
       bool swapRB = false;  // surface is BGRA8 -> swap R/B to emit RGBA8
-      std::string path;
+      std::string path;     // empty => deliver to the frame sink instead of a file
+      AuroraFrameSink sink = nullptr;
+      void* sinkUser = nullptr;
     };
     static int s_dumpFramesLeft = -2;
     static const char* s_dumpPath = nullptr;
@@ -423,6 +428,9 @@ void end_frame() noexcept {
     // the whole boot/title progression from a single run.
     static int s_dumpEvery = -1;
     static int s_dumpSeq = 0;
+    // Frame sink (aurora_set_frame_sink): an independent capture cadence, so an in-process
+    // parity comparison can run alongside — or without — the file dumps.
+    static int s_sinkCountdown = 0;
     if (s_dumpFramesLeft == -2) {
       s_dumpPath = std::getenv("SB_DUMP_FRAME");
       if (s_dumpPath && s_dumpPath[0]) {
@@ -457,6 +465,29 @@ void end_frame() noexcept {
                 job->buffer.GetConstMappedRange(0, static_cast<uint64_t>(bpr) * job->height));
             if (!mapped) {
               Log.error("SB_DUMP_FRAME: GetConstMappedRange returned null ({})", job->path);
+              return;
+            }
+            if (job->sink != nullptr) {
+              // Repack into tightly-packed RGBA8: the mapped rows are padded to a
+              // 256-byte stride, which a consumer expecting width*4 would misread.
+              const uint32_t rowBytes = static_cast<uint32_t>(job->width) * 4;
+              std::vector<uint8_t> frame(static_cast<size_t>(rowBytes) * job->height);
+              for (uint32_t y = 0; y < job->height; ++y) {
+                const uint8_t* src = mapped + static_cast<size_t>(y) * bpr;
+                uint8_t* dst = frame.data() + static_cast<size_t>(y) * rowBytes;
+                if (job->swapRB) {
+                  for (uint32_t p = 0; p < rowBytes; p += 4) {
+                    dst[p + 0] = src[p + 2];
+                    dst[p + 1] = src[p + 1];
+                    dst[p + 2] = src[p + 0];
+                    dst[p + 3] = src[p + 3];
+                  }
+                } else {
+                  std::memcpy(dst, src, rowBytes);
+                }
+              }
+              job->sink(frame.data(), job->width, job->height, job->sinkUser);
+              job->buffer.Unmap();
               return;
             }
             FILE* f = std::fopen(job->path.c_str(), "wb");
@@ -534,6 +565,35 @@ void end_frame() noexcept {
       // present: the countdown consumes one present per unit), or disarm
       // for the one-shot.
       s_dumpFramesLeft = s_dumpEvery > 0 ? s_dumpEvery - 1 : -1;
+    }
+    if (g_frameSink != nullptr && g_frameSinkEvery > 0 && --s_sinkCountdown <= 0) {
+      s_sinkCountdown = g_frameSinkEvery;
+      const auto& src = webgpu::present_source();
+      auto job = std::make_shared<SbDumpJob>();
+      job->width = src.size.width;
+      job->height = src.size.height;
+      job->swapRB = (webgpu::g_graphicsConfig.surfaceConfiguration.format ==
+                     wgpu::TextureFormat::BGRA8Unorm);
+      job->sink = g_frameSink;
+      job->sinkUser = g_frameSinkUser;   // path stays empty: routed to the sink
+      const uint32_t bytesPerRow = ((job->width * 4 + 255) / 256) * 256;
+      const wgpu::BufferDescriptor bd{
+          .label = "frame sink readback",
+          .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead,
+          .size = static_cast<uint64_t>(bytesPerRow) * job->height,
+      };
+      job->buffer = webgpu::g_device.CreateBuffer(&bd);
+      const wgpu::TexelCopyTextureInfo srcInfo{
+          .texture = src.texture, .mipLevel = 0, .origin = {0, 0, 0},
+          .aspect = wgpu::TextureAspect::All,
+      };
+      const wgpu::TexelCopyBufferInfo dstInfo{
+          .layout = {.offset = 0, .bytesPerRow = bytesPerRow, .rowsPerImage = job->height},
+          .buffer = job->buffer,
+      };
+      const wgpu::Extent3D copySize{job->width, job->height, 1};
+      encoder.CopyTextureToBuffer(&srcInfo, &dstInfo, &copySize);
+      s_dumpAwaitingMap.push_back(std::move(job));
     }
     const bool headless = window::is_headless();
     wgpu::Texture currentTexture;
@@ -743,6 +803,11 @@ const AuroraBackend* aurora_get_available_backends(size_t* count) {
     *count = aurora::PreferredBackendOrder.size();
   }
   return aurora::PreferredBackendOrder.data();
+}
+void aurora_set_frame_sink(AuroraFrameSink fn, void* user, int everyNFrames) {
+  aurora::g_frameSink = fn;
+  aurora::g_frameSinkUser = user;
+  aurora::g_frameSinkEvery = (fn != nullptr) ? everyNFrames : 0;
 }
 void aurora_set_log_level(AuroraLogLevel level) { aurora::g_config.logLevel = level; }
 void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusLost = value; }
