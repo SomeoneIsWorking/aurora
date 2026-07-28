@@ -470,6 +470,18 @@ static void handle_bp(u32 value, bool bigEndian);
 static void handle_cp(u8 addr, u32 value, bool bigEndian);
 static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian);
 static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian);
+
+// Per-draw state oracle hooks, defined by the recomp runtime. Weak so aurora links without it, and
+// a plain C ABI over arrays so no recomp header has to reach into this layer.
+extern "C" {
+__attribute__((weak)) bool sbr_state_diff_enabled();
+__attribute__((weak)) void sbr_state_oracle_aurora_frame_end();
+__attribute__((weak)) void sbr_state_oracle_aurora_raw(unsigned numStages, unsigned numTexGens,
+                                                       const unsigned char* texmap,
+                                                       const unsigned char* texcoord,
+                                                       const unsigned char* texEnable,
+                                                       const unsigned* unitId);
+}
 static void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
 
 // Ring buffer of recent draws — dumped alongside the opcode ring buffer at
@@ -3092,6 +3104,33 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   u32 vtxSize;
   if (g_gxState.lastVtxFmt == fmt) vtxSize = g_gxState.lastVtxSize;
   else vtxSize = calculate_last_vtx_size(fmt);
+
+  // PER-DRAW STATE ORACLE (sms-recomp/runtime/state_oracle.h). Aurora renders this stream
+  // correctly, so its state at each draw is the reference the native path is checked against.
+  // Weak symbols: aurora still links standalone, where these do nothing.
+  if (sbr_state_diff_enabled != nullptr && sbr_state_oracle_aurora_raw != nullptr &&
+      sbr_state_diff_enabled()) {
+    // Aurora processes one contiguous buffer per frame, so a position that goes BACKWARDS is the
+    // start of the next frame's buffer — the only frame boundary visible from inside this layer.
+    static thread_local u32 s_lastCmdPos = 0;
+    if (cmdPos < s_lastCmdPos && sbr_state_oracle_aurora_frame_end != nullptr)
+      sbr_state_oracle_aurora_frame_end();
+    s_lastCmdPos = cmdPos;
+    unsigned char texmap[16]{}, texcoord[16]{}, texEnable[16]{};
+    unsigned unitId[8]{};
+    for (u32 k = 0; k < 16 && k < g_gxState.tevStages.size(); ++k) {
+      const auto& ts = g_gxState.tevStages[k];
+      const bool enabled = ts.texMapId != GX_TEXMAP_NULL &&
+                           (static_cast<u32>(ts.texMapId) & 0x100u) == 0;
+      texEnable[k] = enabled ? 1 : 0;
+      texmap[k] = static_cast<unsigned char>(static_cast<u32>(ts.texMapId) & 7);
+      texcoord[k] = static_cast<unsigned char>(static_cast<u32>(ts.texCoordId) & 7);
+    }
+    for (u32 m = 0; m < 8 && m < g_gxState.textures.size(); ++m)
+      unitId[m] = g_gxState.textures[m].texObj.texObjId;
+    sbr_state_oracle_aurora_raw(g_gxState.numTevStages, g_gxState.numTexGens, texmap, texcoord,
+                                texEnable, unitId);
+  }
 
   s_recentDraws[s_recentDrawHead] = {cmdPos, cmd, vtxCount, vtxSize};
   s_recentDrawHead = (s_recentDrawHead + 1) % kRecentDrawN;
