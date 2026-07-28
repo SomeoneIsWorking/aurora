@@ -476,7 +476,8 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
 extern "C" {
 __attribute__((weak)) bool sbr_state_diff_enabled();
 __attribute__((weak)) void sbr_state_oracle_aurora_frame_end();
-__attribute__((weak)) void sbr_state_oracle_aurora_raw(unsigned numStages, unsigned numTexGens,
+__attribute__((weak)) void sbr_state_oracle_aurora_raw(unsigned pos, unsigned numStages,
+                                                      unsigned numTexGens,
                                                        const unsigned char* texmap,
                                                        const unsigned char* texcoord,
                                                        const unsigned char* texEnable,
@@ -3128,8 +3129,8 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
     }
     for (u32 m = 0; m < 8 && m < g_gxState.textures.size(); ++m)
       unitId[m] = g_gxState.textures[m].texObj.texObjId;
-    sbr_state_oracle_aurora_raw(g_gxState.numTevStages, g_gxState.numTexGens, texmap, texcoord,
-                                texEnable, unitId);
+    sbr_state_oracle_aurora_raw(cmdPos, g_gxState.numTevStages, g_gxState.numTexGens, texmap,
+                                texcoord, texEnable, unitId);
   }
 
   s_recentDraws[s_recentDrawHead] = {cmdPos, cmd, vtxCount, vtxSize};
