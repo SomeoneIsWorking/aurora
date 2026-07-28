@@ -481,7 +481,16 @@ __attribute__((weak)) void sbr_state_oracle_aurora_raw(unsigned pos, unsigned nu
                                                        const unsigned char* texmap,
                                                        const unsigned char* texcoord,
                                                        const unsigned char* texEnable,
-                                                       const unsigned* unitId);
+                                                       const unsigned* unitId,
+                                                       unsigned numChans,
+                                                       const unsigned short* chanCtrl,
+                                                       const unsigned* ambColor,
+                                                       const unsigned* matColor,
+                                                       const unsigned char* rasChannel,
+                                                       const unsigned* cWord, const unsigned* aWord,
+                                                       const unsigned short* kSel,
+                                                       const unsigned* konst,
+                                                       const unsigned long long* tevReg);
 }
 static void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
 
@@ -3119,6 +3128,36 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
     s_lastCmdPos = cmdPos;
     unsigned char texmap[16]{}, texcoord[16]{}, texEnable[16]{};
     unsigned unitId[8]{};
+    // The pixel-state block, reconstructed into the same RAW hardware encodings the recomp's
+    // sbr_draw_state_fill packs (state_oracle.h documents the layouts), so the comparison is
+    // encoding-for-encoding rather than enum-for-enum.
+    unsigned char rasChannel[16]{};
+    unsigned cWord[16]{}, aWord[16]{};
+    unsigned short kSel[16]{};
+    unsigned short chanCtrl[4]{};
+    unsigned ambColor[2]{}, matColor[2]{}, konst[4]{};
+    unsigned long long tevReg[4]{};
+    const auto q8 = [](const Vec4<float>& v) {
+      unsigned r = 0;
+      for (int c = 0; c < 4; ++c) {
+        long x = std::lround((double)v[c] * 255.0);
+        if (x < 0) x = 0;
+        if (x > 255) x = 255;
+        r = (r << 8) | (unsigned)x;
+      }
+      return r;
+    };
+    const auto rawOp = [](const TevOp& o, unsigned& bias, unsigned& sub, unsigned& scale) {
+      if (static_cast<unsigned>(o.op) >= 8) {   // compare mode: bias field is 3 on the wire
+        bias = 3;
+        sub = (static_cast<unsigned>(o.op) - 8) & 1;
+        scale = ((static_cast<unsigned>(o.op) - 8) >> 1) & 3;
+      } else {
+        bias = static_cast<unsigned>(o.bias);
+        sub = static_cast<unsigned>(o.op) & 1;
+        scale = static_cast<unsigned>(o.scale);
+      }
+    };
     for (u32 k = 0; k < 16 && k < g_gxState.tevStages.size(); ++k) {
       const auto& ts = g_gxState.tevStages[k];
       const bool enabled = ts.texMapId != GX_TEXMAP_NULL &&
@@ -3126,11 +3165,58 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
       texEnable[k] = enabled ? 1 : 0;
       texmap[k] = static_cast<unsigned char>(static_cast<u32>(ts.texMapId) & 7);
       texcoord[k] = static_cast<unsigned char>(static_cast<u32>(ts.texCoordId) & 7);
+      switch (ts.channelId) {   // canonical hw ras values {0,1,5,6,7}
+      case GX_COLOR0A0: rasChannel[k] = 0; break;
+      case GX_COLOR1A1: rasChannel[k] = 1; break;
+      case GX_ALPHA_BUMP: rasChannel[k] = 5; break;
+      case GX_ALPHA_BUMPN: rasChannel[k] = 6; break;
+      case GX_COLOR_ZERO: rasChannel[k] = 7; break;
+      default: rasChannel[k] = 7; break;
+      }
+      unsigned bias, sub, scale;
+      rawOp(ts.colorOp, bias, sub, scale);
+      cWord[k] = static_cast<unsigned>(ts.colorPass.d) | static_cast<unsigned>(ts.colorPass.c) << 4 |
+                 static_cast<unsigned>(ts.colorPass.b) << 8 |
+                 static_cast<unsigned>(ts.colorPass.a) << 12 | bias << 16 | sub << 18 |
+                 (ts.colorOp.clamp ? 1u : 0u) << 19 | scale << 20 |
+                 static_cast<unsigned>(ts.colorOp.outReg) << 22;
+      rawOp(ts.alphaOp, bias, sub, scale);
+      aWord[k] = static_cast<unsigned>(ts.alphaPass.d) << 4 |
+                 static_cast<unsigned>(ts.alphaPass.c) << 7 |
+                 static_cast<unsigned>(ts.alphaPass.b) << 10 |
+                 static_cast<unsigned>(ts.alphaPass.a) << 13 | bias << 16 | sub << 18 |
+                 (ts.alphaOp.clamp ? 1u : 0u) << 19 | scale << 20 |
+                 static_cast<unsigned>(ts.alphaOp.outReg) << 22;
+      kSel[k] = static_cast<unsigned short>(static_cast<unsigned>(ts.kcSel) |
+                                            static_cast<unsigned>(ts.kaSel) << 8);
     }
     for (u32 m = 0; m < 8 && m < g_gxState.textures.size(); ++m)
       unitId[m] = g_gxState.textures[m].texObj.texObjId;
+    for (u32 c = 0; c < 4 && c < MaxColorChannels; ++c) {
+      const auto& cfg = g_gxState.colorChannelConfig[c];
+      const unsigned attnFn = cfg.attnFn == GX_AF_NONE ? 0u : (cfg.attnFn == GX_AF_SPEC ? 1u : 2u);
+      const unsigned mask =
+          static_cast<unsigned>(g_gxState.colorChannelState[c].lightMask.to_ulong() & 0xFFu);
+      chanCtrl[c] = static_cast<unsigned short>(
+          (cfg.matSrc == GX_SRC_VTX ? 1u : 0u) | (cfg.lightingEnabled ? 2u : 0u) |
+          (cfg.ambSrc == GX_SRC_VTX ? 4u : 0u) | ((static_cast<unsigned>(cfg.diffFn) & 3u) << 3) |
+          (attnFn << 5) | (mask << 8));
+    }
+    for (u32 c = 0; c < 2; ++c) {
+      ambColor[c] = q8(g_gxState.colorChannelState[c].ambColor);
+      matColor[c] = q8(g_gxState.colorChannelState[c].matColor);
+    }
+    for (u32 j = 0; j < 4; ++j) {
+      konst[j] = q8(g_gxState.kcolors[j]);
+      unsigned long long r = 0;
+      for (int c = 0; c < 4; ++c)
+        r = (r << 16) |
+            (unsigned short)(short)std::lround((double)g_gxState.colorRegs[j][c] * 255.0);
+      tevReg[j] = r;
+    }
     sbr_state_oracle_aurora_raw(cmdPos, g_gxState.numTevStages, g_gxState.numTexGens, texmap,
-                                texcoord, texEnable, unitId);
+                                texcoord, texEnable, unitId, g_gxState.numChans, chanCtrl,
+                                ambColor, matColor, rasChannel, cWord, aWord, kSel, konst, tevReg);
   }
 
   s_recentDraws[s_recentDrawHead] = {cmdPos, cmd, vtxCount, vtxSize};
