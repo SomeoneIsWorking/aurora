@@ -491,7 +491,8 @@ __attribute__((weak)) void sbr_state_oracle_aurora_raw(unsigned pos, unsigned nu
                                                        const unsigned short* kSel,
                                                        const unsigned* konst,
                                                        const unsigned long long* tevReg,
-                                                       unsigned raster, unsigned blend);
+                                                       unsigned raster, unsigned blend,
+                                                       const int* scissor, unsigned cull);
 }
 static void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
 
@@ -3234,10 +3235,17 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
                                                                        : 0u;
     const unsigned blendBits = blendMode | (((unsigned)g_gxState.blendFacSrc & 15u) << 3) |
                                (((unsigned)g_gxState.blendFacDst & 15u) << 7);
+    // SCISSOR and CULL — the two pieces of per-draw raster state the oracle never carried. Aurora
+    // confines every draw to this rect (BP 0x20/0x21) and applies GENMODE's cull mode; the recomp
+    // renderer does neither, so comparing them tells us whether the hardware is CLIPPING draws that
+    // this port paints across the whole target.
+    const int scissorRect[4] = {g_gxState.logicalScissor.x, g_gxState.logicalScissor.y,
+                                g_gxState.logicalScissor.width, g_gxState.logicalScissor.height};
     sbr_state_oracle_aurora_raw(cmdPos, g_gxState.numTevStages, g_gxState.numTexGens, texmap,
                                 texcoord, texEnable, unitId, g_gxState.numChans, chanCtrl,
                                 ambColor, matColor, rasChannel, cWord, aWord, kSel, konst, tevReg,
-                                rasterBits, blendBits);
+                                rasterBits, blendBits, scissorRect,
+                                (unsigned)g_gxState.cullMode);
   }
 
   s_recentDraws[s_recentDrawHead] = {cmdPos, cmd, vtxCount, vtxSize};
