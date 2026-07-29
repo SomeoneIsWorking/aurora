@@ -1135,3 +1135,17 @@ wgpu::SamplerDescriptor aurora::gfx::TextureBind::get_descriptor() const noexcep
       .maxAnisotropy = maxAnisotropy,
   };
 } // namespace aurora::gx
+
+
+// Does aurora hold a GPU-side copy surface for this guest address? EFB copy destinations are
+// serviced entirely on the GPU and never written back to guest memory, so a texture bound at such
+// an address decodes to zeros from RAM while aurora samples a real rendered surface. A port that
+// reads guest memory therefore renders black exactly where aurora is correct — and the only way to
+// tell that apart from a shading bug is to ask aurora directly.
+extern "C" int sbr_aurora_has_copy_texture(unsigned int guestAddr) {
+  for (const auto& [ptr, ref] : aurora::gx::g_gxState.copyTextures) {
+    const uintptr_t p = reinterpret_cast<uintptr_t>(ptr);
+    if ((unsigned int)(p & 0x01FFFFFFu) == (guestAddr & 0x01FFFFFFu)) return 1;
+  }
+  return (int)aurora::gx::g_gxState.copyTextures.size() > 0 ? 0 : -1;
+}
