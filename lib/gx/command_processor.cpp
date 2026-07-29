@@ -3190,8 +3190,15 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
       kSel[k] = static_cast<unsigned short>(static_cast<unsigned>(ts.kcSel) |
                                             static_cast<unsigned>(ts.kaSel) << 8);
     }
-    for (u32 m = 0; m < 8 && m < g_gxState.textures.size(); ++m)
-      unitId[m] = g_gxState.textures[m].texObj.texObjId;
+    // Report the BP-REGISTER image base, not the SDK texObj slot. `textures[m].texObj` is set by
+    // GXLoadTexObj, which J3D almost never calls — it binds by replaying display lists that write
+    // TX_SETIMAGE3 directly — so that slot is stale by construction and comparing it against the
+    // recomp's BP-derived address compares two different quantities. That mismatch reads exactly
+    // like "aurora holds the previous texture" and sent an investigation after a bind-timing bug
+    // that does not exist. Same encoding as the recomp side: image3 bits 0-23 are the base in
+    // 32-byte units, masked to the physical address it packs.
+    for (u32 m = 0; m < 8 && m < g_gxState.loadedTextures.size(); ++m)
+      unitId[m] = ((g_gxState.loadedTextures[m].image3 & 0x00FFFFFFu) << 5) & 0x01FFFFFFu;
     for (u32 c = 0; c < 4 && c < MaxColorChannels; ++c) {
       const auto& cfg = g_gxState.colorChannelConfig[c];
       const unsigned attnFn = cfg.attnFn == GX_AF_NONE ? 0u : (cfg.attnFn == GX_AF_SPEC ? 1u : 2u);
