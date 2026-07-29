@@ -490,7 +490,8 @@ __attribute__((weak)) void sbr_state_oracle_aurora_raw(unsigned pos, unsigned nu
                                                        const unsigned* cWord, const unsigned* aWord,
                                                        const unsigned short* kSel,
                                                        const unsigned* konst,
-                                                       const unsigned long long* tevReg);
+                                                       const unsigned long long* tevReg,
+                                                       unsigned raster, unsigned blend);
 }
 static void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
 
@@ -3221,9 +3222,22 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
             (unsigned short)(short)std::lround((double)g_gxState.colorRegs[j][c] * 255.0);
       tevReg[j] = r;
     }
+    // Raster state, packed identically to the recomp side (state_oracle.h documents the layout).
+    // This is the state that decides whether a draw COVERS what is behind it, and it was never
+    // part of the comparison.
+    const unsigned rasterBits = (unsigned)(g_gxState.depthCompare ? 1u : 0u) |
+                                ((unsigned)(g_gxState.depthUpdate ? 1u : 0u) << 1) |
+                                (((unsigned)g_gxState.depthFunc & 7u) << 2);
+    const unsigned blendMode = g_gxState.blendMode == GX_BM_BLEND      ? 1u
+                               : g_gxState.blendMode == GX_BM_LOGIC    ? 2u
+                               : g_gxState.blendMode == GX_BM_SUBTRACT ? 3u
+                                                                       : 0u;
+    const unsigned blendBits = blendMode | (((unsigned)g_gxState.blendFacSrc & 15u) << 3) |
+                               (((unsigned)g_gxState.blendFacDst & 15u) << 7);
     sbr_state_oracle_aurora_raw(cmdPos, g_gxState.numTevStages, g_gxState.numTexGens, texmap,
                                 texcoord, texEnable, unitId, g_gxState.numChans, chanCtrl,
-                                ambColor, matColor, rasChannel, cWord, aWord, kSel, konst, tevReg);
+                                ambColor, matColor, rasChannel, cWord, aWord, kSel, konst, tevReg,
+                                rasterBits, blendBits);
   }
 
   s_recentDraws[s_recentDrawHead] = {cmdPos, cmd, vtxCount, vtxSize};
