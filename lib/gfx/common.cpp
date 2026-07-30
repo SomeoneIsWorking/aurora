@@ -25,6 +25,7 @@
 #include <ranges>
 #include <string>
 #include <thread>
+#include <type_traits>
 
 #include <absl/container/flat_hash_map.h>
 #include <magic_enum.hpp>
@@ -57,7 +58,13 @@ static std::string pass_label(std::string_view kind) {
 
 constexpr uint64_t StagingBufferSize = UniformBufferSize + VertexBufferSize + IndexBufferSize + StorageBufferSize +
                                        (UseTextureBuffer ? TextureUploadSize : 0);
-constexpr size_t FrameSlotCount = 2;
+// THREE, not two, because of the replay present (AURORA_REPLAY_PRESENT, see
+// capture_replay_snapshot below): that path emits TWO packets per game tick, and with only two
+// slots the next tick's begin_frame blocks in acquire_frame_slot until the worker has retired the
+// oldest frame — destroying the CPU/GPU overlap that the pool exists to provide. The symptom is
+// not a hang but a silent one: "60fps mode is SLOWER than 30fps". Each slot costs one staging
+// buffer (StagingBufferSize, ~101 MB with the sizes in common.hpp) plus its packet.
+constexpr size_t FrameSlotCount = 3;
 constexpr size_t StagingBufferCount = FrameSlotCount + 3;
 
 struct StagingHighWater {
@@ -237,6 +244,10 @@ struct FramePacket {
   size_t stagingBuffer = 0;
   StagingHighWater copied;
   AuroraStats stats{};
+  // This packet is a replay emission (a re-present of the previous packet's recorded content)
+  // rather than a frame the game drew. It must not publish stats, and it must not have recorded
+  // any geometry of its own — see install_replay_snapshot / end_frame.
+  bool replayEmission = false;
 };
 
 static std::array<FramePacket, FrameSlotCount> g_framePackets;
@@ -510,6 +521,140 @@ static void enqueue_pass(FramePacket& frame, size_t frameSlot, uint32_t passInde
   const auto opIndex = static_cast<uint32_t>(frame.ops.size());
   frame.ops.emplace_back(capture_frame_op(frame, FrameOpType::RenderPass, passIndex));
   enqueue_op(frame, frameSlot, opIndex);
+}
+
+// ---------------------------------------------------------------------------
+// Replay present (AURORA_REPLAY_PRESENT=1): present one recorded frame TWICE.
+//
+// Step 2 of the interpolated-60fps ladder, and deliberately a CONTROL rather than a feature: both
+// presents of a tick carry byte-identical content, so anything that differs between them is the
+// EFB's own history and not the replay. Pass 0 is LoadOp::Load with no eager clear (see the
+// LAZY/NO EAGER CLEAR note in begin_frame), so a replayed frame starts from the EFB as the first
+// emission LEFT it rather than as it FOUND it. Whether that is observable cannot be settled by
+// reading the code; this path is how it gets measured.
+//
+// What is copied, and what deliberately is NOT:
+//
+//   * renderPasses, with their CommandLists, are deep-copied. RenderPass's members are a string,
+//     refcounted wgpu views/textures, a shared_ptr TextureHandle and a vector of palette convs —
+//     all copyable, all refcount-SHARING, so the copy aliases exactly the same GPU objects.
+//
+//   * the WHOLE uniform region [0, uniforms.size()) is shadowed into cacheable RAM and re-pushed
+//     at offset 0 of the replay packet, so every uniformRange.offset recorded in the copied
+//     commands still resolves to the same bytes. It has to be the whole region and not per-draw
+//     blocks: resolve_pass pushes its UV transform (resolveUniformRange) into the same buffer,
+//     and tex_copy_conv reads it back at encode time.
+//
+//   * verts / indices / storage are NOT re-pushed. DrawData.vertRange is never read at encode
+//     time — vertex and storage data are reached through g_staticBindGroup, built once at init
+//     over the whole global buffers — and the global buffers still hold the first emission's
+//     bytes because nothing writes them in between. Pushing nothing also skips their staging
+//     copies automatically: needs_staging_copy gates on highWater > copied, and with nothing
+//     pushed both are 0. Do NOT "help" that along by pre-seeding frame.copied — a later push
+//     would then satisfy highWater <= copied, emit no copy at all, and silently draw the
+//     PREVIOUS frame's bytes. The zero-length assert in end_frame is the guard for the day this
+//     path stops being a pure copy.
+//
+//   * FrameOps are NOT copied. A FrameOp holds raw pointers into its own packet's renderPasses
+//     deque and is resolved through its frame SLOT; the original's pointers die the moment its
+//     end_frame does `packet = {}`. The replay re-runs capture_frame_op/enqueue_pass over its own
+//     deque and its own slot instead.
+// ---------------------------------------------------------------------------
+struct ReplaySnapshot {
+  RenderPassList renderPasses;
+  std::vector<uint8_t> uniforms;
+  bool valid = false;
+};
+static ReplaySnapshot g_replaySnapshot;
+
+bool replay_present_enabled() noexcept {
+  // Read once. An env switch rather than a host-called setter because that is aurora's own
+  // convention for this class of knob (SB_CLEAR_OVERRIDE, SB_PROFILE_GFX, SB_DUMP_FRAME are all
+  // read-once getenv right where they act), and because the two callers of the replay path are
+  // both INSIDE aurora's end_frame — a setter would only add a way for the host to leave it
+  // half-configured.
+  static const bool s_enabled = [] {
+    const char* e = std::getenv("AURORA_REPLAY_PRESENT");
+    return e != nullptr && e[0] != '\0' && e[0] != '0';
+  }();
+  return s_enabled;
+}
+
+bool has_replay_snapshot() noexcept { return g_replaySnapshot.valid; }
+
+bool capture_replay_snapshot() {
+  ZoneScoped;
+  // Command::Data is a UNION: a member with a non-trivial copy ctor or destructor (rmlui::DrawData
+  // arrives under AURORA_ENABLE_RMLUI) makes the CommandList copy below silently wrong rather than
+  // merely slow, because the union copies as bytes and nothing runs the member's own copy. Break
+  // the build instead of the frame.
+  static_assert(std::is_trivially_copyable_v<Command::Data>,
+                "Command::Data is a union; a non-trivially-copyable member makes the replay's "
+                "CommandList copy wrong. Give Command a real copy constructor before enabling it.");
+#if !defined(AURORA_GFX_DEBUG_GROUPS)
+  // Command itself is trivially copyable only without the debug-group string vector; that vector
+  // copies correctly (it is not in the union), it is just not free.
+  static_assert(std::is_trivially_copyable_v<Command>, "Command is expected to be a POD command record");
+#endif
+  if (g_recordingFrame == nullptr) {
+    Log.error("capture_replay_snapshot: no frame is recording; nothing to snapshot");
+    return false;
+  }
+  auto& frame = *g_recordingFrame;
+  g_replaySnapshot.renderPasses = frame.renderPasses;
+  // frame.uniforms is a view over WRITE-mapped GPU staging memory, which is usually
+  // write-combined: reading it back is legal but uncached, and this memcpy is the one genuinely
+  // expensive part of the snapshot. It is also unavoidable — end_frame unmaps that staging buffer
+  // long before the replay emission needs the bytes. AURORA_REPLAY_LOG_EVERY reports the size so
+  // the cost stays a measured number.
+  g_replaySnapshot.uniforms.resize(frame.uniforms.size());
+  if (!g_replaySnapshot.uniforms.empty()) {
+    memcpy(g_replaySnapshot.uniforms.data(), frame.uniforms.data(), g_replaySnapshot.uniforms.size());
+  }
+  g_replaySnapshot.valid = true;
+  return true;
+}
+
+bool install_replay_snapshot() {
+  ZoneScoped;
+  if (!g_replaySnapshot.valid) {
+    Log.error("install_replay_snapshot: no snapshot has been captured; the replay frame would present "
+              "whatever the EFB happens to hold");
+    return false;
+  }
+  if (g_recordingFrame == nullptr) {
+    Log.error("install_replay_snapshot: no frame is recording; call begin_frame first");
+    return false;
+  }
+  auto& frame = *g_recordingFrame;
+  ASSERT(frame.uniforms.size() == 0,
+         "Replay packet already holds {} uniform bytes; the snapshot must land at offset 0 or every "
+         "copied uniformRange.offset is wrong",
+         frame.uniforms.size());
+  // Discard the passes begin_frame() created (a fresh EFB pass carrying only its viewport/scissor
+  // commands) — the replay's content is the snapshot, entirely.
+  frame.renderPasses = std::move(g_replaySnapshot.renderPasses);
+  const size_t uniformSize = g_replaySnapshot.uniforms.size();
+  frame.uniforms.append(g_replaySnapshot.uniforms.data(), uniformSize);
+  ASSERT(frame.uniforms.size() == uniformSize, "Replay uniform block landed at {} bytes, expected {}",
+         frame.uniforms.size(), uniformSize);
+  // CONSUME the snapshot. A tick whose capture failed must fall back to presenting once, never to
+  // re-presenting a stale frame — a stale replay is invisible on a static scene and looks like a
+  // one-frame stutter on a moving one.
+  g_replaySnapshot = {};
+  frame.replayEmission = true;
+  // Nothing further may be recorded into this packet: finish() must find no open pass, because
+  // enqueueing a pass a second time would encode it twice.
+  g_currentRenderPass = UINT32_MAX;
+  for (uint32_t i = 0; i < frame.renderPasses.size(); ++i) {
+    // Suppress the depth snapshot on the replay emission. finish() set captureDepthSnapshot on the
+    // last pass of the ORIGINAL frame and depth_peek rate-limits the request, so whichever emission
+    // reached it first would consume it — meaning the game could read back depth belonging to a
+    // frame state it never simulated.
+    frame.renderPasses[i].captureDepthSnapshot = false;
+    enqueue_pass(frame, g_recordingFrameSlot, i);
+  }
+  return true;
 }
 
 void queue_texture_upload(TextureUpload upload) {
@@ -1331,6 +1476,16 @@ void end_frame(EndFrameCallback callback) {
     TracyPlot("aurora: cpuFrameTimeMs", cpuFrameTimeMs);
   }
   auto& frame = current_frame_packet();
+  if (frame.replayEmission) {
+    // The replay path is a PURE COPY of the previous packet, and its copied draws point at
+    // vertex/index/storage ranges that only still mean anything because nothing wrote those global
+    // buffers in between. The moment this packet records geometry of its own, those two facts stop
+    // holding together and the frame renders one tick's vertices with another's indices — plausible
+    // garbage rather than an error. Fail at the first byte, not at the artifact.
+    ASSERT(frame.verts.size() == 0 && frame.indices.size() == 0 && frame.storage.size() == 0,
+           "Replay emission recorded geometry of its own: verts={} indices={} storage={} bytes", frame.verts.size(),
+           frame.indices.size(), frame.storage.size());
+  }
   frame.stats.drawCallCount = g_drawCallCount;
   frame.stats.mergedDrawCallCount = g_mergedDrawCallCount;
   frame.stats.lastVertSize = frame.verts.size();
@@ -1338,6 +1493,23 @@ void end_frame(EndFrameCallback callback) {
   frame.stats.lastIndexSize = frame.indices.size();
   frame.stats.lastStorageSize = frame.storage.size();
   frame.stats.lastTextureUploadSize = frame.textureUpload.size();
+  // AURORA_REPLAY_LOG_EVERY=N (0 = off, the default): report the recorded frame's staging byte
+  // counts every N game frames. The replay path shadows the whole uniform region into normal RAM
+  // once per tick, so its per-tick memory cost is exactly this uniforms= number — worth measuring
+  // rather than guessing. Replay emissions are skipped: their sizes are the snapshot's by
+  // construction and would only halve the effective cadence.
+  static const int s_frameSizeLogEvery = [] {
+    const char* e = std::getenv("AURORA_REPLAY_LOG_EVERY");
+    return e != nullptr ? std::atoi(e) : 0;
+  }();
+  if (s_frameSizeLogEvery > 0 && !frame.replayEmission) {
+    static int s_frameSizeLogCount = 0;
+    if (++s_frameSizeLogCount % s_frameSizeLogEvery == 0) {
+      Log.info("frame sizes: uniforms={} B verts={} B indices={} B storage={} B textureUpload={} B passes={} draws={}",
+               frame.uniforms.size(), frame.verts.size(), frame.indices.size(), frame.storage.size(),
+               frame.textureUpload.size(), frame.renderPasses.size(), g_drawCallCount);
+    }
+  }
 
   const size_t frameSlot = g_recordingFrameSlot;
   const uint64_t frameId = frame.frameId;
@@ -1367,20 +1539,28 @@ void end_frame(EndFrameCallback callback) {
 #endif
 
   const size_t stagingSlot = frame.stagingBuffer;
-  render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, callback = std::move(callback)]() mutable {
+  // A replay emission pushes no verts/indices/storage and records no draws, so publishing its
+  // stats would make every second sample read zero — Tracy plots and the imgui overlay would
+  // alternate real/zero and read exactly like a frame-dropping defect. The numbers the user cares
+  // about belong to the frame the game actually drew, so leave the last real publish standing.
+  const bool publishStats = !frame.replayEmission;
+  render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, publishStats,
+                                             callback = std::move(callback)]() mutable {
     auto& packet = g_framePackets[frameSlot];
     g_stagingBuffers[stagingSlot].Unmap();
     s_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
     auto encoder = std::move(packet.encoder);
     const auto stats = packet.stats;
     packet = {};
-    g_stats.drawCallCount = stats.drawCallCount;
-    g_stats.mergedDrawCallCount = stats.mergedDrawCallCount;
-    g_stats.lastVertSize = stats.lastVertSize;
-    g_stats.lastUniformSize = stats.lastUniformSize;
-    g_stats.lastIndexSize = stats.lastIndexSize;
-    g_stats.lastStorageSize = stats.lastStorageSize;
-    g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
+    if (publishStats) {
+      g_stats.drawCallCount = stats.drawCallCount;
+      g_stats.mergedDrawCallCount = stats.mergedDrawCallCount;
+      g_stats.lastVertSize = stats.lastVertSize;
+      g_stats.lastUniformSize = stats.lastUniformSize;
+      g_stats.lastIndexSize = stats.lastIndexSize;
+      g_stats.lastStorageSize = stats.lastStorageSize;
+      g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
+    }
     if (callback) {
       callback(encoder);
     }
