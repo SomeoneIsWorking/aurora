@@ -351,7 +351,17 @@ bool begin_frame() noexcept {
   return true;
 }
 
-void end_frame() noexcept {
+// `replayEmission` marks the SECOND emission of a tick under AURORA_REPLAY_PRESENT: a packet whose
+// content was installed by gfx::install_replay_snapshot rather than recorded from the game. It
+// takes the whole present path below (that is the point — presenting is what it exists to do) but
+// must skip the two steps that would consume the NEXT tick's work:
+//   * gx::fifo::drain() — the game has not run since the first emission, so anything sitting in
+//     the fifo belongs to the tick that has not started yet. Draining it here would both steal
+//     those commands and record geometry into a packet that must stay a pure copy.
+//   * gfx::finish() — install_replay_snapshot already enqueued every pass and closed the packet;
+//     finish() would find no open pass and do nothing, but calling it would still append its
+//     MaxUniformSize padding to a uniform block that is supposed to be exactly the snapshot.
+void end_frame_impl(bool replayEmission) noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   // SB_PROFILE_GFX=N: split end_frame's CPU cost into drain (GX fifo ->
@@ -361,9 +371,18 @@ void end_frame() noexcept {
   static long s_pn = 0; static double s_pd = 0, s_pf = 0, s_ps = 0;
   auto pnow = [] { return std::chrono::steady_clock::now(); };
   auto t0 = s_profGfx ? pnow() : std::chrono::steady_clock::time_point{};
-  gx::fifo::drain();
+  if (!replayEmission) {
+    gx::fifo::drain();
+  }
   auto t1 = s_profGfx ? pnow() : std::chrono::steady_clock::time_point{};
-  gfx::finish();
+  if (!replayEmission) {
+    gfx::finish();
+    if (gfx::replay_present_enabled()) {
+      // Between finish() and end_frame(): finish() has sealed and enqueued the last pass, so every
+      // pass in the packet is complete, and the staging buffer is still mapped.
+      gfx::capture_replay_snapshot();
+    }
+  }
   auto t2 = s_profGfx ? pnow() : std::chrono::steady_clock::time_point{};
   auto imguiDrawData = imgui::freeze();
 
@@ -770,6 +789,33 @@ void end_frame() noexcept {
   // SB_RDOC frame delimiter — unconditional (headless included): every
   // end_frame counts as one "present" for the capture window.
   sb_rdoc_on_present();
+}
+
+void end_frame() noexcept {
+  end_frame_impl(false);
+#ifdef AURORA_ENABLE_GX
+  // AURORA_REPLAY_PRESENT=1: emit the same recorded frame a second time. The whole cycle lives
+  // here rather than in the host because presenting is not something gfx::end_frame does on its
+  // own — the present blit, the swapchain acquire and the frame sink all live in the callback
+  // that this function builds, so the only way to present a packet twice is to run this function
+  // twice. begin_frame() is reused as-is (swapchain acquire, EFB pass setup, imgui::new_frame);
+  // install_replay_snapshot then throws away the pass it created and puts the snapshot in.
+  if (!gfx::replay_present_enabled() || !gfx::has_replay_snapshot()) {
+    return;
+  }
+  if (!begin_frame()) {
+    // Paused, or the window went non-presentable between the two emissions. Nothing was opened, so
+    // there is nothing to close; the snapshot is dropped and the next tick captures a fresh one.
+    return;
+  }
+  if (!gfx::install_replay_snapshot()) {
+    // has_replay_snapshot() said yes a moment ago and nothing else consumes snapshots, so this is
+    // a broken invariant, not a runtime condition — and we are now holding an open frame that
+    // would present a blank EFB. Fail at the cause.
+    Log.fatal("Replay snapshot vanished between has_replay_snapshot() and install_replay_snapshot()");
+  }
+  end_frame_impl(true);
+#endif
 }
 } // namespace
 } // namespace aurora

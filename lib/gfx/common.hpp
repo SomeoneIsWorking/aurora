@@ -256,6 +256,23 @@ void shutdown();
 bool begin_frame();
 void finish();
 void end_frame(EndFrameCallback callback);
+
+// Replay present (AURORA_REPLAY_PRESENT=1) — re-present the frame just recorded, unchanged. Step
+// 2 of the interpolated-60fps ladder and, at this step, a control experiment: the two presents of
+// a tick are byte-identical, so any difference between them is the EFB's own history. The full
+// contract, and what is deliberately NOT copied, is documented at capture_replay_snapshot in
+// common.cpp. Call order per tick:
+//   finish() -> capture_replay_snapshot() -> end_frame() -> begin_frame() ->
+//   install_replay_snapshot() -> end_frame()
+bool replay_present_enabled() noexcept;
+bool has_replay_snapshot() noexcept;
+// After finish(), before end_frame(): deep-copy the recording packet's passes and shadow its whole
+// uniform region into RAM. False (and logged) if no frame is recording.
+bool capture_replay_snapshot();
+// After begin_frame() on the SECOND packet of the tick: replace that packet's passes with the
+// snapshot's, re-push the uniform block at offset 0, and enqueue every pass over this packet's own
+// deque and slot. Consumes the snapshot. False (and logged) if there is none.
+bool install_replay_snapshot();
 uint32_t current_frame() noexcept;
 void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
 void after_submit() noexcept;
