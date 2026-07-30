@@ -92,6 +92,18 @@ extern "C" {
 #define GX_AURORA_DRAW_TAG 0x003B
 
 /**
+ * Supply the view matrix in force for this frame. Payload: 12 f32 (a GC Mtx, 3 rows of 4).
+ *
+ * Needed for interpolated 60fps because J3D concatenates the camera into every draw matrix in
+ * viewCalc, so what reaches the hardware is model x view with no seam between them. A draw that
+ * cannot be paired across ticks still has the camera baked into it, and leaving it alone renders it
+ * from the current viewpoint while every interpolated object sits at the in-between one — measured,
+ * that is worse than not interpolating at all. With the view supplied, one delta per tick puts the
+ * whole frame on a single viewpoint regardless of how much of it could be paired.
+ */
+#define GX_AURORA_VIEW_MTX 0x003C
+
+/**
  * Draw primitives with the vertex count derived from a byte length, as written by
  * GXBegin(prim, fmt, GX_AUTO). Must be followed by a u8 draw opcode (vtxfmt|prim),
  * a u32 vertex data byte length, then that many bytes of vertex data. The byte length

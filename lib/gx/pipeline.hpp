@@ -24,6 +24,11 @@ struct DrawData {
   // exactly these two 480-byte spans; a wrong offset would write matrices over the projection.
   uint32_t mtxPosOffset;
   uint32_t mtxNrmOffset;
+  // Whether this draw was issued under an ORTHOGRAPHIC projection. Interpolation needs it: the
+  // camera delta may only be applied to draws whose matrix is model x view. A 2D pane's matrix is
+  // not — applying a viewpoint change to it displaces the HUD bodily every other frame, which reads
+  // as perfectly EVEN motion to a smoothness metric and so hides behind a good-looking score.
+  uint8_t ortho;
 };
 
 constexpr uint32_t GXPipelineConfigVersion = 13;
