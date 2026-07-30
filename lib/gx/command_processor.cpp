@@ -4354,6 +4354,12 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .bindGroups = bindGroups,
       .dstAlpha = g_gxState.dstAlpha,
       .tag = g_pendingDrawTag,
+      // The block order is pnMtx.pos, then the texture matrices, then pnMtx.nrm — see build_uniform.
+      // Spelled out with both counts rather than doubling one: MaxPnMtx and MaxTexMtx happen to be
+      // equal today, and a change to either would silently misplace the normal matrices.
+      .mtxPosOffset = g_lastUniformMtxOffset,
+      .mtxNrmOffset = g_lastUniformMtxOffset +
+                      (u32)((MaxPnMtx + MaxTexMtx) * sizeof(Mat3x4<float>)),
   });
   if (g_pendingDrawTag != 0) {
     ++g_taggedDrawCount;

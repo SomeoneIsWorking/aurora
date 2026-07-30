@@ -273,6 +273,14 @@ bool capture_replay_snapshot();
 // snapshot's, re-push the uniform block at offset 0, and enqueue every pass over this packet's own
 // deque and slot. Consumes the snapshot. False (and logged) if there is none.
 bool install_replay_snapshot();
+// AURORA_INTERP_ALPHA: how far the FIRST of the tick's two presents is displaced back in time.
+// 0.5 is the natural value — halfway between the previous tick's pose and this one — and gives an
+// even 60 Hz cadence. Negative (the default, meaning unset) disables interpolation entirely while
+// leaving the doubled present intact, which is the control the EFB-idempotence check needs.
+float interp_alpha() noexcept;
+// Between capture_replay_snapshot() and end_frame(): rewrite the recorded frame's matrices toward
+// the previous tick's, reading the true values from the snapshot and writing only to staging.
+bool interpolate_recorded_frame(float alpha);
 uint32_t current_frame() noexcept;
 void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
 void after_submit() noexcept;

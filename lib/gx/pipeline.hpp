@@ -18,6 +18,12 @@ struct DrawData {
   // a draw with the same object's draw in the previous tick for interpolation. Never derived from a
   // draw ordinal — see the sub-opcode's comment in GXAurora.h for why that cannot work.
   uint64_t tag;
+  // Byte offset of pnMtx[0].pos within this draw's uniform block, and of pnMtx[0].nrm. Recorded at
+  // build time because the layout is not fixed — an optional lineMode block shifts everything after
+  // it by 16 bytes, and lineMode is not otherwise recoverable from a DrawData. Interpolation writes
+  // exactly these two 480-byte spans; a wrong offset would write matrices over the projection.
+  uint32_t mtxPosOffset;
+  uint32_t mtxNrmOffset;
 };
 
 constexpr uint32_t GXPipelineConfigVersion = 13;
