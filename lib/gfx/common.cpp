@@ -663,6 +663,11 @@ bool interpolate_recorded_frame(float alpha) {
   auto& frame = *g_recordingFrame;
   const auto& snap = g_replaySnapshot.uniforms;
   interp::begin_tick();
+  // The camera delta is computed ONCE for the tick and applied to every draw that could not be
+  // paired. Without it, unpaired draws render from the current viewpoint while paired ones sit at
+  // the in-between one, and the frame is drawn from two viewpoints at once — measured as worse than
+  // not interpolating at all.
+  interp::begin_camera_delta(alpha);
   for (const auto& pass : frame.renderPasses) {
     for (const auto& cmd : pass.commands) {
       if (cmd.type != CommandType::Draw || cmd.data.draw.type != ShaderType::GX) {
@@ -672,9 +677,18 @@ bool interpolate_recorded_frame(float alpha) {
       if (d.uniformRange.offset + d.uniformRange.size > snap.size()) {
         continue;   // outside the snapshot: cannot have been recorded by this frame
       }
-      interp::patch_draw(d.tag, d.vtxCount, snap.data() + d.uniformRange.offset,
-                         frame.uniforms.data() + d.uniformRange.offset, d.uniformRange.size,
-                         d.mtxPosOffset, d.mtxNrmOffset, alpha);
+      uint8_t* dst = frame.uniforms.data() + d.uniformRange.offset;
+      // Every draw ends up on the interpolated viewpoint, one way or the other. A draw that was
+      // genuinely paired already carries it, because the camera is baked into the matrices being
+      // lerped. Everything else — untagged, or tagged but unpaired this tick — takes the camera
+      // delta alone. Leaving ANY draw on the current viewpoint is what tears the frame.
+      if (!interp::patch_draw(d.tag, d.vtxCount, snap.data() + d.uniformRange.offset, dst,
+                              d.uniformRange.size, d.mtxPosOffset, d.mtxNrmOffset, alpha) &&
+          d.ortho == 0) {
+        // Perspective only. An orthographic draw's matrix is not model x view, so a camera delta
+        // does not belong in it — it would slide the HUD bodily every other frame.
+        interp::patch_camera_only(dst, d.uniformRange.size, d.mtxPosOffset, d.mtxNrmOffset);
+      }
     }
   }
   interp::end_tick();

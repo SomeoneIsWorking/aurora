@@ -457,6 +457,14 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
   }
   buf.append(g_gxState.proj);
 
+  // Where the matrix block starts, captured rather than computed. Interpolated 60fps rewrites
+  // exactly these bytes in a recorded frame, and the offset is NOT constant: the optional lineMode
+  // block above shifts everything after it by 16 bytes, and lineMode is not recorded in DrawData.
+  // Deriving the offset at patch time would mean reconstructing that condition, and getting it
+  // wrong writes matrices over the projection — a corruption with no diagnostic. Taking it here,
+  // where the buffer position IS the answer, removes the possibility.
+  g_lastUniformMtxOffset = static_cast<u32>(buf.size());
+
   for (int i = 0; i < MaxPnMtx; i++) {
     buf.append(g_gxState.pnMtx[i].pos);
   }

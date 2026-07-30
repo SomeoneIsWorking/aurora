@@ -8,6 +8,7 @@
 #include "../gfx/depth_peek.hpp"
 #include "dolphin/gx/GXAurora.h"
 #include "gx.hpp"
+#include "../gfx/interp.hpp"
 #include "gx_fmt.hpp"
 #include "pipeline.hpp"
 #include "shader_info.hpp"
@@ -4360,6 +4361,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .mtxPosOffset = g_lastUniformMtxOffset,
       .mtxNrmOffset = g_lastUniformMtxOffset +
                       (u32)((MaxPnMtx + MaxTexMtx) * sizeof(Mat3x4<float>)),
+      .ortho = g_gxState.projType == GX_ORTHOGRAPHIC ? (u8)1 : (u8)0,
   });
   if (g_pendingDrawTag != 0) {
     ++g_taggedDrawCount;
@@ -4565,6 +4567,14 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     gfx::begin_offscreen(width, height);
   } else if (subCmd == GX_AURORA_END_OFFSCREEN) {
     gfx::end_offscreen();
+  } else if (subCmd == GX_AURORA_VIEW_MTX) {
+    CHECK(pos + 48 <= size, "GX_AURORA_VIEW_MTX read overrun");
+    float m[12];
+    for (int i = 0; i < 12; ++i) {
+      m[i] = read_f32(data + pos + i * 4, bigEndian);
+    }
+    pos += 48;
+    gfx::interp::set_view_matrix(m);
   } else if (subCmd == GX_AURORA_DRAW_TAG) {
     CHECK(pos + 8 <= size, "GX_AURORA_DRAW_TAG read overrun");
     // Latched, not consumed: one tag covers every draw the tagged object emits, however many

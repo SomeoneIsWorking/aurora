@@ -52,8 +52,41 @@ void begin_tick();
 //
 // `uniformSize` is the block's size, used purely as a bounds check: writing 960 bytes at an offset
 // that does not fit is a corruption, and it must fail loudly rather than scribble.
-void patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* dst,
+// Returns TRUE only if the draw was actually interpolated. A tagged draw that fails to pair (new
+// object, or a vertex-count mismatch) is left untouched, and the caller MUST then give it the
+// camera-only treatment — otherwise it sits at the current viewpoint while the rest of the frame
+// does not, which is the same tearing failure as an untagged draw.
+bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* dst,
                 uint32_t uniformSize, uint32_t mtxPosOffset, uint32_t mtxNrmOffset, float alpha);
+
+// The view matrix in force for this tick, as the game built it (GC Mtx: 3 rows of 4 floats,
+// p' = M*p). Supplied by the emitter through GX_AURORA_VIEW_MTX, because aurora cannot recover it:
+// J3D concatenates the camera into every draw matrix in viewCalc, so what reaches pnMtx is
+// model x view with no seam between them.
+void set_view_matrix(const float m[12]);
+
+// Apply the tick's CAMERA interpolation to a draw that has no identity of its own.
+//
+// This is what stops partial coverage from tearing the frame in two. A draw that cannot be paired
+// still has the camera baked into its matrix, so leaving it alone renders it from the CURRENT
+// viewpoint while every interpolated object is at the in-between one. Measured, that is worse than
+// not interpolating at all: frame energy p90 went 15x when 69% of the scene interpolated and the
+// rest did not.
+//
+// With column convention A = V*M, the wanted matrix is V_lerp*M = (V_lerp * V_cur^-1) * A, so one
+// 4x4 per tick left-multiplied into every unpaired draw gives the whole frame a single coherent
+// viewpoint while its object motion still snaps. Normals take only the rotation part, which is
+// correct for a rigid view delta because the inverse-transpose of a rotation is itself.
+//
+// Does nothing if no view matrix has been supplied, or if the tick has no previous view to
+// interpolate from.
+void patch_camera_only(uint8_t* dst, uint32_t uniformSize, uint32_t mtxPosOffset,
+                       uint32_t mtxNrmOffset);
+
+// Compute this tick's camera delta from the supplied view matrices. Called once per tick, before
+// the per-draw patching. Returns false if there is no usable delta (no view supplied, or the view
+// is not invertible), in which case patch_camera_only is inert.
+bool begin_camera_delta(float alpha);
 
 // Roll this tick's recorded matrices over to become the previous tick's. Called after the frame is
 // recorded and patched.
