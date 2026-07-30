@@ -1345,6 +1345,10 @@ void end_frame(EndFrameCallback callback) {
   for (auto& array : gx::g_gxState.arrays) {
     array.cachedRange = {};
   }
+  // The draw tag must not survive a frame. If the emitter stops tagging, a leaked tag would keep
+  // stamping the previous object's identity onto every later draw, and interpolation would then
+  // pair those draws with the wrong object's matrices — wrong, plausible, and silent.
+  gx::fifo::g_pendingDrawTag = 0;
   end_pipeline_frame();
   ++g_frameIndex;
   g_recordingFrame = nullptr;

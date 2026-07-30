@@ -14,6 +14,10 @@ struct DrawData {
   uint32_t instanceCount;
   GXBindGroups bindGroups;
   uint32_t dstAlpha;
+  // Caller-supplied identity for this draw, from GX_AURORA_DRAW_TAG; 0 when untagged. Used to pair
+  // a draw with the same object's draw in the previous tick for interpolation. Never derived from a
+  // draw ordinal — see the sub-opcode's comment in GXAurora.h for why that cannot work.
+  uint64_t tag;
 };
 
 constexpr uint32_t GXPipelineConfigVersion = 13;

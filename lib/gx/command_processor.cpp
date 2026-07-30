@@ -1953,6 +1953,18 @@ static ByteBuffer handle_draw_idx_buf;
 long g_skippedBigQuads = 0;
 long g_sbPushedDrawCount = 0; // exported: SB_NO_ZWRITE_DRAWS window check in gx.cpp
 
+// The identity currently in force, set by GX_AURORA_DRAW_TAG and stamped onto every DrawData until
+// the next tag. 0 = untagged.
+//
+// Cleared at the start of each frame so a tag can never leak across a frame boundary: an emitter
+// that stops tagging would otherwise keep stamping the last object's identity onto every remaining
+// draw, and those draws would then pair with the wrong object's matrices — a silent, plausible
+// wrong answer rather than a visible failure.
+uint64_t g_pendingDrawTag = 0;
+// Coverage, so "tagging is on" can be distinguished from "tagging is silently doing nothing".
+long g_taggedDrawCount = 0;
+long g_untaggedDrawCount = 0;
+
 static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size) {
   ZoneScoped;
   u32 vtxSize;
@@ -4322,7 +4334,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .instanceCount = instanceCount,
       .bindGroups = bindGroups,
       .dstAlpha = g_gxState.dstAlpha,
+      .tag = g_pendingDrawTag,
   });
+  if (g_pendingDrawTag != 0) { ++g_taggedDrawCount; } else { ++g_untaggedDrawCount; }
   if (s_prof) { auto n = _pt(); sb_gx_prof_add(4, std::chrono::duration<double, std::micro>(n - _pa).count()); }
 }
 
@@ -4511,6 +4525,13 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     gfx::begin_offscreen(width, height);
   } else if (subCmd == GX_AURORA_END_OFFSCREEN) {
     gfx::end_offscreen();
+  } else if (subCmd == GX_AURORA_DRAW_TAG) {
+    CHECK(pos + 8 <= size, "GX_AURORA_DRAW_TAG read overrun");
+    // Latched, not consumed: one tag covers every draw the tagged object emits, however many
+    // elements and material passes that turns out to be. The emitter is responsible for tagging
+    // again when it moves to the next object.
+    g_pendingDrawTag = read_u64(data + pos, bigEndian);
+    pos += 8;
   } else if (subCmd == GX_AURORA_DESTROY_TEXOBJ) {
     CHECK(pos + 4 <= size, "GX_AURORA_DESTROY_TEXOBJ read overrun");
     evict_texture_object(read_u32(data + pos, bigEndian));
