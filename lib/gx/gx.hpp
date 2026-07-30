@@ -522,5 +522,14 @@ extern uint64_t g_pendingDrawTag;
 // than as a mysteriously non-interpolating scene.
 extern long g_taggedDrawCount;
 extern long g_untaggedDrawCount;
+// Untagged draws split by projection: an untagged draw snaps, which is right for screen-space 2D
+// and a defect for world geometry. One percentage cannot distinguish them.
+extern long g_untaggedOrthoDrawCount;
+extern long g_untaggedPerspDrawCount;
+// Untagged perspective draws split by how positions are supplied: DIRECT = immediate-mode geometry
+// with no cross-tick identity to have (correct to snap), INDEXED = display-list geometry that does
+// have one (an uncovered tag seam).
+extern long g_untaggedPerspDirectCount;
+extern long g_untaggedPerspIndexedCount;
 } // namespace fifo
 } // namespace aurora::gx

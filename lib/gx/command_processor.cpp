@@ -1964,6 +1964,25 @@ uint64_t g_pendingDrawTag = 0;
 // Coverage, so "tagging is on" can be distinguished from "tagging is silently doing nothing".
 long g_taggedDrawCount = 0;
 long g_untaggedDrawCount = 0;
+// Untagged draws split by projection. An untagged draw SNAPS instead of interpolating, and whether
+// that is correct depends entirely on what it is: for 2D/HUD it is right (there is no meaningful
+// in-between for a screen-space element), for world geometry it is a defect that will read as
+// stutter in an otherwise smooth frame. A single "39% untagged" number cannot tell those apart, and
+// a plausible-looking percentage is exactly the kind of thing that gets accepted without being
+// checked. This splits it.
+long g_untaggedOrthoDrawCount = 0;
+long g_untaggedPerspDrawCount = 0;
+// And the untagged PERSPECTIVE draws split again by how their positions are supplied. This is the
+// discriminator that says whether the remainder is a defect or not:
+//
+//   DIRECT positions  = immediate-mode geometry, built fresh by the CPU every tick (particles, the
+//                       sea's ripple grid, immediate effects). It has no cross-tick identity to
+//                       have, so snapping is the correct and only behaviour.
+//   INDEXED positions = geometry drawn from a persistent vertex array through a display list, i.e.
+//                       exactly the kind of thing that DOES have a stable identity and should be
+//                       interpolating. Every one of these is a tag seam we have not covered.
+long g_untaggedPerspDirectCount = 0;
+long g_untaggedPerspIndexedCount = 0;
 
 static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size) {
   ZoneScoped;
@@ -4336,7 +4355,22 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .dstAlpha = g_gxState.dstAlpha,
       .tag = g_pendingDrawTag,
   });
-  if (g_pendingDrawTag != 0) { ++g_taggedDrawCount; } else { ++g_untaggedDrawCount; }
+  if (g_pendingDrawTag != 0) {
+    ++g_taggedDrawCount;
+  } else {
+    ++g_untaggedDrawCount;
+    if (g_gxState.projType == GX_ORTHOGRAPHIC) {
+      ++g_untaggedOrthoDrawCount;
+    } else {
+      ++g_untaggedPerspDrawCount;
+      const auto posDesc = g_gxState.vtxDesc[GX_VA_POS];
+      if (posDesc == GX_INDEX8 || posDesc == GX_INDEX16) {
+        ++g_untaggedPerspIndexedCount;
+      } else {
+        ++g_untaggedPerspDirectCount;
+      }
+    }
+  }
   if (s_prof) { auto n = _pt(); sb_gx_prof_add(4, std::chrono::duration<double, std::micro>(n - _pa).count()); }
 }
 
