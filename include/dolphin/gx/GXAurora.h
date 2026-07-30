@@ -74,6 +74,24 @@ extern "C" {
 #define GX_AURORA_END_OFFSCREEN 0x003A
 
 /**
+ * Tag the draws that follow with a caller-supplied 64-bit identity, until the next tag.
+ * Payload: u64 tag.
+ *
+ * This exists for interpolated 60fps: pairing a draw in one tick with the same object's draw in the
+ * previous tick needs a key that is stable across ticks, and aurora cannot derive one. A content
+ * hash does not work — for indexed geometry the vertex buffer holds INDICES, and the attribute data
+ * lives in a separate storage buffer reached through the uniform. A draw ordinal does not work
+ * either: draw merging is state-dependent, so the same scene yields different ordinals when a state
+ * write lands differently.
+ *
+ * So the identity is SUPPLIED, not derived. The emitter sends a key it already owns (for
+ * decomp/recomp callers, the guest J3DShape pointer). Draws that merge into a previous draw keep
+ * the head's tag, which is correct: merging requires !stateDirty, and an XF matrix load sets
+ * stateDirty, so merged prims share one matrix set by construction.
+ */
+#define GX_AURORA_DRAW_TAG 0x003B
+
+/**
  * Draw primitives with the vertex count derived from a byte length, as written by
  * GXBegin(prim, fmt, GX_AUTO). Must be followed by a u8 draw opcode (vtxfmt|prim),
  * a u32 vertex data byte length, then that many bytes of vertex data. The byte length

@@ -513,4 +513,14 @@ GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
 
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;
 u8 comp_cnt_count(GXAttr attr, GXCompCnt cnt) noexcept;
+
+namespace fifo {
+// Draw identity supplied by the emitter via GX_AURORA_DRAW_TAG, stamped onto every DrawData until
+// the next tag; 0 = untagged. Reset once per frame in gfx::end_frame — see the comment there.
+extern uint64_t g_pendingDrawTag;
+// Coverage counters, so an emitter that has silently stopped tagging is visible as a number rather
+// than as a mysteriously non-interpolating scene.
+extern long g_taggedDrawCount;
+extern long g_untaggedDrawCount;
+} // namespace fifo
 } // namespace aurora::gx
