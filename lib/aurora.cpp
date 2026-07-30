@@ -381,6 +381,14 @@ void end_frame_impl(bool replayEmission) noexcept {
       // Between finish() and end_frame(): finish() has sealed and enqueued the last pass, so every
       // pass in the packet is complete, and the staging buffer is still mapped.
       gfx::capture_replay_snapshot();
+      // Then move THIS emission to an in-between pose. The snapshot already holds the tick's true
+      // matrices, so the replay emission that follows still shows the tick exactly; only the first
+      // of the two presents is displaced backwards in time. Off by default (AURORA_INTERP_ALPHA
+      // unset) so the doubled present can be exercised — and its EFB idempotence checked — without
+      // interpolation confusing the picture.
+      if (gfx::interp_alpha() >= 0.0f) {
+        gfx::interpolate_recorded_frame(gfx::interp_alpha());
+      }
     }
   }
   auto t2 = s_profGfx ? pnow() : std::chrono::steady_clock::time_point{};

@@ -1,4 +1,5 @@
 #include "common.hpp"
+#include "interp.hpp"
 
 #include "clear.hpp"
 #include "depth_peek.hpp"
@@ -582,6 +583,30 @@ bool replay_present_enabled() noexcept {
 
 bool has_replay_snapshot() noexcept { return g_replaySnapshot.valid; }
 
+float interp_alpha() noexcept {
+  // Read once, same convention as replay_present_enabled above. Negative means unset: the doubled
+  // present still happens, but both emissions show the tick exactly. Keeping that as the DEFAULT
+  // rather than folding it into the replay switch is what makes the EFB-idempotence control
+  // reachable at all — with interpolation on, two presents differ for two reasons at once and the
+  // control can no longer distinguish them.
+  static const float s_alpha = [] {
+    const char* e = std::getenv("AURORA_INTERP_ALPHA");
+    if (e == nullptr || e[0] == '\0') {
+      return -1.0f;
+    }
+    const float v = std::strtof(e, nullptr);
+    if (v < 0.0f || v > 1.0f) {
+      Log.error("AURORA_INTERP_ALPHA={} is outside [0,1]; interpolation stays OFF. An alpha outside "
+                "that range extrapolates rather than interpolates, which is a different feature "
+                "with different failure modes, not a tuning value.",
+                e);
+      return -1.0f;
+    }
+    return v;
+  }();
+  return s_alpha;
+}
+
 bool capture_replay_snapshot() {
   ZoneScoped;
   // Command::Data is a UNION: a member with a non-trivial copy ctor or destructor (rmlui::DrawData
@@ -612,6 +637,54 @@ bool capture_replay_snapshot() {
     memcpy(g_replaySnapshot.uniforms.data(), frame.uniforms.data(), g_replaySnapshot.uniforms.size());
   }
   g_replaySnapshot.valid = true;
+  return true;
+}
+
+// Rewrite the RECORDED frame's matrices to an in-between pose, leaving the snapshot — and therefore
+// the replay emission — carrying the tick's true state. The pair then presents (t-1+alpha) followed
+// by (t).
+//
+// Order matters and is not interchangeable: this must run AFTER capture_replay_snapshot, because
+// the snapshot is where the true matrices are read from, and BEFORE end_frame, because that is when
+// the staging is unmapped. Called with the snapshot as the source and the live staging as the
+// destination, so no read ever touches write-combined memory.
+bool interpolate_recorded_frame(float alpha) {
+  ZoneScoped;
+  if (g_recordingFrame == nullptr) {
+    Log.error("interpolate_recorded_frame: no frame is recording");
+    return false;
+  }
+  if (!g_replaySnapshot.valid) {
+    Log.error("interpolate_recorded_frame: no snapshot, so there is nothing to read the true "
+              "matrices from. Interpolating from the staging itself would read back what this "
+              "function is about to overwrite.");
+    return false;
+  }
+  auto& frame = *g_recordingFrame;
+  const auto& snap = g_replaySnapshot.uniforms;
+  interp::begin_tick();
+  for (const auto& pass : frame.renderPasses) {
+    for (const auto& cmd : pass.commands) {
+      if (cmd.type != CommandType::Draw || cmd.data.draw.type != ShaderType::GX) {
+        continue;
+      }
+      const gx::DrawData& d = cmd.data.draw.gx;
+      if (d.uniformRange.offset + d.uniformRange.size > snap.size()) {
+        continue;   // outside the snapshot: cannot have been recorded by this frame
+      }
+      interp::patch_draw(d.tag, d.vtxCount, snap.data() + d.uniformRange.offset,
+                         frame.uniforms.data() + d.uniformRange.offset, d.uniformRange.size,
+                         d.mtxPosOffset, d.mtxNrmOffset, alpha);
+    }
+  }
+  interp::end_tick();
+  // Pairing coverage on a slow cadence. Without it, "interpolation is on" and "interpolation is on
+  // and pairing nothing, so every object snaps" produce the same smooth-looking log and the same
+  // doubled present count.
+  static long s_ticks = 0;
+  if ((++s_ticks % 300) == 0) {
+    interp::report();
+  }
   return true;
 }
 

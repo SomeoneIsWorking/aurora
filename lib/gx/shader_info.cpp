@@ -387,6 +387,11 @@ static u32 line_texcoord_mask() noexcept {
   return mask;
 }
 
+// Byte offset of pnMtx[0].pos within the uniform block most recently built. Set by build_uniform
+// and read immediately afterwards by the draw-record site — see the comment at the assignment for
+// why this is captured rather than computed.
+u32 g_lastUniformMtxOffset = 0;
+
 gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges) noexcept {
   ZoneScoped;
 

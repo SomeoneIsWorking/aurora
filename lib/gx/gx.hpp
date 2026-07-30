@@ -511,6 +511,11 @@ std::string build_shader_source(const ShaderConfig& config) noexcept;
 wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept;
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
 
+// Byte offset of pnMtx[0].pos inside the uniform block build_uniform just wrote. Captured there and
+// consumed at the draw-record site immediately after; the layout shifts with lineMode, so it cannot
+// be recomputed later from a DrawData alone.
+extern u32 g_lastUniformMtxOffset;
+
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;
 u8 comp_cnt_count(GXAttr attr, GXCompCnt cnt) noexcept;
 
