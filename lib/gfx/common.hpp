@@ -293,6 +293,13 @@ long snapped_tick_count() noexcept;
 // eventually be half-set. AURORA_REPLAY_PRESENT / AURORA_INTERP_ALPHA still work and still win, so
 // the diagnostic runs that need the two halves driven independently are unaffected.
 void force_interpolation(float alpha);
+// Name the EFB-copy destination that feeds a TEMPORAL FEEDBACK effect — one whose result is sampled
+// by a LATER FRAME rather than by a later pass of the same frame. Aurora cannot identify it on its
+// own: structurally it is an ordinary copy, and the difference is only in who reads it and when.
+// Such a copy runs once per game tick (on the replay emission) instead of once per present.
+void set_feedback_copy_dest(const void* dest);
+bool is_feedback_copy_dest(const void* dest);
+void mark_next_resolve_feedback(bool feedback);
 uint32_t current_frame() noexcept;
 void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
 void after_submit() noexcept;

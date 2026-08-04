@@ -184,6 +184,10 @@ struct RenderPass {
   uint32_t msaaSamples = 1;
 
   TextureHandle resolveTarget;
+  // True when this pass's EFB copy feeds a LATER FRAME rather than a later pass of this one — a
+  // temporal feedback texture (SMS's TAfterEffect trail samples the previous frame's copy). Such a
+  // copy must happen exactly ONCE per game tick; see interpolate_recorded_frame.
+  bool resolveIsFeedback = false;
   GXTexFmt resolveFormat = GX_TF_RGBA8;
   ClipRect resolveRect;
   Range resolveUniformRange;
@@ -634,6 +638,20 @@ long g_snappedTicks = 0;
 
 void snap_next_interpolation() { g_snapNextTick = true; }
 
+namespace {
+// The destination of the copy that feeds a temporal-feedback effect, supplied by the host because
+// aurora cannot tell it apart from any other EFB copy: structurally they are identical, and the
+// difference is only in WHO reads the result and WHEN.
+const void* g_feedbackCopyDest = nullptr;
+bool g_nextResolveIsFeedback = false;
+} // namespace
+
+void set_feedback_copy_dest(const void* dest) { g_feedbackCopyDest = dest; }
+bool is_feedback_copy_dest(const void* dest) {
+  return dest != nullptr && dest == g_feedbackCopyDest;
+}
+void mark_next_resolve_feedback(bool feedback) { g_nextResolveIsFeedback = feedback; }
+
 long snapped_tick_count() noexcept { return g_snappedTicks; }
 
 bool capture_replay_snapshot() {
@@ -744,6 +762,43 @@ bool interpolate_recorded_frame(float alpha) {
   }
   auto& frame = *g_recordingFrame;
   const auto& snap = g_replaySnapshot.uniforms;
+
+  // A TEMPORAL FEEDBACK copy must happen exactly ONCE per game tick, so drop it from THIS emission
+  // and leave it to the replay emission, which carries the tick's true image.
+  //
+  // Both emissions replay the same recorded passes, so without this the feedback texture is written
+  // twice per tick from two different images. The visible consequence in SMS: the dash afterimage
+  // (TAfterEffect, MarioUtil/ScreenUtil.cpp) composites the previous frame's EFB copy back over the
+  // viewport, slightly scaled, to make a motion trail. Written twice, the replay emission's trail
+  // samples the INTERPOLATED image this same tick wrote a moment earlier rather than the previous
+  // tick's — so the trail is full length on one present and half on the next, which reads as jitter.
+  //
+  // This runs AFTER capture_replay_snapshot, so the snapshot (and therefore the replay emission)
+  // still holds the resolve. Clearing the handle is how a pass is told not to resolve; every other
+  // EFB copy is untouched, because an INTRA-frame copy — the sea reflection, an indirect pass —
+  // must still run on both emissions, since a later pass of each emission samples what that
+  // emission wrote.
+  {
+    // Counted and reported, because a silent zero here is the failure mode: if the host never
+    // identifies the feedback destination, or the pointer it supplies does not match the one the
+    // copy carries, nothing is suppressed and the trail keeps jittering with no indication why.
+    static long s_suppressed = 0, s_ticks = 0;
+    long thisTick = 0;
+    for (auto& pass : frame.renderPasses) {
+      if (pass.resolveIsFeedback && pass.resolveTarget) {
+        pass.resolveTarget = {};
+        ++thisTick;
+      }
+    }
+    s_suppressed += thisTick;
+    if ((++s_ticks % 300) == 0) {
+      Log.info("feedback copies suppressed on the interpolated emission: {} over {} ticks ({} this "
+               "tick). ZERO means the host never named a feedback destination, or named one that no "
+               "copy matches — not that the scene has no feedback effect.",
+               s_suppressed, s_ticks, thisTick);
+    }
+  }
+
   interp::begin_tick();
   // The camera delta is computed ONCE for the tick and applied to every draw that could not be
   // paired. Without it, unpaired draws render from the current viewpoint while paired ones sit at
@@ -1032,6 +1087,8 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
   // Resolve current render pass
   auto& prevPass = current_render_passes()[g_currentRenderPass];
   prevPass.resolveTarget = std::move(texture);
+  prevPass.resolveIsFeedback = g_nextResolveIsFeedback;
+  g_nextResolveIsFeedback = false;
   prevPass.resolveRect = rect;
   prevPass.resolveFormat = resolveFormat;
   // Push UV transform uniform for tex_copy_conv (crop region in UV space)
