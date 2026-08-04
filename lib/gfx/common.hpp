@@ -293,13 +293,18 @@ long snapped_tick_count() noexcept;
 // eventually be half-set. AURORA_REPLAY_PRESENT / AURORA_INTERP_ALPHA still work and still win, so
 // the diagnostic runs that need the two halves driven independently are unaffected.
 void force_interpolation(float alpha);
-// Name the EFB-copy destination that feeds a TEMPORAL FEEDBACK effect — one whose result is sampled
-// by a LATER FRAME rather than by a later pass of the same frame. Aurora cannot identify it on its
-// own: structurally it is an ordinary copy, and the difference is only in who reads it and when.
-// Such a copy runs once per game tick (on the replay emission) instead of once per present.
-void set_feedback_copy_dest(const void* dest);
-bool is_feedback_copy_dest(const void* dest);
-void mark_next_resolve_feedback(bool feedback);
+
+// ---- CROSS-FRAME vs INTRA-FRAME EFB COPIES, decided from the frame itself -----------------------
+// An EFB copy's DESTINATION says nothing about whether its consumer is this frame or the next, and
+// that distinction is the whole question for interpolated 60fps: a copy read by the NEXT frame is
+// temporal feedback and must advance once per tick, while a copy read LATER IN THIS FRAME must run
+// on both emissions or that read gets nothing. Identifying it by which effect samples it is not
+// enough — SMS uses one screen texture for both purposes in different scenes.
+//
+// The property that does decide it is ORDER: if every sample of a copy's result happens at or
+// before the pass that writes it, the samples were reading the PREVIOUS frame's contents.
+void note_copy_texture_sampled(const void* dest);   // a draw sampled the copy result for `dest`
+void note_copy_resolve_dest(const void* dest);      // the pass being resolved copies into `dest`
 uint32_t current_frame() noexcept;
 void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
 void after_submit() noexcept;

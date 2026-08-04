@@ -184,10 +184,7 @@ struct RenderPass {
   uint32_t msaaSamples = 1;
 
   TextureHandle resolveTarget;
-  // True when this pass's EFB copy feeds a LATER FRAME rather than a later pass of this one — a
-  // temporal feedback texture (SMS's TAfterEffect trail samples the previous frame's copy). Such a
-  // copy must happen exactly ONCE per game tick; see interpolate_recorded_frame.
-  bool resolveIsFeedback = false;
+  const void* resolveDest = nullptr;
   GXTexFmt resolveFormat = GX_TF_RGBA8;
   ClipRect resolveRect;
   Range resolveUniformRange;
@@ -642,15 +639,88 @@ namespace {
 // The destination of the copy that feeds a temporal-feedback effect, supplied by the host because
 // aurora cannot tell it apart from any other EFB copy: structurally they are identical, and the
 // difference is only in WHO reads the result and WHEN.
-const void* g_feedbackCopyDest = nullptr;
-bool g_nextResolveIsFeedback = false;
+
+// Per-frame ordering record. Keyed by copy destination: the highest pass index at which a draw
+// sampled that copy's result, and the pass index of the copy itself. Both reset every frame.
+std::unordered_map<const void*, uint32_t> g_copySampledAtPass;
+std::unordered_map<const void*, uint32_t> g_copyResolvedAtPass;
+const void* g_pendingResolveDest = nullptr;
 } // namespace
 
-void set_feedback_copy_dest(const void* dest) { g_feedbackCopyDest = dest; }
-bool is_feedback_copy_dest(const void* dest) {
-  return dest != nullptr && dest == g_feedbackCopyDest;
+void note_copy_texture_sampled(const void* dest) {
+  if (dest == nullptr || g_recordingFrame == nullptr || g_recordingFrame->replayEmission) {
+    return;
+  }
+  // The pass currently recording. A sample inside the SAME pass that later resolves still counts as
+  // "before the copy", because the resolve happens at the end of the pass.
+  const uint32_t pass = g_currentRenderPass == UINT32_MAX ? 0 : g_currentRenderPass;
+  auto it = g_copySampledAtPass.find(dest);
+  if (it == g_copySampledAtPass.end() || it->second < pass) {
+    g_copySampledAtPass[dest] = pass;
+  }
 }
-void mark_next_resolve_feedback(bool feedback) { g_nextResolveIsFeedback = feedback; }
+
+void note_copy_resolve_dest(const void* dest) { g_pendingResolveDest = dest; }
+
+// THE DECISION, on its own so it can be tested. `copyPass` is the pass whose resolve writes `dest`.
+//
+// Cross-frame feedback iff the frame sampled this copy's result and EVERY such sample was in a
+// STRICTLY earlier pass — those samples can only have read what the previous frame left there.
+// A sample in a later pass, or in the same pass (this record has pass granularity, so a same-pass
+// sample cannot be shown to precede the resolve), means a consumer in THIS frame depends on the
+// copy and it must run on both emissions.
+bool is_cross_frame_feedback(const void* dest, uint32_t copyPass) {
+  if (dest == nullptr) {
+    return false;
+  }
+  const auto it = g_copySampledAtPass.find(dest);
+  if (it == g_copySampledAtPass.end()) {
+    return false;   // never sampled this frame: nothing here proves it is feedback
+  }
+  return it->second < copyPass;
+}
+
+// Run the classifier against BOTH classes it must separate, before it is trusted on a real frame.
+// This project has shipped a discriminator that scored backwards on both classes, and the previous
+// attempt at THIS decision (by texture identity) blanked the title background because its premise
+// was never tested against the intra-frame case.
+bool copy_classifier_selftest() {
+  const auto savedSamples = g_copySampledAtPass;
+  bool ok = true;
+  const void* kFeedback = reinterpret_cast<const void*>(0x1000);
+  const void* kIntra = reinterpret_cast<const void*>(0x2000);
+  const void* kSame = reinterpret_cast<const void*>(0x3000);
+  const void* kUnsampled = reinterpret_cast<const void*>(0x4000);
+  g_copySampledAtPass.clear();
+  g_copySampledAtPass[kFeedback] = 1;   // sampled in pass 1, written in pass 3 -> feedback
+  g_copySampledAtPass[kIntra] = 4;      // sampled in pass 4, written in pass 2 -> intra-frame
+  g_copySampledAtPass[kSame] = 2;       // sampled in the same pass that writes it -> intra-frame
+  struct Case { const char* name; const void* dest; uint32_t pass; bool want; };
+  const Case cases[] = {
+      {"sampled BEFORE the copy (previous frame's contents)", kFeedback, 3, true},
+      {"sampled AFTER the copy (this frame's consumer)", kIntra, 2, false},
+      {"sampled in the SAME pass as the copy (order unknown)", kSame, 2, false},
+      {"never sampled at all", kUnsampled, 2, false},
+  };
+  for (const Case& c : cases) {
+    const bool got = is_cross_frame_feedback(c.dest, c.pass);
+    if (got != c.want) {
+      ok = false;
+      Log.error("SELFTEST FAILED [{}]: classified cross-frame={} but expected {}. The copy "
+                "classifier does not separate the two cases, so suppressing on its verdict would "
+                "either starve an intra-frame consumer or leave feedback running twice per tick.",
+                c.name, got, c.want);
+    }
+  }
+  g_copySampledAtPass = savedSamples;
+  if (ok) {
+    Log.info("copy classifier selftest PASSED: separates sampled-before (feedback) from "
+             "sampled-after and same-pass (intra-frame), and refuses an unsampled copy — all four "
+             "run, not just the one it is expected to find.");
+  }
+  return ok;
+}
+
 
 long snapped_tick_count() noexcept { return g_snappedTicks; }
 
@@ -749,7 +819,9 @@ bool interpolate_recorded_frame(float alpha) {
   // them actually discriminates. Prove that once, on synthetic input, before it is ever pointed at
   // the game — a self-test that nobody runs is the same bug one level up.
   static const bool s_selftestOk = interp::selftest();
+  static const bool s_copyClassifierOk = copy_classifier_selftest();
   (void)s_selftestOk;
+  (void)s_copyClassifierOk;
   // A tick the game declared discontinuous has no meaningful in-between: the halfway pose is a
   // viewpoint it never simulated. Force alpha 1 rather than skipping the pass, so the pairing table
   // is still filled from this tick and the tick AFTER the cut can interpolate normally — skipping
@@ -779,23 +851,38 @@ bool interpolate_recorded_frame(float alpha) {
   // must still run on both emissions, since a later pass of each emission samples what that
   // emission wrote.
   {
-    // Counted and reported, because a silent zero here is the failure mode: if the host never
-    // identifies the feedback destination, or the pointer it supplies does not match the one the
-    // copy carries, nothing is suppressed and the trail keeps jittering with no indication why.
-    static long s_suppressed = 0, s_ticks = 0;
+    // WHICH copies are temporal feedback, decided from THIS frame's own ordering rather than from
+    // which effect samples them. A copy is feedback iff its result was sampled during the frame and
+    // every one of those samples happened at or before the pass that writes it — meaning they read
+    // the PREVIOUS frame's contents. A copy sampled by a LATER pass is intra-frame and must run on
+    // both emissions, or that later pass reads nothing.
+    //
+    // Identity cannot decide this and the attempt is recorded in
+    // debug_journal/2026-08-04_afterimage_effect_and_frame_budget.md: SMS uses ONE screen texture
+    // for both purposes — cross-frame for the dash trail, intra-frame for the title's sky composite
+    // — so suppressing "the texture TAfterEffect samples" blanked the title background on every
+    // interpolated present.
+    static long s_suppressed = 0, s_kept = 0, s_ticks = 0;
     long thisTick = 0;
-    for (auto& pass : frame.renderPasses) {
-      if (pass.resolveIsFeedback && pass.resolveTarget) {
-        pass.resolveTarget = {};
+    for (uint32_t i = 0; i < frame.renderPasses.size(); ++i) {
+      auto& pass = frame.renderPasses[i];
+      if (!pass.resolveTarget || pass.resolveDest == nullptr) {
+        continue;
+      }
+      if (is_cross_frame_feedback(pass.resolveDest, i)) {
+        pass.resolveTarget = {};   // feedback: leave it to the replay emission, once per tick
         ++thisTick;
+      } else {
+        ++s_kept;
       }
     }
     s_suppressed += thisTick;
     if ((++s_ticks % 300) == 0) {
-      Log.info("feedback copies suppressed on the interpolated emission: {} over {} ticks ({} this "
-               "tick). ZERO means the host never named a feedback destination, or named one that no "
-               "copy matches — not that the scene has no feedback effect.",
-               s_suppressed, s_ticks, thisTick);
+      Log.info("EFB copies over {} ticks: {} suppressed on the interpolated emission (cross-frame "
+               "feedback, sampled only BEFORE the pass that writes them) and {} kept (intra-frame, "
+               "a later pass reads them). Both numbers matter: all-suppressed means an intra-frame "
+               "copy is being starved, all-kept means no feedback copy was recognised.",
+               s_ticks, s_suppressed, s_kept);
     }
   }
 
@@ -1087,8 +1174,11 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
   // Resolve current render pass
   auto& prevPass = current_render_passes()[g_currentRenderPass];
   prevPass.resolveTarget = std::move(texture);
-  prevPass.resolveIsFeedback = g_nextResolveIsFeedback;
-  g_nextResolveIsFeedback = false;
+  prevPass.resolveDest = g_pendingResolveDest;
+  if (g_pendingResolveDest != nullptr) {
+    g_copyResolvedAtPass[g_pendingResolveDest] = g_currentRenderPass;
+    g_pendingResolveDest = nullptr;
+  }
   prevPass.resolveRect = rect;
   prevPass.resolveFormat = resolveFormat;
   // Push UV transform uniform for tex_copy_conv (crop region in UV space)
@@ -1584,6 +1674,11 @@ bool begin_frame() {
   // does. Only the size resets — the buffer keeps its capacity, so a steady scene stops allocating
   // after the first few ticks.
   g_uniformShadowSize = 0;
+  // The copy-ordering record describes ONE frame; carrying it over would let last frame's sample
+  // order decide this frame's copies.
+  g_copySampledAtPass.clear();
+  g_copyResolvedAtPass.clear();
+  g_pendingResolveDest = nullptr;
   frame.frameId = g_nextFrameId++;
   frame.frameIndex = g_frameIndex;
   frame.stagingBuffer = *stagingSlot;

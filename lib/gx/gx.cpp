@@ -455,6 +455,13 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
     auto& textureBind = g_gxState.textures[i];
     const auto copyIt = g_gxState.copyTextures.find(obj.data);
     const GXState::CopyTextureRef* copyRef = copyIt != g_gxState.copyTextures.end() ? &copyIt->second : nullptr;
+    // Recorded BEFORE the unchanged-bind early-out below: whether the bind needed rebuilding is
+    // irrelevant to the question being asked here, which is only "did this frame sample this copy's
+    // result, and when". Skipping it on the fast path would lose most samples and make an
+    // intra-frame copy look like feedback.
+    if (copyRef != nullptr) {
+      gfx::note_copy_texture_sampled(obj.data);
+    }
     if (obj.texObjId != 0 && obj.texObjId == textureBind.texObj.texObjId &&
         obj.texDataVersion == textureBind.texObj.texDataVersion) {
       // Texture bind unchanged — unless an EFB copy to this address now
