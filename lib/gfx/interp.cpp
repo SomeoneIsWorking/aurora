@@ -82,6 +82,12 @@ bool g_haveViewPrev = false;
 float g_camDelta[12];      // V_lerp * V_cur^-1
 bool g_camDeltaValid = false;
 long g_cameraPatched = 0;
+// Why a camera patch did NOT happen. patch_draw returns at its tag check for an untagged draw, so
+// its offset diagnostic is never reached for exactly the draws that rely on this path — the skip
+// below was therefore completely silent, and a silently-skipped draw renders from the CURRENT
+// viewpoint while the rest of the frame is at the in-between one.
+long g_camRefusedNoDelta = 0;
+long g_camRefusedBadOffset = 0;
 
 // The inverse views, kept for ATTRIBUTION rather than for patching: M = V^-1 * (V*M) recovers an
 // object's own transform from the matrix the draw actually carries.
@@ -398,11 +404,13 @@ bool begin_camera_delta(float alpha) {
 void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
                        uint32_t mtxPosOffset, uint32_t mtxNrmOffset) {
   if (!g_camDeltaValid || dst == nullptr || src == nullptr) {
+    ++g_camRefusedNoDelta;
     return;
   }
   if (mtxPosOffset == 0 || mtxNrmOffset == 0 || mtxPosOffset + kMtxBytes > uniformSize ||
       mtxNrmOffset + kMtxBytes > uniformSize) {
-    return;   // already reported by patch_draw's identical checks
+    ++g_camRefusedBadOffset;
+    return;
   }
   // EVERY READ FROM src, EVERY WRITE TO dst — the same rule patch_draw follows, and for the same
   // reason. dst is GPU staging, which is write-combined: writing it is cheap, reading it back is
@@ -451,6 +459,7 @@ void reset_stats() {
   g_haveViewCur = g_haveViewPrev = g_haveInvCur = g_haveInvPrev = false;
   g_camDeltaValid = false;
   g_cameraPatched = 0;
+  g_camRefusedNoDelta = g_camRefusedBadOffset = 0;
 }
 
 // Build a view matrix for a camera at world position `eye`, axis-aligned: V = [I | -eye].
@@ -629,8 +638,11 @@ void report() {
              "two viewpoints at once. This is the failure that makes partial coverage worse than "
              "none — emit GX_AURORA_VIEW_MTX.");
   } else {
-    Log.info("camera interpolation: view matrix supplied, {} draw uniforms carried the camera delta",
-             g_cameraPatched);
+    Log.info("camera interpolation: {} draw uniforms carried the camera delta; REFUSED {} for no "
+             "usable camera delta and {} for an unusable matrix offset. A refused draw keeps the "
+             "CURRENT viewpoint while the rest of the frame moves to the in-between one, so a large "
+             "refusal count is the frame being drawn from two viewpoints at once.",
+             g_cameraPatched, g_camRefusedNoDelta, g_camRefusedBadOffset);
   }
 }
 

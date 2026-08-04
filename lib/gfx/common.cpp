@@ -2211,9 +2211,25 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
       case ShaderType::Clear:
         clear::render(draw.clear, pass, passInfo.targetSize);
         break;
-      case ShaderType::GX:
+      case ShaderType::GX: {
+        // SB_VIZ_TAG=untagged|tagged (diagnostic): draw only one class, so "which geometry is not
+        // reaching the tag seam" can be ANSWERED BY LOOKING rather than inferred from draw counts.
+        // Counts have been the wrong denominator twice in this arc — what matters is screen area,
+        // and the eye reads that off a frame dump immediately.
+        static const int s_vizTag = [] {
+          const char* e = std::getenv("SB_VIZ_TAG");
+          if (e == nullptr || e[0] == '\0') return 0;
+          if (std::strcmp(e, "untagged") == 0) return 1;
+          if (std::strcmp(e, "tagged") == 0) return 2;
+          Log.error("SB_VIZ_TAG={} is not 'untagged' or 'tagged'; showing everything", e);
+          return 0;
+        }();
+        if ((s_vizTag == 1 && draw.gx.tag != 0) || (s_vizTag == 2 && draw.gx.tag == 0)) {
+          break;
+        }
         gx::render(draw.gx, pass);
         break;
+      }
 #ifdef AURORA_ENABLE_RMLUI
       case ShaderType::Rml:
         rmlui::render(draw.rml, pass);
