@@ -84,6 +84,20 @@ void drain() {
                  s_frame++, detail::sBufferSize, detail::sDrainDraws, detail::sDrainVerts);
     std::fflush(stderr);
   }
+  // SB_PROFILE_DRAWPRIM=1: report draw_prim's own share of the drain, and how much of THAT is the
+  // per-vertex max-index scan. Printed per drain (one frame) so it lines up with SB_PROFILE_GFX.
+  {
+    extern int64_t g_dpTotalNs, g_dpScanNs;
+    extern long g_dpCalls;
+    if (g_dpCalls > 0) {
+      std::fprintf(stderr, "[drawprim] calls=%ld total=%.2fms scan=%.2fms (%.0f%% of draw_prim)\n",
+                   g_dpCalls, g_dpTotalNs / 1e6, g_dpScanNs / 1e6,
+                   g_dpTotalNs ? 100.0 * (double)g_dpScanNs / (double)g_dpTotalNs : 0.0);
+      std::fflush(stderr);
+      g_dpTotalNs = g_dpScanNs = 0;
+      g_dpCalls = 0;
+    }
+  }
   detail::sDrainDraws = 0;
   detail::sDrainVerts = 0;
   detail::sBufferSize = 0;

@@ -1985,7 +1985,30 @@ long g_untaggedPerspDrawCount = 0;
 long g_untaggedPerspDirectCount = 0;
 long g_untaggedPerspIndexedCount = 0;
 
+// SB_PROFILE_DRAWPRIM=1 accounting. Reported per drain by the caller.
+static bool sb_drawprim_profile() {
+  static const bool on = [] {
+    const char* e = std::getenv("SB_PROFILE_DRAWPRIM");
+    return e != nullptr && e[0] != '\0' && e[0] != '0';
+  }();
+  return on;
+}
+static int64_t sb_now_ns() {
+  timespec ts{};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+}
+int64_t g_dpTotalNs = 0, g_dpScanNs = 0;
+long g_dpCalls = 0;
+static void sb_drawprim_add_scan(int64_t ns) { g_dpScanNs += ns; }
+
 static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size) {
+  const bool dpProf = sb_drawprim_profile();
+  const int64_t dpT0 = dpProf ? sb_now_ns() : 0;
+  struct DpScope {
+    bool on; int64_t t0;
+    ~DpScope() { if (on) { g_dpTotalNs += sb_now_ns() - t0; ++g_dpCalls; } }
+  } dpScope{dpProf, dpT0};
   ZoneScoped;
   u32 vtxSize;
   if (g_gxState.lastVtxFmt == fmt)
@@ -2972,6 +2995,12 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       off += static_cast<u32>(wide) * cnt;
     }
     if (nFields > 0) {
+      // SB_PROFILE_DRAWPRIM=1: time this max-index scan against draw_prim as a whole. The scan is
+      // per-vertex, per-indexed-attribute and runs on EVERY draw, so it is the obvious suspect for
+      // draw_prim's 45% share of render time — but "obvious suspect" is not a measurement, and the
+      // last two attributions in this arc were both wrong.
+      const bool tdp = sb_drawprim_profile();
+      const int64_t tScan0 = tdp ? sb_now_ns() : 0;
       u32 maxIdx[GX_VA_TEX7 + 1] = {};
       for (u32 v = 0; v < vtxCount; ++v) {
         const u8* vp = data + pos + v * vtxSize;
@@ -2983,6 +3012,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           }
         }
       }
+      if (tdp) { sb_drawprim_add_scan(sb_now_ns() - tScan0); }
       for (int f = 0; f < nFields; ++f) {
         auto& arr = g_gxState.arrays[fields[f].attr];
         const u32 need = (maxIdx[fields[f].attr] + 1) * arr.stride;
