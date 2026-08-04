@@ -184,6 +184,9 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
     s_useForced = s_on;
     if (s_on) s_forced = s_col;
   }
+  // Flag a temporal-feedback destination for the pass about to take this resolve, so interpolated
+  // 60fps can run it once per tick rather than once per present. Never the display copy.
+  gfx::mark_next_resolve_feedback(dest != kDisplayCopyDest && gfx::is_feedback_copy_dest(dest));
   gfx::resolve_pass(handle.handle, rect, clearColor, clearAlpha, clearDepth,
                     s_useForced ? s_forced : g_gxState.clearColor, clear_depth_value(), texCopyFmt);
   // SB_PRESENT_PASS1: stash the FIRST clear=true copy's resolved texture as a
