@@ -93,7 +93,15 @@ bool begin_camera_delta(float alpha);
 void end_tick();
 
 // Pairing statistics, so "interpolating" can be told apart from "silently snapping everything".
-// Reports the share of tagged draws that found a partner, and the mismatch count.
+// Reports the share of tagged draws that found a partner, the mismatch count, and the two-number
+// attribution that says whether a large inter-tick delta was the OBJECT moving or the CAMERA.
 void report();
+
+// Run the attribution discriminator against BOTH classes it is supposed to tell apart — a camera
+// that moves while the object is static, and an object that moves while the camera is static — and
+// return false if it fails either. Called once before the first real tick, because a discriminator
+// that has only been reasoned about is not known to discriminate: this project has shipped one that
+// scored backwards on both classes. Leaves no synthetic samples in the run's statistics.
+bool selftest();
 
 } // namespace aurora::gfx::interp
