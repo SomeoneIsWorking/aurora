@@ -1852,6 +1852,16 @@ void end_frame(EndFrameCallback callback) {
   if (s_frameSizeLogEvery > 0 && !frame.replayEmission) {
     static int s_frameSizeLogCount = 0;
     if (++s_frameSizeLogCount % s_frameSizeLogEvery == 0) {
+      // Per-pass draw counts. The long-open question is whether a redundant full-scene "ghost pass"
+      // doubles the frame's work; two passes with comparable draw counts is what that would look
+      // like, and no amount of totals can show it.
+      std::string perPass;
+      for (const auto& p : frame.renderPasses) {
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "%zu ", p.commands.size());
+        perPass += buf;
+      }
+      Log.info("per-pass command counts: {}", perPass);
       Log.info("frame sizes: uniforms={} B verts={} B indices={} B storage={} B textureUpload={} B passes={} draws={}",
                frame.uniforms.size(), frame.verts.size(), frame.indices.size(), frame.storage.size(),
                frame.textureUpload.size(), frame.renderPasses.size(), g_drawCallCount);
