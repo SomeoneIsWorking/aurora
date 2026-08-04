@@ -287,6 +287,12 @@ bool interpolate_recorded_frame(float alpha);
 // — the measured camera-step distribution has no gap to put a threshold in.
 void snap_next_interpolation();
 long snapped_tick_count() noexcept;
+// Turn interpolated 60fps on from the host with a single call: doubled present AND the given alpha.
+// This is the user-facing path — a player should not have to set two environment variables that
+// agree with each other, because a configuration that can be half-set is a configuration that will
+// eventually be half-set. AURORA_REPLAY_PRESENT / AURORA_INTERP_ALPHA still work and still win, so
+// the diagnostic runs that need the two halves driven independently are unaffected.
+void force_interpolation(float alpha);
 uint32_t current_frame() noexcept;
 void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
 void after_submit() noexcept;
