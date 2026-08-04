@@ -607,6 +607,18 @@ float interp_alpha() noexcept {
   return s_alpha;
 }
 
+namespace {
+// Set by the host when the GAME declares this tick's camera discontinuous (see the recomp's
+// camera_cut.cpp). Consumed by the next interpolate_recorded_frame, which then forces alpha 1 —
+// both emissions show the tick exactly, which is a snap.
+bool g_snapNextTick = false;
+long g_snappedTicks = 0;
+} // namespace
+
+void snap_next_interpolation() { g_snapNextTick = true; }
+
+long snapped_tick_count() noexcept { return g_snappedTicks; }
+
 bool capture_replay_snapshot() {
   ZoneScoped;
   // Command::Data is a UNION: a member with a non-trivial copy ctor or destructor (rmlui::DrawData
@@ -665,6 +677,16 @@ bool interpolate_recorded_frame(float alpha) {
   // the game — a self-test that nobody runs is the same bug one level up.
   static const bool s_selftestOk = interp::selftest();
   (void)s_selftestOk;
+  // A tick the game declared discontinuous has no meaningful in-between: the halfway pose is a
+  // viewpoint it never simulated. Force alpha 1 rather than skipping the pass, so the pairing table
+  // is still filled from this tick and the tick AFTER the cut can interpolate normally — skipping
+  // would leave the table holding the pre-cut pose and move the artefact one frame later.
+  const bool snapping = g_snapNextTick;
+  if (snapping) {
+    g_snapNextTick = false;
+    ++g_snappedTicks;
+    alpha = 1.0f;
+  }
   auto& frame = *g_recordingFrame;
   const auto& snap = g_replaySnapshot.uniforms;
   interp::begin_tick();
@@ -673,6 +695,15 @@ bool interpolate_recorded_frame(float alpha) {
   // the in-between one, and the frame is drawn from two viewpoints at once — measured as worse than
   // not interpolating at all.
   interp::begin_camera_delta(alpha);
+  if (snapping) {
+    // Printed with the tick index so the game's declared cut can be lined up against the per-tick
+    // camera measurements in interp::report(). If the snapped ticks do not coincide with the ticks
+    // that measured a large camera step, then either the signal is firing on non-cuts or it is
+    // missing real ones — and a snap count alone could not tell you which.
+    Log.info("tick {}: SNAPPED (alpha forced to 1) — the game declared the camera discontinuous, so "
+             "this tick has no in-between to show",
+             interp::tick_index());
+  }
   for (const auto& pass : frame.renderPasses) {
     for (const auto& cmd : pass.commands) {
       if (cmd.type != CommandType::Draw || cmd.data.draw.type != ShaderType::GX) {
