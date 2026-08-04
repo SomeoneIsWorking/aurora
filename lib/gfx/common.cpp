@@ -660,6 +660,11 @@ bool interpolate_recorded_frame(float alpha) {
               "function is about to overwrite.");
     return false;
   }
+  // The attribution numbers in interp::report() are only worth reading if the discriminator behind
+  // them actually discriminates. Prove that once, on synthetic input, before it is ever pointed at
+  // the game — a self-test that nobody runs is the same bug one level up.
+  static const bool s_selftestOk = interp::selftest();
+  (void)s_selftestOk;
   auto& frame = *g_recordingFrame;
   const auto& snap = g_replaySnapshot.uniforms;
   interp::begin_tick();
