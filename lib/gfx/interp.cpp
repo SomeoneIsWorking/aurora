@@ -395,28 +395,36 @@ bool begin_camera_delta(float alpha) {
   return true;
 }
 
-void patch_camera_only(uint8_t* dst, uint32_t uniformSize, uint32_t mtxPosOffset,
-                       uint32_t mtxNrmOffset) {
-  if (!g_camDeltaValid || dst == nullptr) {
+void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
+                       uint32_t mtxPosOffset, uint32_t mtxNrmOffset) {
+  if (!g_camDeltaValid || dst == nullptr || src == nullptr) {
     return;
   }
   if (mtxPosOffset == 0 || mtxNrmOffset == 0 || mtxPosOffset + kMtxBytes > uniformSize ||
       mtxNrmOffset + kMtxBytes > uniformSize) {
     return;   // already reported by patch_draw's identical checks
   }
-  auto* pos = reinterpret_cast<float*>(dst + mtxPosOffset);
-  auto* nrm = reinterpret_cast<float*>(dst + mtxNrmOffset);
+  // EVERY READ FROM src, EVERY WRITE TO dst — the same rule patch_draw follows, and for the same
+  // reason. dst is GPU staging, which is write-combined: writing it is cheap, reading it back is
+  // uncached and roughly two orders of magnitude slower. This function used to read its input from
+  // dst and write the result back over it, so each unpaired draw performed ~960 bytes of uncached
+  // reads. That was the dominant cost of interpolation — the feature spent more time reading GPU
+  // memory back than the rest of the frame took to build. src holds the same bytes in ordinary RAM.
+  const auto* srcPos = reinterpret_cast<const float*>(src + mtxPosOffset);
+  const auto* srcNrm = reinterpret_cast<const float*>(src + mtxNrmOffset);
+  auto* dstPos = reinterpret_cast<float*>(dst + mtxPosOffset);
+  auto* dstNrm = reinterpret_cast<float*>(dst + mtxNrmOffset);
   for (int slot = 0; slot < 10; ++slot) {
     float out[12];
-    compose(g_camDelta, pos + slot * 12, out);
-    std::memcpy(pos + slot * 12, out, sizeof(out));
+    compose(g_camDelta, srcPos + slot * 12, out);
+    std::memcpy(dstPos + slot * 12, out, sizeof(out));
     // Normals take the rotation only — no translation. Correct for a rigid view delta, because the
     // inverse-transpose of a rotation is the rotation itself.
-    compose(g_camDelta, nrm + slot * 12, out);
-    out[3] = nrm[slot * 12 + 3];
-    out[7] = nrm[slot * 12 + 7];
-    out[11] = nrm[slot * 12 + 11];
-    std::memcpy(nrm + slot * 12, out, sizeof(out));
+    compose(g_camDelta, srcNrm + slot * 12, out);
+    out[3] = srcNrm[slot * 12 + 3];
+    out[7] = srcNrm[slot * 12 + 7];
+    out[11] = srcNrm[slot * 12 + 11];
+    std::memcpy(dstNrm + slot * 12, out, sizeof(out));
   }
   ++g_cameraPatched;
 }

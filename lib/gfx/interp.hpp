@@ -80,8 +80,11 @@ void set_view_matrix(const float m[12]);
 //
 // Does nothing if no view matrix has been supplied, or if the tick has no previous view to
 // interpolate from.
-void patch_camera_only(uint8_t* dst, uint32_t uniformSize, uint32_t mtxPosOffset,
-                       uint32_t mtxNrmOffset);
+// `src` is the cached-RAM copy of this draw's uniform block and `dst` the live GPU staging: every
+// read comes from src, every write goes to dst, because reading write-combined memory back is
+// uncached and was the dominant cost of interpolation until it was removed.
+void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
+                       uint32_t mtxPosOffset, uint32_t mtxNrmOffset);
 
 // Compute this tick's camera delta from the supplied view matrices. Called once per tick, before
 // the per-draw patching. Returns false if there is no usable delta (no view supplied, or the view

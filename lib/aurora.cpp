@@ -33,6 +33,11 @@
 #include "tracy/Tracy.hpp"
 
 extern "C" double g_sbGxProf[7];
+// Host hook called between the two presents of an interpolated tick, so the interpolated image is
+// SHOWN at the half-tick rather than issued back-to-back with the tick's own image. Weak: a host
+// that does not pace leaves it null and nothing sleeps.
+extern "C" __attribute__((weak)) void aurora_replay_midpoint();
+
 namespace aurora {
 static AuroraFrameSink g_frameSink = nullptr;
 static void* g_frameSinkUser = nullptr;
@@ -376,7 +381,25 @@ void end_frame_impl(bool replayEmission) noexcept {
   }
   auto t1 = s_profGfx ? pnow() : std::chrono::steady_clock::time_point{};
   if (!replayEmission) {
-    gfx::finish();
+    {
+      // finish() costs 12 us with the replay path off and ~13 ms with it on, while the snapshot it
+      // sits next to measures under 1 ms. Time it on its own rather than keep attributing the gap
+      // to whichever neighbour is being looked at.
+      static const bool s_timeFinish = [] {
+        const char* e = std::getenv("AURORA_REPLAY_PROFILE");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+      }();
+      const auto fa = s_timeFinish ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+      gfx::finish();
+      if (s_timeFinish) {
+        static double acc = 0;
+        static long n = 0;
+        acc += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - fa).count();
+        if (++n % 200 == 0) {
+          Log.info("gfx::finish avg over {} ticks: {:.0f} us", n, acc / (double)n);
+        }
+      }
+    }
     if (gfx::replay_present_enabled()) {
       // Between finish() and end_frame(): finish() has sealed and enqueued the last pass, so every
       // pass in the packet is complete, and the staging buffer is still mapped.
@@ -810,6 +833,15 @@ void end_frame() noexcept {
   // install_replay_snapshot then throws away the pass it created and puts the snapshot in.
   if (!gfx::replay_present_enabled() || !gfx::has_replay_snapshot()) {
     return;
+  }
+  // The host paces the gap between the two presents. vsync is off, so a present reaches the screen
+  // when it is issued: issuing both back to back and sleeping afterwards puts two images on the
+  // display a millisecond apart and then nothing for a whole tick, which is 30 fps with every frame
+  // sent twice however high the present count reads. The first image is a picture of the half-tick
+  // and belongs at the half-tick. Weak, so a host with no pacing of its own (or a headless run)
+  // simply does not sleep.
+  if (aurora_replay_midpoint != nullptr) {
+    aurora_replay_midpoint();
   }
   if (!begin_frame()) {
     // Paused, or the window went non-presentable between the two emissions. Nothing was opened, so

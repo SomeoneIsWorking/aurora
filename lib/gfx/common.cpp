@@ -568,17 +568,33 @@ struct ReplaySnapshot {
 };
 static ReplaySnapshot g_replaySnapshot;
 
+namespace {
+// Host-set overrides for the two interpolation knobs. They exist so the host can turn the WHOLE
+// feature on with one switch: this is a user-facing mode, and requiring a player to set three
+// environment variables in agreement is a way to ship a broken configuration, not a knob. The env
+// vars still work and still win, because the diagnostic paths (the EFB-idempotence control, the A/B
+// runs) need to drive the two halves independently.
+bool g_replayForced = false;
+float g_alphaForced = -1.0f;
+} // namespace
+
+// This tick's uniform bytes in ordinary cached RAM, mirrored at the same offsets as the GPU staging
+// buffer they were written to. See push_uniform for why this exists rather than reading the staging
+// back. Grows to the high-water mark of a tick and then stops reallocating.
+std::vector<uint8_t> g_uniformShadow;
+size_t g_uniformShadowSize = 0;
+
+void force_interpolation(float alpha) {
+  g_replayForced = true;
+  g_alphaForced = alpha;
+}
+
 bool replay_present_enabled() noexcept {
-  // Read once. An env switch rather than a host-called setter because that is aurora's own
-  // convention for this class of knob (SB_CLEAR_OVERRIDE, SB_PROFILE_GFX, SB_DUMP_FRAME are all
-  // read-once getenv right where they act), and because the two callers of the replay path are
-  // both INSIDE aurora's end_frame — a setter would only add a way for the host to leave it
-  // half-configured.
-  static const bool s_enabled = [] {
+  static const bool s_env = [] {
     const char* e = std::getenv("AURORA_REPLAY_PRESENT");
     return e != nullptr && e[0] != '\0' && e[0] != '0';
   }();
-  return s_enabled;
+  return s_env || g_replayForced;
 }
 
 bool has_replay_snapshot() noexcept { return g_replaySnapshot.valid; }
@@ -604,7 +620,8 @@ float interp_alpha() noexcept {
     }
     return v;
   }();
-  return s_alpha;
+  // Env wins, so every existing diagnostic run keeps behaving exactly as it did.
+  return s_alpha >= 0.0f ? s_alpha : g_alphaForced;
 }
 
 namespace {
@@ -638,17 +655,55 @@ bool capture_replay_snapshot() {
     return false;
   }
   auto& frame = *g_recordingFrame;
+  // Sub-timers, because "the snapshot costs 13 ms" does not say WHICH half: the pass-list copy and
+  // the uniform copy have nothing in common and would be fixed differently.
+  static const bool s_timeIt = [] {
+    const char* e = std::getenv("AURORA_REPLAY_PROFILE");
+    return e != nullptr && e[0] != '\0' && e[0] != '0';
+  }();
+  const auto tStart = s_timeIt ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   g_replaySnapshot.renderPasses = frame.renderPasses;
-  // frame.uniforms is a view over WRITE-mapped GPU staging memory, which is usually
-  // write-combined: reading it back is legal but uncached, and this memcpy is the one genuinely
-  // expensive part of the snapshot. It is also unavoidable — end_frame unmaps that staging buffer
-  // long before the replay emission needs the bytes. AURORA_REPLAY_LOG_EVERY reports the size so
-  // the cost stays a measured number.
-  g_replaySnapshot.uniforms.resize(frame.uniforms.size());
-  if (!g_replaySnapshot.uniforms.empty()) {
-    memcpy(g_replaySnapshot.uniforms.data(), frame.uniforms.data(), g_replaySnapshot.uniforms.size());
+  const auto tPasses = s_timeIt ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  // Read from the RAM shadow, never from frame.uniforms — that is a view over write-mapped GPU
+  // staging, which is write-combined, and reading ~2.85 MB of it back per tick is what made this
+  // feature run the game in slow motion. push_uniform mirrors every write here at the same offset,
+  // so this is a plain cached copy.
+  //
+  // The sizes must agree. If they do not, the shadow missed writes and the replay would present a
+  // frame built from stale uniforms — geometry from this tick with some other tick's transforms,
+  // which looks like a render bug rather than a bookkeeping one. Refuse loudly instead.
+  if (g_uniformShadowSize != frame.uniforms.size()) {
+    Log.error("uniform shadow is {} bytes but the frame recorded {} — some uniform write bypassed "
+              "push_uniform. Refusing to snapshot: replaying from a short shadow would present this "
+              "tick's geometry with stale transforms and read as a render defect.",
+              g_uniformShadowSize, frame.uniforms.size());
+    return false;
+  }
+  g_replaySnapshot.uniforms.resize(g_uniformShadowSize);
+  if (g_uniformShadowSize != 0) {
+    memcpy(g_replaySnapshot.uniforms.data(), g_uniformShadow.data(), g_uniformShadowSize);
   }
   g_replaySnapshot.valid = true;
+  if (s_timeIt) {
+    const auto tEnd = std::chrono::steady_clock::now();
+    auto us = [](auto a, auto b) { return std::chrono::duration<double, std::micro>(b - a).count(); };
+    static double accPasses = 0, accUniforms = 0;
+    static long n = 0;
+    static size_t cmds = 0;
+    accPasses += us(tStart, tPasses);
+    accUniforms += us(tPasses, tEnd);
+    size_t c = 0;
+    for (const auto& p : g_replaySnapshot.renderPasses) {
+      c += p.commands.size();
+    }
+    cmds += c;
+    if (++n % 200 == 0) {
+      Log.info("replay snapshot avg over {} ticks: pass-list copy {:.0f} us ({} commands), uniform "
+               "copy {:.0f} us ({} B)",
+               n, accPasses / (double)n, cmds / n, accUniforms / (double)n,
+               g_replaySnapshot.uniforms.size());
+    }
+  }
   return true;
 }
 
@@ -723,7 +778,8 @@ bool interpolate_recorded_frame(float alpha) {
           d.ortho == 0) {
         // Perspective only. An orthographic draw's matrix is not model x view, so a camera delta
         // does not belong in it — it would slide the HUD bodily every other frame.
-        interp::patch_camera_only(dst, d.uniformRange.size, d.mtxPosOffset, d.mtxNrmOffset);
+        interp::patch_camera_only(snap.data() + d.uniformRange.offset, dst, d.uniformRange.size,
+                                  d.mtxPosOffset, d.mtxNrmOffset);
       }
     }
   }
@@ -1467,6 +1523,10 @@ bool begin_frame() {
 
   auto& frame = g_framePackets[frameSlot];
   frame = {};
+  // The RAM shadow tracks THIS packet's uniform region, so it resets exactly when the packet's
+  // does. Only the size resets — the buffer keeps its capacity, so a steady scene stops allocating
+  // after the first few ticks.
+  g_uniformShadowSize = 0;
   frame.frameId = g_nextFrameId++;
   frame.frameIndex = g_frameIndex;
   frame.stagingBuffer = *stagingSlot;
@@ -1580,6 +1640,18 @@ void finish() {
   if (g_currentRenderPass != UINT32_MAX) {
     auto& frame = current_frame_packet();
     frame.uniforms.append_zeroes(gx::MaxUniformSize);
+    // Mirror the padding into the RAM shadow. This is not a uniform block anyone binds, but the
+    // shadow has to stay byte-for-byte the same LENGTH as the staging region or the snapshot's
+    // size check cannot distinguish padding from a genuinely missed write — and that check is the
+    // only thing standing between a short shadow and a replay presented with stale transforms.
+    if (replay_present_enabled() && !frame.replayEmission) {
+      const size_t end = frame.uniforms.size();
+      if (g_uniformShadow.size() < end) {
+        g_uniformShadow.resize(end);
+      }
+      memset(g_uniformShadow.data() + g_uniformShadowSize, 0, end - g_uniformShadowSize);
+      g_uniformShadowSize = end;
+    }
     auto& pass = frame.renderPasses[g_currentRenderPass];
     pass.observable = true;
     pass.captureDepthSnapshot = true;
@@ -2079,7 +2151,30 @@ Range push_indices(const uint8_t* data, size_t length, size_t alignment) {
 
 Range push_uniform(const uint8_t* data, size_t length) {
   ZoneScoped;
-  return push(current_frame_packet().uniforms, data, length, g_cachedLimits.minUniformBufferOffsetAlignment);
+  const Range range =
+      push(current_frame_packet().uniforms, data, length, g_cachedLimits.minUniformBufferOffsetAlignment);
+  // SHADOW the uniform bytes into ordinary cached RAM as they are written.
+  //
+  // The replay emission needs this tick's true uniform bytes after the fact, and the only other way
+  // to get them is to read the staging buffer back — which is WRITE-COMBINED. Uncached reads run at
+  // a small fraction of RAM bandwidth, and a Delfino tick writes ~2.85 MB of uniforms, so that
+  // read-back alone cost more per tick than the entire rest of the frame: measured 40 ticks/s ->
+  // ~10 with interpolation on, i.e. the feature made the game run in slow motion.
+  //
+  // Writing a second copy as we go is nearly free by comparison: the bytes are already in cache
+  // here, and cached-to-cached is orders of magnitude faster than the uncached read it replaces.
+  // Mirroring at the same OFFSET (not appending) is what keeps every recorded uniformRange.offset
+  // valid against the shadow without any translation.
+  if (replay_present_enabled() && !current_frame_packet().replayEmission) {
+    auto& shadow = g_uniformShadow;
+    const size_t end = range.offset + range.size;
+    if (shadow.size() < end) {
+      shadow.resize(end);
+    }
+    memcpy(shadow.data() + range.offset, data, length);
+    g_uniformShadowSize = end;
+  }
+  return range;
 }
 
 Range push_storage(const uint8_t* data, size_t length) {
