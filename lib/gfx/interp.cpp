@@ -110,6 +110,15 @@ constexpr int kWorstTicks = 5;
 struct WorstTick { long tick = -1; double eye = -1.0; double rotDeg = 0.0; };
 WorstTick g_worst[kWorstTicks];
 
+// A short history of eye positions, so a large step can be shown IN CONTEXT rather than as a bare
+// magnitude. See the use site for why the context is the whole point.
+constexpr int kEyeRing = 3;
+struct EyeSample { long tick = -1; float x = 0, y = 0, z = 0; };
+EyeSample g_eyeRing[kEyeRing];
+int g_eyeRingPos = 0;
+int g_eyeFollow = 0;
+int g_eyeCasesPrinted = 0;
+
 void note_worst_tick(long tick, double eye, double rotDeg) {
   int slot = -1;
   double lowest = eye;
@@ -333,6 +342,36 @@ bool begin_camera_delta(float alpha) {
     }
     ++g_camHist[bucket];
     note_worst_tick(g_tickIndex, eye, rotDeg);
+
+    // LOCALISATION, not a behavioural threshold: dump the eye positions AROUND a large step so its
+    // shape can be read. A step that jumps away and comes straight back is not a cut at all — it is
+    // this measurement aliasing between two cameras, because j3dSys.mViewMtx is a single global and
+    // the emitter samples it at end of tick, so a tick that renders a second camera (a mirror or
+    // reflection pass) hands over that camera's view instead. A step that jumps and STAYS is a real
+    // discontinuity. The two demand opposite responses and the histogram cannot tell them apart.
+    // The 1000 only decides what gets PRINTED; nothing branches on it.
+    if (eye > 1000.0 && g_eyeCasesPrinted < 4) {
+      ++g_eyeCasesPrinted;
+      Log.info("large camera step at tick {} ({:.1f} units) — preceding eye positions:", g_tickIndex,
+               eye);
+      for (int i = 0; i < kEyeRing; ++i) {
+        const EyeSample& s = g_eyeRing[(g_eyeRingPos + i) % kEyeRing];
+        if (s.tick >= 0) {
+          Log.info("    tick {}: eye ({:.1f}, {:.1f}, {:.1f})", s.tick, s.x, s.y, s.z);
+        }
+      }
+      Log.info("    tick {}: eye ({:.1f}, {:.1f}, {:.1f})  <-- the step", g_tickIndex,
+               g_invViewCur[3], g_invViewCur[7], g_invViewCur[11]);
+      g_eyeFollow = 3;   // and the ticks after it, which is what distinguishes the two shapes
+    } else if (g_eyeFollow > 0) {
+      --g_eyeFollow;
+      Log.info("    tick {}: eye ({:.1f}, {:.1f}, {:.1f})  <-- after (returns => camera aliasing, "
+               "stays => real cut)",
+               g_tickIndex, g_invViewCur[3], g_invViewCur[7], g_invViewCur[11]);
+    }
+    g_eyeRing[g_eyeRingPos] = EyeSample{g_tickIndex, (float)g_invViewCur[3], (float)g_invViewCur[7],
+                                        (float)g_invViewCur[11]};
+    g_eyeRingPos = (g_eyeRingPos + 1) % kEyeRing;
   }
   if (!g_haveViewCur || !g_haveViewPrev) {
     return false;   // first tick, or the emitter is not supplying a view: nothing to interpolate
@@ -486,6 +525,8 @@ bool selftest() {
   }
   return ok;
 }
+
+long tick_index() { return g_tickIndex; }
 
 void end_tick() {
   g_prev.swap(g_cur);

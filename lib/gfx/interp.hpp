@@ -92,6 +92,10 @@ bool begin_camera_delta(float alpha);
 // recorded and patched.
 void end_tick();
 
+// This tick's index, so an event reported elsewhere can be lined up against the per-tick camera
+// measurements in report(). Valid after begin_camera_delta.
+long tick_index();
+
 // Pairing statistics, so "interpolating" can be told apart from "silently snapping everything".
 // Reports the share of tagged draws that found a partner, the mismatch count, and the two-number
 // attribution that says whether a large inter-tick delta was the OBJECT moving or the CAMERA.

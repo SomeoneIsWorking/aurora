@@ -281,6 +281,12 @@ float interp_alpha() noexcept;
 // Between capture_replay_snapshot() and end_frame(): rewrite the recorded frame's matrices toward
 // the previous tick's, reading the true values from the snapshot and writing only to staging.
 bool interpolate_recorded_frame(float alpha);
+// Tell the next interpolate_recorded_frame that the GAME has declared this tick's camera
+// discontinuous, so it must present the tick exactly rather than a halfway pose the game never
+// simulated. The host supplies this because aurora cannot tell a cut from fast motion by magnitude
+// — the measured camera-step distribution has no gap to put a threshold in.
+void snap_next_interpolation();
+long snapped_tick_count() noexcept;
 uint32_t current_frame() noexcept;
 void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
 void after_submit() noexcept;
