@@ -2033,6 +2033,12 @@ uint64_t g_arrUploadCount = 0, g_arrUploadBytes = 0, g_arrUploadDistinctBytes = 
 std::unordered_set<uint64_t> g_arrUploadDistinct;
 std::unordered_map<uint64_t, uint64_t> g_arrUploadHash;
 uint64_t g_arrContentChanged = 0, g_arrDataCacheHits = 0;
+// CROSS-FRAME stability. The frame packet's storage buffer is rewound every frame, so every array
+// is re-uploaded every frame even when its bytes never change. If most of the 20.4 MB is identical
+// frame to frame, a persistent GPU buffer for static geometry would remove nearly all of it — a
+// large change, worth sizing before proposing. This measures the ceiling on that win.
+std::unordered_map<uint64_t, uint64_t> g_arrHashPrevFrame;
+uint64_t g_arrSameAsPrevBytes = 0, g_arrChangedVsPrevBytes = 0, g_arrNewVsPrevBytes = 0;
 long g_dpMergedCalls = 0, g_dpUnmergedCalls = 0, g_dpEarlyReturns = 0;
 uint64_t g_dpWholeTicks = 0;
 // Control: two back-to-back reads with nothing between them. This is what ONE probe costs, and
@@ -4284,6 +4290,17 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         // anything else falsifies the optimisation outright.
         const uint64_t h =
             static_cast<uint64_t>(xxh3_hash_s(static_cast<const uint8_t*>(array.data), effSize));
+        // Compare against the SAME key's hash in the previous frame.
+        {
+          const auto pit = g_arrHashPrevFrame.find(key);
+          if (pit == g_arrHashPrevFrame.end()) {
+            g_arrNewVsPrevBytes += effSize;
+          } else if (pit->second == h) {
+            g_arrSameAsPrevBytes += effSize;
+          } else {
+            g_arrChangedVsPrevBytes += effSize;
+          }
+        }
         const auto it = g_arrUploadHash.find(key);
         if (it == g_arrUploadHash.end()) {
           g_arrUploadHash.emplace(key, h);
