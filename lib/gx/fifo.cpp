@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
@@ -89,6 +90,13 @@ void drain() {
   {
     extern int64_t g_dpTotalNs, g_dpScanNs;
     extern long g_dpCalls, g_dpVerts[8], g_dpVertTotal, g_dpPrimKind[8];
+    extern uint64_t g_dpPhase[8], g_dpWholeTicks;
+    extern long g_dpPhaseCalls[8];
+    extern long g_dpMergedCalls, g_dpUnmergedCalls, g_dpEarlyReturns;
+    extern long g_dpUnmergedSampleCount, g_dpUnmergedSampleDropped;
+    extern double sb_dp_ns_per_tick_pub();
+    extern uint64_t sb_dp_probe_cost_ticks_pub();
+    extern int sb_dp_probes_per_call_pub();
     if (g_dpCalls > 0) {
       std::fprintf(stderr, "[drawprim] calls=%ld total=%.2fms scan=%.2fms (%.0f%% of draw_prim)\n",
                    g_dpCalls, g_dpTotalNs / 1e6, g_dpScanNs / 1e6,
@@ -99,10 +107,70 @@ void drain() {
                    g_dpVerts[0], g_dpVerts[1], g_dpVerts[2], g_dpVerts[3], g_dpVerts[4],
                    g_dpVerts[5], g_dpVerts[6], g_dpVerts[7], g_dpVertTotal,
                    (double)g_dpVertTotal / (double)g_dpCalls);
+
+      // Phase breakdown. The phases partition the body, so anything they do not claim is a region
+      // with no probe on some path — printed as `unattributed` rather than folded into a neighbour.
+      static const char* kPhaseName[8] = {"prologue",   "diag-pre",  "attr-enum", "idx-scan",
+                                          "diag-post",  "push-verts", "merge-idx", "unmerged"};
+      const double nsPerTick = sb_dp_ns_per_tick_pub();
+      uint64_t sum = 0;
+      for (int i = 0; i < 8; ++i) {
+        sum += g_dpPhase[i];
+      }
+      const double wholeNs = (double)g_dpWholeTicks * nsPerTick;
+      for (int i = 0; i < 8; ++i) {
+        const double ns = (double)g_dpPhase[i] * nsPerTick;
+        // ns/call is over the calls that ENTERED this phase, and the entry count is printed
+        // beside it: a phase that runs on 3% of calls has a per-call cost 35x its share of the
+        // average, and averaging over all calls hides exactly the expensive-but-rare case.
+        const long n = g_dpPhaseCalls[i];
+        std::fprintf(stderr, "[drawprim]   %-10s %7.3fms  %5.1f%%  %8.1f ns/call  n=%ld (%.0f%% of calls)\n",
+                     kPhaseName[i], ns / 1e6, wholeNs > 0 ? 100.0 * ns / wholeNs : 0.0,
+                     n > 0 ? ns / (double)n : 0.0, n,
+                     g_dpCalls > 0 ? 100.0 * (double)n / (double)g_dpCalls : 0.0);
+      }
+      const double unattrNs = wholeNs - (double)sum * nsPerTick;
+      std::fprintf(stderr, "[drawprim]   %-10s %7.3fms  %5.1f%%   <- CONTROL: regions no phase claimed\n",
+                   "unattr", unattrNs / 1e6, wholeNs > 0 ? 100.0 * unattrNs / wholeNs : 0.0);
+
+      // CONTROL: what the probes themselves cost. A phase split whose probe overhead is comparable
+      // to the phases is measuring itself, exactly as the clock_gettime version did. Say so rather
+      // than let the percentages be read as fact.
+      const double probeNs = (double)sb_dp_probe_cost_ticks_pub() * nsPerTick;
+      const double probeTotalNs = probeNs * (double)sb_dp_probes_per_call_pub() * (double)g_dpCalls;
+      const double probePct = wholeNs > 0 ? 100.0 * probeTotalNs / wholeNs : 0.0;
+      std::fprintf(stderr,
+                   "[drawprim]   probe cost %.1f ns x %d probes/call = %.1f%% of the measured body%s\n",
+                   probeNs, sb_dp_probes_per_call_pub(), probePct,
+                   probePct > 25.0 ? "  <- TOO HIGH: phase split is NOT admissible" : "");
+      std::fprintf(stderr, "[drawprim]   paths: merged=%ld unmerged=%ld early-return=%ld (sum must equal calls=%ld)\n",
+                   g_dpMergedCalls, g_dpUnmergedCalls, g_dpEarlyReturns, g_dpCalls);
+
+      // Distribution of the unmerged (per-draw) cost. See the declaration: the mean alone cannot
+      // tell a uniformly expensive build path from a few pipeline compiles.
+      if (g_dpUnmergedSampleCount > 0) {
+        extern uint32_t g_dpUnmergedSamples[4096];
+        std::sort(g_dpUnmergedSamples, g_dpUnmergedSamples + g_dpUnmergedSampleCount);
+        const auto pct = [&](double p) {
+          long i = (long)(p * (double)(g_dpUnmergedSampleCount - 1));
+          return (double)g_dpUnmergedSamples[i] * nsPerTick;
+        };
+        std::fprintf(stderr,
+                     "[drawprim]   unmerged ns: p50=%.0f p90=%.0f p99=%.0f max=%.0f  (n=%ld%s)\n",
+                     pct(0.50), pct(0.90), pct(0.99),
+                     (double)g_dpUnmergedSamples[g_dpUnmergedSampleCount - 1] * nsPerTick,
+                     g_dpUnmergedSampleCount,
+                     g_dpUnmergedSampleDropped > 0 ? " TRUNCATED - distribution incomplete" : "");
+      }
+      g_dpUnmergedSampleCount = 0;
+      g_dpUnmergedSampleDropped = 0;
       std::fflush(stderr);
       g_dpTotalNs = g_dpScanNs = 0;
       g_dpCalls = 0;
       g_dpVertTotal = 0;
+      g_dpWholeTicks = 0;
+      g_dpMergedCalls = g_dpUnmergedCalls = g_dpEarlyReturns = 0;
+      for (int i = 0; i < 8; ++i) { g_dpPhase[i] = 0; g_dpPhaseCalls[i] = 0; }
       for (int i = 0; i < 8; ++i) { g_dpVerts[i] = 0; g_dpPrimKind[i] = 0; }
     }
   }
