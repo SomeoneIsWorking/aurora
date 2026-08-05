@@ -85,10 +85,10 @@ void drain() {
                  s_frame++, detail::sBufferSize, detail::sDrainDraws, detail::sDrainVerts);
     std::fflush(stderr);
   }
-  // SB_PROFILE_DRAWPRIM=1: report draw_prim's own share of the drain, and how much of THAT is the
-  // per-vertex max-index scan. Printed per drain (one frame) so it lines up with SB_PROFILE_GFX.
+  // SB_PROFILE_DRAWPRIM=1: report draw_prim's own share of the drain, broken down by phase.
+  // Printed per drain (one frame) so it lines up with SB_PROFILE_GFX.
   {
-    extern int64_t g_dpTotalNs, g_dpScanNs;
+    extern int64_t g_dpTotalNs;
     extern long g_dpCalls, g_dpVerts[8], g_dpVertTotal, g_dpPrimKind[8];
     extern uint64_t g_dpPhase[8], g_dpWholeTicks;
     extern long g_dpPhaseCalls[8];
@@ -98,9 +98,7 @@ void drain() {
     extern uint64_t sb_dp_probe_cost_ticks_pub();
     extern int sb_dp_probes_per_call_pub();
     if (g_dpCalls > 0) {
-      std::fprintf(stderr, "[drawprim] calls=%ld total=%.2fms scan=%.2fms (%.0f%% of draw_prim)\n",
-                   g_dpCalls, g_dpTotalNs / 1e6, g_dpScanNs / 1e6,
-                   g_dpTotalNs ? 100.0 * (double)g_dpScanNs / (double)g_dpTotalNs : 0.0);
+      std::fprintf(stderr, "[drawprim] calls=%ld total=%.2fms\n", g_dpCalls, g_dpTotalNs / 1e6);
       std::fprintf(stderr,
                    "[drawprim] verts/prim: 1-2:%ld 3:%ld 4:%ld 5-6:%ld 7-12:%ld 13-24:%ld "
                    "25-48:%ld 49+:%ld | total verts=%ld mean=%.1f\n",
@@ -165,7 +163,7 @@ void drain() {
       g_dpUnmergedSampleCount = 0;
       g_dpUnmergedSampleDropped = 0;
       std::fflush(stderr);
-      g_dpTotalNs = g_dpScanNs = 0;
+      g_dpTotalNs = 0;
       g_dpCalls = 0;
       g_dpVertTotal = 0;
       g_dpWholeTicks = 0;

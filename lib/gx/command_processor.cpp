@@ -5,6 +5,7 @@
 #include <cstdarg>
 
 #include "fifo.hpp"
+#include "prim_index.hpp"
 
 #include "../gfx/common.hpp"
 #include "../gfx/depth_peek.hpp"
@@ -127,73 +128,10 @@ extern "C" void sb_timeline_frame() {
 }
 
 static u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) {
-  u16 numIndices = 0;
-  if (prim == GX_QUADS) {
-    buf.reserve_extra((vtxCount / 4) * 6 * sizeof(u16));
-
-    for (u16 v = 0; v < vtxCount; v += 4) {
-      u16 idx0 = vtxStart + v;
-      u16 idx1 = vtxStart + v + 1;
-      u16 idx2 = vtxStart + v + 2;
-      u16 idx3 = vtxStart + v + 3;
-
-      buf.append(idx0);
-      buf.append(idx1);
-      buf.append(idx2);
-      numIndices += 3;
-
-      buf.append(idx2);
-      buf.append(idx3);
-      buf.append(idx0);
-      numIndices += 3;
-    }
-  } else if (prim == GX_TRIANGLES) {
-    buf.reserve_extra(vtxCount * sizeof(u16));
-    for (u16 v = 0; v < vtxCount; ++v) {
-      const u16 idx = vtxStart + v;
-      buf.append(idx);
-      ++numIndices;
-    }
-  } else if (prim == GX_TRIANGLEFAN) {
-    buf.reserve_extra(((u32(vtxCount) - 3) * 3 + 3) * sizeof(u16));
-    for (u16 v = 0; v < vtxCount; ++v) {
-      const u16 idx = vtxStart + v;
-      if (v < 3) {
-        buf.append(idx);
-        ++numIndices;
-        continue;
-      }
-      buf.append(std::array{vtxStart, static_cast<u16>(idx - 1), idx});
-      numIndices += 3;
-    }
-  } else if (prim == GX_TRIANGLESTRIP) {
-    buf.reserve_extra(((static_cast<u32>(vtxCount) - 3) * 3 + 3) * sizeof(u16));
-    for (u16 v = 0; v < vtxCount; ++v) {
-      const u16 idx = vtxStart + v;
-      if (v < 3) {
-        buf.append(idx);
-        ++numIndices;
-        continue;
-      }
-      if ((v & 1) == 0) {
-        buf.append(std::array{static_cast<u16>(idx - 2), static_cast<u16>(idx - 1), idx});
-      } else {
-        buf.append(std::array{static_cast<u16>(idx - 1), static_cast<u16>(idx - 2), idx});
-      }
-      numIndices += 3;
-    }
-  } else if (prim == GX_LINES || prim == GX_LINESTRIP || prim == GX_POINTS) {
-    buf.reserve_extra(6 * sizeof(u16));
-    buf.append<u16>(0);
-    buf.append<u16>(1);
-    buf.append<u16>(3);
-    buf.append<u16>(3);
-    buf.append<u16>(2);
-    buf.append<u16>(0);
-    numIndices = 6;
-  } else
-    UNLIKELY FATAL("unsupported primitive type {}", static_cast<u32>(prim));
-  return numIndices;
+  return prepare_idx_buffer_impl(
+      buf, static_cast<u32>(prim), vtxStart, vtxCount, GX_QUADS, GX_TRIANGLES, GX_TRIANGLEFAN,
+      GX_TRIANGLESTRIP, GX_LINES, GX_LINESTRIP, GX_POINTS,
+      [](u32 p) { UNLIKELY FATAL("unsupported primitive type {}", p); });
 }
 
 // GX FIFO opcodes - use CP_ prefix to avoid clashing with GXCommandList.h macros
@@ -2114,7 +2052,7 @@ uint64_t sb_dp_probe_cost_ticks_pub() { return sb_dp_probe_cost_ticks(); }
 // body, so both belong in the overhead control.
 int sb_dp_probes_per_call_pub() { return SB_DP_NPHASES + 1; }
 
-int64_t g_dpTotalNs = 0, g_dpScanNs = 0;
+int64_t g_dpTotalNs = 0;
 long g_dpCalls = 0;
 // Primitive SIZE distribution, because "46k primitives for 1314 merged draws" has two very
 // different explanations and the fix differs: a game emitting genuinely tiny primitives needs a
@@ -2123,7 +2061,6 @@ long g_dpCalls = 0;
 long g_dpVerts[8] = {};   // 1-2, 3, 4, 5-6, 7-12, 13-24, 25-48, 49+
 long g_dpVertTotal = 0;
 long g_dpPrimKind[8] = {};   // by GXPrimitive, indexed (prim >> 4) & 7
-static void sb_drawprim_add_scan(int64_t ns) { g_dpScanNs += ns; }
 
 static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size) {
   const bool dpProf = sb_drawprim_profile();
