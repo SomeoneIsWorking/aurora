@@ -478,6 +478,15 @@ void end_frame_impl(bool replayEmission) noexcept {
     // the whole boot/title progression from a single run.
     static int s_dumpEvery = -1;
     static int s_dumpSeq = 0;
+    // SB_DUMP_FRAME_COUNT=N: stop the periodic series after N dumps.
+    //
+    // WHY IT MATTERS AND NOT JUST FOR TIDINESS. SB_DUMP_FRAME_AFTER counts PRESENTS, so two runs
+    // that present at different rates reach a different game moment at the same index -- and any
+    // feature that adds a present (an interpolated sub-frame) silently makes the one-shot dumps of
+    // two configurations incomparable while both still look like "frame 1500". Bounding the series
+    // lets a run capture a few CONSECUTIVE presents instead, which is a comparison inside one run
+    // at one moment and cannot drift that way. 0 or unset = unbounded, as before.
+    static int s_dumpCount = -1;
     // Frame sink (aurora_set_frame_sink): an independent capture cadence, so an in-process
     // parity comparison can run alongside — or without — the file dumps.
     static int s_sinkCountdown = 0;
@@ -495,6 +504,10 @@ void end_frame_impl(bool replayEmission) noexcept {
     if (s_dumpEvery < 0) {
       const char* e = std::getenv("SB_DUMP_FRAME_EVERY");
       s_dumpEvery = (e != nullptr && e[0] != '\0') ? std::atoi(e) : 0;
+    }
+    if (s_dumpCount < 0) {
+      const char* e = std::getenv("SB_DUMP_FRAME_COUNT");
+      s_dumpCount = (e != nullptr && e[0] != '\0') ? std::atoi(e) : 0;
     }
     // Request the map for jobs whose copies were submitted last present. The
     // callback owns its job (shared_ptr capture), so any number of dumps can
@@ -615,6 +628,10 @@ void end_frame_impl(bool replayEmission) noexcept {
       // present: the countdown consumes one present per unit), or disarm
       // for the one-shot.
       s_dumpFramesLeft = s_dumpEvery > 0 ? s_dumpEvery - 1 : -1;
+      if (s_dumpCount > 0 && s_dumpSeq >= s_dumpCount) {
+        s_dumpFramesLeft = -1;   // series complete; disarm
+        Log.info("SB_DUMP_FRAME: series complete after {} dumps (SB_DUMP_FRAME_COUNT)", s_dumpSeq);
+      }
     }
     if (g_frameSink != nullptr && g_frameSinkEvery > 0 && --s_sinkCountdown <= 0) {
       s_sinkCountdown = g_frameSinkEvery;
