@@ -113,6 +113,19 @@ public:
     m_length += size;
   }
 
+  // Reserve `size` bytes and hand back a pointer to write them directly, advancing the length
+  // immediately — so the caller MUST write all `size` bytes.
+  //
+  // This exists for index generation, which appends two bytes at a time: a quad was six separate
+  // append() calls, each repeating the capacity check, to produce twelve bytes. Taking the tail
+  // pointer once turns that into one check plus a straight-line write.
+  [[nodiscard]] uint8_t* append_uninitialized(size_t size) {
+    resize(m_length + size, false);
+    uint8_t* const p = m_data + m_length;
+    m_length += size;
+    return p;
+  }
+
   void release() {
     if (m_data != nullptr && m_owned) {
       free(m_data);

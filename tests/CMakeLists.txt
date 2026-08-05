@@ -83,6 +83,12 @@ if (AURORA_ENABLE_GX)
     TracyClient
   )
   gtest_discover_tests(render_worker_tests)
+
+  # Triangle-index generation. Header-only, so this needs no GX/WebGPU link — which is the point:
+  # the code it covers used to be static inside command_processor.cpp and therefore untestable.
+  add_executable(gx_prim_index_tests gx_prim_index_test.cpp)
+  target_link_libraries(gx_prim_index_tests PRIVATE gtest gtest_main)
+  gtest_discover_tests(gx_prim_index_tests)
 endif () # AURORA_ENABLE_GX
 
 # DVD API tests
