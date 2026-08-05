@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <unordered_set>
+#include <unordered_map>
 #include <lucent/log.h>
 
 namespace aurora::gx::fifo {
@@ -171,6 +173,36 @@ void drain() {
                      g_dpPhase[7] > 0 ? 100.0 * ns / ((double)g_dpPhase[7] * nsPerTick) : 0.0,
                      g_dpUnmergedCalls > 0 ? ns / (double)g_dpUnmergedCalls : 0.0);
         g_dpDescTicks = 0;
+      }
+      // Indexed-array storage upload volume. SB_PROFILE_GFX puts arrayUpload at ~63% of the
+      // per-draw build; this says whether that is distinct geometry or the same arrays re-pushed.
+      {
+        extern uint64_t g_arrUploadCount, g_arrUploadBytes, g_arrUploadDistinctBytes, g_arrCachedHits;
+        extern std::unordered_set<uint64_t> g_arrUploadDistinct;
+        extern std::unordered_map<uint64_t, uint64_t> g_arrUploadHash;
+        extern uint64_t g_arrContentChanged, g_arrDataCacheHits;
+        std::fprintf(stderr,
+                     "[drawprim]   arrays: uploads=%llu (%.2f MB)  distinct=%zu (%.2f MB)  "
+                     "redundancy=%.1fx  cache-hits=%llu\n",
+                     (unsigned long long)g_arrUploadCount, (double)g_arrUploadBytes / 1048576.0,
+                     g_arrUploadDistinct.size(), (double)g_arrUploadDistinctBytes / 1048576.0,
+                     g_arrUploadDistinctBytes > 0
+                         ? (double)g_arrUploadBytes / (double)g_arrUploadDistinctBytes : 0.0,
+                     (unsigned long long)g_arrCachedHits);
+        std::fprintf(stderr, "[drawprim]   arrays: data-keyed cache hits (uploads avoided)=%llu\n",
+                     (unsigned long long)g_arrDataCacheHits);
+        g_arrDataCacheHits = 0;
+        // The precondition for caching uploads by DATA identity rather than by slot registration.
+        std::fprintf(stderr,
+                     "[drawprim]   arrays: in-frame content changes under an unchanged (ptr,size): %llu%s\n",
+                     (unsigned long long)g_arrContentChanged,
+                     g_arrContentChanged == 0
+                         ? "  <- a data-keyed upload cache is SAFE"
+                         : "  <- a data-keyed upload cache would serve STALE data");
+        g_arrContentChanged = 0;
+        g_arrUploadHash.clear();
+        g_arrUploadCount = g_arrUploadBytes = g_arrUploadDistinctBytes = g_arrCachedHits = 0;
+        g_arrUploadDistinct.clear();
       }
       g_dpUnmergedSampleCount = 0;
       g_dpUnmergedSampleDropped = 0;

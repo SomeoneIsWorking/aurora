@@ -34,6 +34,22 @@ using webgpu::g_graphicsConfig;
 
 GXState g_gxState{};
 
+// Per-frame indexed-array upload cache, keyed by data identity. See the declaration in gx.hpp for
+// why the slot-resident AttrArray::cachedRange is not enough on its own.
+static std::unordered_map<uint64_t, gfx::Range> sArrayUploadCache;
+
+uint64_t array_upload_key(const void* data, u32 size) {
+  // The size is part of the key: an array whose auto-derived extent has grown is a DIFFERENT
+  // upload, and serving the shorter one would let the shader read past what was uploaded.
+  return (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(data)) << 8) ^ static_cast<uint64_t>(size);
+}
+const gfx::Range* array_upload_lookup(uint64_t key) {
+  const auto it = sArrayUploadCache.find(key);
+  return it != sArrayUploadCache.end() ? &it->second : nullptr;
+}
+void array_upload_store(uint64_t key, gfx::Range range) { sArrayUploadCache[key] = range; }
+void array_upload_cache_clear() { sArrayUploadCache.clear(); }
+
 static wgpu::Sampler sEmptySampler;
 static wgpu::Texture sEmptyTexture;
 static wgpu::TextureView sEmptyTextureView;

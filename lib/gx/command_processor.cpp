@@ -2,6 +2,8 @@
 #include "command_processor.hpp"
 
 #include <lucent/log.h>
+#include <unordered_set>
+#include <unordered_map>
 #include <cstdarg>
 
 #include "fifo.hpp"
@@ -2025,6 +2027,12 @@ uint32_t g_dpUnmergedSamples[4096] = {};
 long g_dpUnmergedSampleCount = 0;
 long g_dpUnmergedSampleDropped = 0;
 uint64_t g_dpPhase[SB_DP_NPHASES] = {};
+// Indexed-array storage uploads, per frame. See the use site: total-vs-distinct is what separates
+// "uploads a lot of distinct geometry" from "uploads the same array over and over".
+uint64_t g_arrUploadCount = 0, g_arrUploadBytes = 0, g_arrUploadDistinctBytes = 0, g_arrCachedHits = 0;
+std::unordered_set<uint64_t> g_arrUploadDistinct;
+std::unordered_map<uint64_t, uint64_t> g_arrUploadHash;
+uint64_t g_arrContentChanged = 0, g_arrDataCacheHits = 0;
 long g_dpMergedCalls = 0, g_dpUnmergedCalls = 0, g_dpEarlyReturns = 0;
 uint64_t g_dpWholeTicks = 0;
 // Control: two back-to-back reads with nothing between them. This is what ONE probe costs, and
@@ -4234,13 +4242,57 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     bool cached = s_noArrCache == 0 && array.cachedRange.size > 0;
     if (cached) {
       ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
+      if (sb_drawprim_profile()) {
+        ++g_arrCachedHits;
+      }
     } else {
       // size 0 = "trust" registration (J3D): upload the auto-derived extent
       // (max referenced index, maintained in draw_prim).
       const u32 effSize = array.size != 0 ? array.size : array.sizeAuto;
-      const auto range = gfx::push_storage(static_cast<const uint8_t*>(array.data), effSize);
+      // The slot's own cachedRange was dropped by GXSetArray re-registering this attribute, but
+      // these exact bytes may already have been uploaded this frame under a different slot state
+      // — the game re-points a slot at A, then B, then back at A. The upload belongs to the data,
+      // so look it up by data identity before paying for another copy. See gx.hpp.
+      const uint64_t upKey = array_upload_key(array.data, effSize);
+      const gfx::Range* hit = array_upload_lookup(upKey);
+      gfx::Range range;
+      if (hit != nullptr) {
+        range = *hit;
+        if (sb_drawprim_profile()) {
+          ++g_arrDataCacheHits;
+        }
+      } else {
+        range = gfx::push_storage(static_cast<const uint8_t*>(array.data), effSize);
+        array_upload_store(upKey, range);
+      }
       ranges.vaRanges[i - GX_VA_POS] = range;
       array.cachedRange = range;
+      // SB_PROFILE_DRAWPRIM=1: volume, not just call count. SB_PROFILE_GFX says arrayUpload is
+      // the single largest per-draw item, and the only way to tell "uploads a lot of distinct
+      // data" from "uploads the SAME array repeatedly" is to measure both totals and compare.
+      // A call count alone cannot distinguish them, and the fix differs completely.
+      if (sb_drawprim_profile() && hit == nullptr) {
+        ++g_arrUploadCount;
+        g_arrUploadBytes += effSize;
+        const uint64_t key =
+            (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(array.data)) << 8) ^ effSize;
+        // SAFETY MEASUREMENT for keying the upload cache on data identity instead of on the
+        // slot's current registration. That is only sound if a given (ptr,size) always holds the
+        // same BYTES for the whole frame; if the game rewrites an array in place between two
+        // draws, a data-keyed cache would serve the stale upload. Hash the uploaded bytes and
+        // report any key whose content changed within a frame. A count of 0 is the precondition;
+        // anything else falsifies the optimisation outright.
+        const uint64_t h =
+            static_cast<uint64_t>(xxh3_hash_s(static_cast<const uint8_t*>(array.data), effSize));
+        const auto it = g_arrUploadHash.find(key);
+        if (it == g_arrUploadHash.end()) {
+          g_arrUploadHash.emplace(key, h);
+          g_arrUploadDistinctBytes += effSize; // only the FIRST upload of a given (ptr,size)
+        } else if (it->second != h) {
+          ++g_arrContentChanged;
+        }
+        g_arrUploadDistinct.insert(key);
+      }
     }
     // SB_ARR_DBG=1: per-draw indexed-array binding trace — the shader reads
     // the shared storage buffer at vaRange.offset, so a zero-size push means
