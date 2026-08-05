@@ -1874,6 +1874,11 @@ void end_frame(EndFrameCallback callback) {
   for (auto& array : gx::g_gxState.arrays) {
     array.cachedRange = {};
   }
+  // The data-keyed upload cache holds ranges into the frame packet's storage buffer, which is
+  // reset with the frame — so it has exactly the lifetime of the per-slot cachedRange above and
+  // must be cleared in the same place. Outliving the frame would hand out offsets into a buffer
+  // that has since been rewound.
+  gx::array_upload_cache_clear();
   // The draw tag must not survive a frame. If the emitter stops tagging, a leaked tag would keep
   // stamping the previous object's identity onto every later draw, and interpolation would then
   // pair those draws with the wrong object's matrices — wrong, plausible, and silent.

@@ -282,6 +282,29 @@ struct AttrArray {
   // knowing the array extent (GC HW reads raw RAM; wgpu needs an upload).
   u32 sizeAuto = 0;
 };
+
+// Indexed-array storage uploads, keyed by the DATA's identity rather than by which slot happens
+// to be pointing at it.
+//
+// `AttrArray::cachedRange` alone is a one-entry cache per attribute slot, and GXSetArray drops it
+// whenever the registration changes. The game walks its scene graph re-pointing GX_VA_POS at
+// object A, then B, then back to A — so A is uploaded again, having already been uploaded this
+// frame. Measured on Delfino: 37.1 MB of storage uploads per frame for 20.4 MB of distinct data,
+// a 1.8x redundancy, and array upload was the largest single item in the per-draw build
+// (SB_PROFILE_GFX arrayUpload ~2.85 ms of a ~10.2 ms drain).
+//
+// The uploaded range is a property of the bytes, not of the slot, so it is cached that way. This
+// is sound only while a given (pointer, size) holds the same bytes for the whole frame; that was
+// measured before the change (SB_PROFILE_DRAWPRIM reports in-frame content changes under an
+// unchanged pointer+size, which reads 0) and the counter is kept so a future scene that violates
+// it says so instead of rendering stale geometry.
+//
+// Lifetime is one frame, cleared alongside AttrArray::cachedRange when the frame packet's storage
+// buffer is reset — the ranges index into that buffer and do not outlive it.
+uint64_t array_upload_key(const void* data, u32 size);
+const gfx::Range* array_upload_lookup(uint64_t key);
+void array_upload_store(uint64_t key, gfx::Range range);
+void array_upload_cache_clear();
 inline bool operator==(const AttrArray& lhs, const AttrArray& rhs) {
   return lhs.data == rhs.data && lhs.size == rhs.size && lhs.stride == rhs.stride && lhs.le == rhs.le;
 }
