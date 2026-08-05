@@ -2000,11 +2000,25 @@ static int64_t sb_now_ns() {
 }
 int64_t g_dpTotalNs = 0, g_dpScanNs = 0;
 long g_dpCalls = 0;
+// Primitive SIZE distribution, because "46k primitives for 1314 merged draws" has two very
+// different explanations and the fix differs: a game emitting genuinely tiny primitives needs a
+// cheaper per-primitive path, while large primitives arriving unmerged would mean batching is
+// leaving work on the table. Bucketed by vertex count.
+long g_dpVerts[8] = {};   // 1-2, 3, 4, 5-6, 7-12, 13-24, 25-48, 49+
+long g_dpVertTotal = 0;
+long g_dpPrimKind[8] = {};   // by GXPrimitive, indexed (prim >> 4) & 7
 static void sb_drawprim_add_scan(int64_t ns) { g_dpScanNs += ns; }
 
 static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size) {
   const bool dpProf = sb_drawprim_profile();
   const int64_t dpT0 = dpProf ? sb_now_ns() : 0;
+  if (dpProf) {
+    const u32 vc = vtxCount;
+    int b = vc <= 2 ? 0 : vc == 3 ? 1 : vc == 4 ? 2 : vc <= 6 ? 3 : vc <= 12 ? 4 : vc <= 24 ? 5 : vc <= 48 ? 6 : 7;
+    ++g_dpVerts[b];
+    g_dpVertTotal += vc;
+    ++g_dpPrimKind[(static_cast<u32>(prim) >> 4) & 7u];
+  }
   struct DpScope {
     bool on; int64_t t0;
     ~DpScope() { if (on) { g_dpTotalNs += sb_now_ns() - t0; ++g_dpCalls; } }
