@@ -89,6 +89,51 @@ extern "C" void sb_gx_fifo_rewind(uint32_t mark) {
     detail::sBufferSize = mark;
   }
 }
+// Snapshot / compare, to LOCALISE a divergence rather than just detect one. A byte count says
+// two passes differ; the first differing offset says where, which is what identifies the culprit
+// command in the stream.
+static uint8_t* sSnap = nullptr;
+static uint32_t sSnapSize = 0, sSnapCap = 0;
+extern "C" void sb_gx_fifo_snapshot(uint32_t from, uint32_t to) {
+  sSnapSize = (detail::sBufferData != nullptr && to > from) ? (to - from) : 0;
+  if (sSnapSize > sSnapCap) {
+    sSnap = static_cast<uint8_t*>(realloc(sSnap, sSnapSize));
+    sSnapCap = sSnapSize;
+  }
+  if (sSnapSize > 0) {
+    std::memcpy(sSnap, detail::sBufferData + from, sSnapSize);
+  }
+}
+// Returns the first byte offset (relative to `from`) at which the current fifo contents differ
+// from the snapshot, or -1 if the common prefix matches AND the lengths match. If the lengths
+// differ but the common prefix is identical, returns the common length — the divergence is "one
+// stream kept going", which is a different fault from "a byte changed".
+extern "C" long sb_gx_fifo_compare(uint32_t from, uint32_t to) {
+  const uint32_t cur = (to > from) ? (to - from) : 0;
+  const uint32_t n = cur < sSnapSize ? cur : sSnapSize;
+  for (uint32_t i = 0; i < n; ++i) {
+    if (detail::sBufferData[from + i] != sSnap[i]) {
+      return static_cast<long>(i);
+    }
+  }
+  return (cur == sSnapSize) ? -1L : static_cast<long>(n);
+}
+// Hex of the first `n` bytes of the snapshot (pass A) and of the live fifo (pass B), so a
+// divergence at offset 0 can be READ rather than guessed at. GX commands are opcode-led, so the
+// first bytes name the command that differs.
+extern "C" void sb_gx_fifo_dump_heads(uint32_t from, uint32_t n) {
+  char a[160] = {0}, b[160] = {0};
+  const uint32_t na = n < sSnapSize ? n : sSnapSize;
+  for (uint32_t i = 0; i < na && i * 3 + 3 < sizeof(a); ++i) {
+    std::snprintf(a + i * 3, 4, "%02x ", sSnap[i]);
+  }
+  const uint32_t avail = detail::sBufferSize > from ? detail::sBufferSize - from : 0;
+  const uint32_t nb = n < avail ? n : avail;
+  for (uint32_t i = 0; i < nb && i * 3 + 3 < sizeof(b); ++i) {
+    std::snprintf(b + i * 3, 4, "%02x ", detail::sBufferData[from + i]);
+  }
+  std::fprintf(stderr, "[dbl-draw]   passA head: %s\n[dbl-draw]   passB head: %s\n", a, b);
+}
 extern "C" uint64_t sb_gx_fifo_hash(uint32_t from, uint32_t to) {
   if (detail::sBufferData == nullptr || to <= from || to > detail::sBufferSize) {
     return 0; // caller checks the byte count separately; 0 here means "nothing to hash"
