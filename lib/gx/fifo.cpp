@@ -199,6 +199,20 @@ void drain() {
                      g_arrContentChanged == 0
                          ? "  <- a data-keyed upload cache is SAFE"
                          : "  <- a data-keyed upload cache would serve STALE data");
+        // Ceiling on what a persistent (cross-frame) geometry buffer could remove.
+        {
+          extern std::unordered_map<uint64_t, uint64_t> g_arrHashPrevFrame;
+          extern uint64_t g_arrSameAsPrevBytes, g_arrChangedVsPrevBytes, g_arrNewVsPrevBytes;
+          const double tot = (double)(g_arrSameAsPrevBytes + g_arrChangedVsPrevBytes + g_arrNewVsPrevBytes);
+          std::fprintf(stderr,
+                       "[drawprim]   arrays vs PREVIOUS frame: unchanged=%.2f MB (%.0f%%)  changed=%.2f MB  new=%.2f MB\n",
+                       (double)g_arrSameAsPrevBytes / 1048576.0,
+                       tot > 0 ? 100.0 * (double)g_arrSameAsPrevBytes / tot : 0.0,
+                       (double)g_arrChangedVsPrevBytes / 1048576.0,
+                       (double)g_arrNewVsPrevBytes / 1048576.0);
+          g_arrHashPrevFrame = g_arrUploadHash; // carry this frame's hashes into the next
+          g_arrSameAsPrevBytes = g_arrChangedVsPrevBytes = g_arrNewVsPrevBytes = 0;
+        }
         g_arrContentChanged = 0;
         g_arrUploadHash.clear();
         g_arrUploadCount = g_arrUploadBytes = g_arrUploadDistinctBytes = g_arrCachedHits = 0;
