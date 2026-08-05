@@ -3462,35 +3462,87 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
   push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices);
 }
 
-// Identity of the most recent draw, for the staging-overflow fatal in
-// gfx/common.hpp (names the runaway upload instead of leaving it anonymous).
-static char s_lastDrawDesc[160] = "(none)";
-// Ring of the most recent draw identities: the overflow fatal prints all of
-// them so the runaway is visible in context (one bad draw vs death-by-1000).
-static char s_drawDescRing[16][160];
+// Identity of the most recent draws, for the staging-overflow fatal in gfx/common.hpp (it names
+// the runaway upload instead of leaving it anonymous, and prints a ring so one bad draw is
+// distinguishable from death-by-1000).
+//
+// RECORDED, NOT FORMATTED. This used to snprintf a 160-char line per draw, plus a second snprintf
+// to copy it into the ring. Measured at ~500 ns per draw — 10.5% of the whole per-draw path — to
+// produce text that is read only when the fatal fires, which in a healthy run is never.
+//
+// The fields are captured instead and formatted on demand in sb_last_draw_desc(). The diagnostic
+// is unchanged: same fields, same ring depth, same OVERFLOWED marker. The marker string is COPIED
+// (bounded) rather than pointed at, because g_sbLastMarker is reassigned as the frame proceeds and
+// a pointer would render whatever the marker happened to be at fatal time, not at draw time.
+struct DrawDescRec {
+  bool used;
+  unsigned prim;
+  int fmt;
+  unsigned vtxCount;
+  unsigned numIndices;
+  unsigned vertBytes;
+  long drawIdx;
+  char mark[72];
+};
+static DrawDescRec s_lastDrawRec{};
+static DrawDescRec s_drawDescRing[16]{};
 static unsigned s_drawDescRingPos = 0;
+
+static void sb_record_draw_desc(unsigned prim, int fmt, unsigned vtxCount, unsigned numIndices,
+                                unsigned vertBytes, const std::string& mark, long drawIdx) {
+  DrawDescRec& r = s_lastDrawRec;
+  r.used = true;
+  r.prim = prim;
+  r.fmt = fmt;
+  r.vtxCount = vtxCount;
+  r.numIndices = numIndices;
+  r.vertBytes = vertBytes;
+  r.drawIdx = drawIdx;
+  const size_t n = mark.size() < sizeof(r.mark) - 1 ? mark.size() : sizeof(r.mark) - 1;
+  std::memcpy(r.mark, mark.data(), n);
+  r.mark[n] = '\0';
+  s_drawDescRing[s_drawDescRingPos] = r;
+  s_drawDescRingPos = (s_drawDescRingPos + 1) % 16;
+}
+
+static int sb_format_draw_desc(char* w, size_t cap, const DrawDescRec& r, const char* suffix) {
+  return std::snprintf(w, cap, "\n  prim=0x%02x fmt=%d verts=%u idx=%u vertBytes=%u mark='%s' drawIdx=%ld%s",
+                       r.prim, r.fmt, r.vtxCount, r.numIndices, r.vertBytes, r.mark, r.drawIdx,
+                       suffix);
+}
+
 const char* sb_last_draw_desc()
 {
-  static char all[16 * 176];
+  static char all[16 * 200];
   char* w = all;
+  *w = '\0';
   for (unsigned i = 0; i < 16; ++i) {
-    const char* d = s_drawDescRing[(s_drawDescRingPos + i) % 16];
-    if (d[0] != '\0')
-      w += std::snprintf(w, 176, "\n  %s", d);
+    const DrawDescRec& r = s_drawDescRing[(s_drawDescRingPos + i) % 16];
+    if (r.used) {
+      w += sb_format_draw_desc(w, 200, r, "");
+    }
   }
-  std::snprintf(w, 176, "\n  %s <- OVERFLOWED", s_lastDrawDesc);
+  if (s_lastDrawRec.used) {
+    sb_format_draw_desc(w, 200, s_lastDrawRec, " <- OVERFLOWED");
+  } else {
+    // Never say nothing. An empty report here is indistinguishable from "no draws were recorded",
+    // which is itself the interesting case when the overflow happens before the first draw.
+    std::snprintf(w, 200, "\n  (no draws recorded before the overflow)");
+  }
   return all;
 }
 
+uint64_t g_dpDescTicks = 0;
+
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices) {
-  std::snprintf(s_lastDrawDesc, sizeof(s_lastDrawDesc),
-                "prim=0x%02x fmt=%d verts=%u idx=%u vertBytes=%u mark='%s' drawIdx=%ld",
-                (unsigned)prim, (int)fmt, (unsigned)vtxCount, (unsigned)numIndices,
-                (unsigned)vertRange.size, g_sbLastMarker.c_str(),
-                (long)g_sbPushedDrawCount);
-  std::snprintf(s_drawDescRing[s_drawDescRingPos], 160, "%s", s_lastDrawDesc);
-  s_drawDescRingPos = (s_drawDescRingPos + 1) % 16;
+  const bool dpProf = sb_drawprim_profile();
+  const uint64_t dpDesc0 = dpProf ? sb_tsc() : 0;
+  sb_record_draw_desc((unsigned)prim, (int)fmt, (unsigned)vtxCount, (unsigned)numIndices,
+                      (unsigned)vertRange.size, g_sbLastMarker, (long)g_sbPushedDrawCount);
+  if (dpProf) {
+    g_dpDescTicks += sb_tsc() - dpDesc0;
+  }
   // GX_CULL_ALL culls both faces: the draw produces no fragments at all. WebGPU has no
   // equivalent rasterizer state, so it cannot be expressed in the pipeline — drop the draw
   // here instead, which is what the hardware does with it.

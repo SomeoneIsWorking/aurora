@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <lucent/log.h>
 
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
@@ -160,6 +161,17 @@ void drain() {
                      g_dpUnmergedSampleCount,
                      g_dpUnmergedSampleDropped > 0 ? " TRUNCATED - distribution incomplete" : "");
       }
+      // Sub-measurement: the two snprintf calls at the head of push_gx_draw, which run on EVERY
+      // draw to build a description used only by the staging-overflow fatal message.
+      {
+        extern uint64_t g_dpDescTicks;
+        const double ns = (double)g_dpDescTicks * nsPerTick;
+        std::fprintf(stderr, "[drawprim]   of which draw-desc snprintf: %.3fms  %.1f%% of unmerged  %.0f ns/draw\n",
+                     ns / 1e6,
+                     g_dpPhase[7] > 0 ? 100.0 * ns / ((double)g_dpPhase[7] * nsPerTick) : 0.0,
+                     g_dpUnmergedCalls > 0 ? ns / (double)g_dpUnmergedCalls : 0.0);
+        g_dpDescTicks = 0;
+      }
       g_dpUnmergedSampleCount = 0;
       g_dpUnmergedSampleDropped = 0;
       std::fflush(stderr);
@@ -170,6 +182,21 @@ void drain() {
       g_dpMergedCalls = g_dpUnmergedCalls = g_dpEarlyReturns = 0;
       for (int i = 0; i < 8; ++i) { g_dpPhase[i] = 0; g_dpPhaseCalls[i] = 0; }
       for (int i = 0; i < 8; ++i) { g_dpVerts[i] = 0; g_dpPrimKind[i] = 0; }
+    }
+  }
+  // The staging-overflow fatal in gfx/common.hpp names the runaway draw by calling
+  // aurora_gfx_last_draw_desc(). That path is (correctly) almost never taken, so the recorder and
+  // formatter behind it would otherwise go unexercised — and it was rewritten to defer formatting
+  // off the per-draw hot path. This channel prints the SAME function's output once per frame, so
+  // the text the fatal would show is verifiable on real data without provoking an overflow.
+  {
+    static const lucent::Channel chDrawDesc{"drawdesc"};
+    if (chDrawDesc) {
+      // Same namespace (aurora::gx::fifo) and the same function the fatal reaches through
+      // aurora_gfx_last_draw_desc().
+      extern const char* sb_last_draw_desc();
+      lucent::debug(chDrawDesc, "last draws (as the overflow fatal would print them):{}",
+                    sb_last_draw_desc());
     }
   }
   detail::sDrainDraws = 0;
