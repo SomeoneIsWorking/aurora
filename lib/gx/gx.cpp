@@ -1,5 +1,7 @@
 #include "gx.hpp"
 
+#include <lucent/log.h>
+
 #include "pipeline.hpp"
 #include "../dolphin/vi/vi_internal.hpp"
 #include "../webgpu/gpu.hpp"
@@ -183,11 +185,9 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
 #else
     const auto nameStr = "GX Static Texture";
 #endif
-    if (std::getenv("SB_TEX_DBG") != nullptr) {
-      std::fprintf(stderr, "[tex] static %ux%u mips=%u fmt=%u data=%p\n", obj.width(), obj.height(),
-                   obj.mip_count(), static_cast<unsigned>(obj.format()), obj.data);
-      std::fflush(stderr);
-    }
+    static const lucent::Channel chTexDbg{"texresolve"};
+    lucent::debug(chTexDbg, "static {}x{} mips={} fmt={} data={}", obj.width(), obj.height(),
+                  obj.mip_count(), static_cast<unsigned>(obj.format()), obj.data);
     handle = gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), obj.format(),
                                         {static_cast<const uint8_t*>(obj.data), UINT32_MAX}, false, nameStr);
   }
@@ -491,11 +491,14 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
     } else if (copyRef != nullptr) {
       handle = copyRef->handle;
       g_sbDrawSamplesCopy = true; // SB_SKIP_COPY_QUAD diagnostic (see push_gx_draw)
-      if (std::getenv("SB_COPY_DBG") != nullptr) {
+      static const lucent::Channel chCopyBind{"copybind"};
+      if (chCopyBind) {
+        // Still rate-limited: this fires per sampled copy-backed texture per draw, so an unthrottled
+        // line would bury the run even with the channel deliberately on.
         static long n = 0;
         if ((++n % 200) == 0 || n <= 4)
-          std::fprintf(stderr, "[copy-bind] n=%ld texmap=%u data=%p %ux%u\n", n, i, obj.data, obj.width(),
-                       obj.height());
+          lucent::debug(chCopyBind, "n={} texmap={} data={} {}x{}", n, i, obj.data, obj.width(),
+                        obj.height());
       }
     } else if (obj.has_data()) {
       handle = resolve_static_texture(obj);
@@ -767,16 +770,14 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
   // pipeline-cache mixup in/out for the title "PRESS START" glow-blowout defect
   // (debug_journal duotone TEV investigation): filter on the title glyph's
   // narrow texture-size band so this doesn't spam every draw.
-  if (std::getenv("SB_PIPELINE_BLEND_DBG") != nullptr) {
-    std::fprintf(stderr,
-                 "[pipeline-blend] mode=%d src=%d dst=%d -> color(op=%d src=%d dst=%d) alpha(op=%d src=%d dst=%d) "
-                 "label=%s\n",
-                 static_cast<int>(config.blendMode), static_cast<int>(config.blendFacSrc),
-                 static_cast<int>(config.blendFacDst), static_cast<int>(blendState.color.operation),
-                 static_cast<int>(blendState.color.srcFactor), static_cast<int>(blendState.color.dstFactor),
-                 static_cast<int>(blendState.alpha.operation), static_cast<int>(blendState.alpha.srcFactor),
-                 static_cast<int>(blendState.alpha.dstFactor), label != nullptr ? label : "(null)");
-  }
+  static const lucent::Channel chBlend{"pipeblend"};
+  lucent::debug(chBlend,
+                "mode={} src={} dst={} -> color(op={} src={} dst={}) alpha(op={} src={} dst={}) label={}",
+                static_cast<int>(config.blendMode), static_cast<int>(config.blendFacSrc),
+                static_cast<int>(config.blendFacDst), static_cast<int>(blendState.color.operation),
+                static_cast<int>(blendState.color.srcFactor), static_cast<int>(blendState.color.dstFactor),
+                static_cast<int>(blendState.alpha.operation), static_cast<int>(blendState.alpha.srcFactor),
+                static_cast<int>(blendState.alpha.dstFactor), label != nullptr ? label : "(null)");
   const std::array colorTargets{wgpu::ColorTargetState{
       .format = g_graphicsConfig.surfaceConfiguration.format,
       .blend = &blendState,

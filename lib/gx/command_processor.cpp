@@ -1,5 +1,7 @@
 #include <chrono>
 #include "command_processor.hpp"
+
+#include <lucent/log.h>
 #include <cstdarg>
 
 #include "fifo.hpp"
@@ -23,6 +25,16 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+
+namespace {
+// SB_COPY_DBG was an uncached std::getenv per EFB-copy / clear-register write. Now a lucent
+// channel, looked up once. Enable with LUCENT_DEBUG=copydbg.
+inline bool sb_copy_dbg_chan() {
+  static const lucent::Channel ch{"copydbg"};
+  return static_cast<bool>(ch);
+}
+} // namespace
+
 
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
@@ -1393,7 +1405,7 @@ static void handle_bp(u32 value, bool bigEndian) {
     u8 a = bp_get(value, 8, 8);
     g_gxState.clearColor[0] = static_cast<float>(r) / 255.f;
     g_gxState.clearColor[3] = static_cast<float>(a) / 255.f;
-    if (std::getenv("SB_COPY_DBG") != nullptr) {
+    if (sb_copy_dbg_chan()) {
       static long n = 0;
       std::fprintf(stderr, "[bp-clear] n=%ld reg=4F r=%u a=%u mark='%s'\n", ++n, r, a, g_sbLastMarker.c_str());
     }
@@ -1405,7 +1417,7 @@ static void handle_bp(u32 value, bool bigEndian) {
     u8 g = bp_get(value, 8, 8);
     g_gxState.clearColor[2] = static_cast<float>(b) / 255.f;
     g_gxState.clearColor[1] = static_cast<float>(g) / 255.f;
-    if (std::getenv("SB_COPY_DBG") != nullptr) {
+    if (sb_copy_dbg_chan()) {
       static long n = 0;
       std::fprintf(stderr, "[bp-clear] n=%ld reg=50 b=%u g=%u val=%08x mark='%s'\n", ++n, b, g, value,
                    g_sbLastMarker.c_str());
@@ -1813,10 +1825,11 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           f32 p5 = read_f32(xfData + 20, bigEndian);
           u32 projType = read_u32(xfData + 24, bigEndian);
           g_gxState.projType = static_cast<GXProjectionType>(projType);
-          if (std::getenv("SB_PROJ_DUMP") != nullptr) {
-            std::fprintf(stderr, "[proj-set] type=%c p=(%.4f %.4f %.4f %.4f %.4f %.4f) mark='%s'\n",
-                         projType == GX_ORTHOGRAPHIC ? 'O' : 'P', p0, p1, p2, p3, p4, p5,
-                         g_sbLastMarker.c_str());
+          {
+            static const lucent::Channel chProjSet{"projset"};
+            lucent::debug(chProjSet, "type={} p=({:.4f} {:.4f} {:.4f} {:.4f} {:.4f} {:.4f}) mark='{}'",
+                          projType == GX_ORTHOGRAPHIC ? 'O' : 'P', p0, p1, p2, p3, p4, p5,
+                          g_sbLastMarker);
           }
           // Reconstruct 4x4 projection matrix from 6 params
           auto& proj = g_gxState.proj;
@@ -2852,7 +2865,13 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   // J3DDrawBuffer::draw via GXInsertDebugMarker). Answers: do the big on-screen
   // ghosts (#9-11) sample their sprite atlas with 0..1 (single map) or 0..N
   // (tiling) UVs?
-  if (std::getenv("SB_LENS_UV_DBG") != nullptr && g_sbLastMarker.find("LensFlare") != std::string::npos) {
+  // draw_prim runs ~46k times per frame, so this gate is on the hottest path in the renderer. It
+  // used to be an uncached std::getenv — an environment scan per primitive for a diagnostic that is
+  // off — which measured 2.9 ms/frame. A hoisted lucent::Channel is a relaxed atomic load and a
+  // compare (0.66 ns/call per lucent's own benchmark), and it puts the diagnostic on the one logger
+  // instead of leaving a gated fprintf behind.
+  static const lucent::Channel chLensUv{"lensuv"};
+  if (chLensUv && g_sbLastMarker.find("LensFlare") != std::string::npos) {
     static long s_n = 0;
     static long s_hit = 0;
     if (s_hit < 40) {
@@ -2866,18 +2885,19 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         hwrapS = static_cast<int>(htobj.wrap_s());
         hwrapT = static_cast<int>(htobj.wrap_t());
       }
-      std::fprintf(stderr,
-                   "[lens-uv-hit] #%ld prim=%u verts=%u fmt=%d t0desc=%d t0type=%d t0cnt=%d t0frac=%u "
-                   "arrData=%p arrStride=%u numTevStages=%u tev0[texCoordId=%d texMapId=%d chanId=%d] "
-                   "tex=%dx%d wrap=(%d,%d) mark='%s'\n",
-                   s_hit, static_cast<unsigned>(prim), vtxCount, static_cast<int>(fmt),
-                   static_cast<int>(g_gxState.vtxDesc[GX_VA_TEX0]),
-                   static_cast<int>(g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0].type),
-                   static_cast<int>(g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0].cnt),
-                   g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0].frac, g_gxState.arrays[GX_VA_TEX0].data,
-                   g_gxState.arrays[GX_VA_TEX0].stride, g_gxState.numTevStages,
-                   static_cast<int>(hstage0.texCoordId), static_cast<int>(hstage0.texMapId),
-                   static_cast<int>(hstage0.channelId), htexW, htexH, hwrapS, hwrapT, g_sbLastMarker.c_str());
+      lucent::debug(chLensUv,
+                    "hit #{} prim={} verts={} fmt={} t0desc={} t0type={} t0cnt={} t0frac={} "
+                    "arrData={} arrStride={} numTevStages={} tev0[texCoordId={} texMapId={} chanId={}] "
+                    "tex={}x{} wrap=({},{}) mark='{}'",
+                    s_hit, static_cast<unsigned>(prim), vtxCount, static_cast<int>(fmt),
+                    static_cast<int>(g_gxState.vtxDesc[GX_VA_TEX0]),
+                    static_cast<int>(g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0].type),
+                    static_cast<int>(g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0].cnt),
+                    g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0].frac,
+                    static_cast<const void*>(g_gxState.arrays[GX_VA_TEX0].data),
+                    g_gxState.arrays[GX_VA_TEX0].stride, g_gxState.numTevStages,
+                    static_cast<int>(hstage0.texCoordId), static_cast<int>(hstage0.texMapId),
+                    static_cast<int>(hstage0.channelId), htexW, htexH, hwrapS, hwrapT, g_sbLastMarker);
     }
     if (s_n < 400) {
       const auto& vtxFmt = g_gxState.vtxFmts[fmt];
@@ -2962,13 +2982,13 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         const float u = readComp(src) * invFrac;
         const float w = has2 ? readComp(src + csz) * invFrac : 0.f;
         ++s_n;
-        std::fprintf(stderr,
-                     "[lens-uv] #%ld v=%u desc=%d type=%d cnt=%d frac=%u uv=(%.4f,%.4f) tex=%dx%d wrap=(%d,%d) "
-                     "tcg[src=%d mtx=%d type=%d] verts=%u proj=%c mark='%s'\n",
-                     s_n, v, static_cast<int>(t0Desc), static_cast<int>(t0Fmt.type), static_cast<int>(t0Fmt.cnt),
-                     t0Fmt.frac, u, w, texW, texH, wrapS, wrapT, static_cast<int>(tcg.src), static_cast<int>(tcg.mtx),
-                     static_cast<int>(tcg.type), vtxCount, g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
-                     g_sbLastMarker.c_str());
+        lucent::debug(chLensUv,
+                      "#{} v={} desc={} type={} cnt={} frac={} uv=({:.4f},{:.4f}) tex={}x{} wrap=({},{}) "
+                      "tcg[src={} mtx={} type={}] verts={} proj={} mark='{}'",
+                      s_n, v, static_cast<int>(t0Desc), static_cast<int>(t0Fmt.type), static_cast<int>(t0Fmt.cnt),
+                      t0Fmt.frac, u, w, texW, texH, wrapS, wrapT, static_cast<int>(tcg.src), static_cast<int>(tcg.mtx),
+                      static_cast<int>(tcg.type), vtxCount, g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
+                      g_sbLastMarker);
       }
     }
   }
@@ -4322,20 +4342,27 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // 16x16 tex) and a "near" quad (translate near origin, 64x64 tex, part of
   // the sun/glow group). Skip each independently to see which one is the
   // crosshatch source.
+  //
+  // These three used to be UNCACHED getenv on this per-draw path: 1,677,795 calls EACH in a 30 s
+  // Delfino run (measured with an LD_PRELOAD getenv counter), 5.03M of the run's 7.0M total. Each
+  // one is a linear scan of environ for a diagnostic that is off. The two SKIP switches are
+  // behaviour toggles, so they stay env vars — but hoisted into statics; the _DBG one is a logging
+  // gate, so it becomes a lucent channel like the rest of the printing in this file.
   {
-    const char* far = std::getenv("SB_SKIP_MIRROR_FAR");
-    const char* near = std::getenv("SB_SKIP_MIRROR_NEAR");
-    const char* dbg = std::getenv("SB_SKIP_MIRROR_DBG");
-    if ((far != nullptr || near != nullptr || dbg != nullptr) && g_sbLastMarker.find("Sky") != std::string::npos) {
+    static const char* far = std::getenv("SB_SKIP_MIRROR_FAR");
+    static const char* near = std::getenv("SB_SKIP_MIRROR_NEAR");
+    static const lucent::Channel chSkipMirror{"skipmirror"};
+    const bool dbg = static_cast<bool>(chSkipMirror);
+    if ((far != nullptr || near != nullptr || dbg) && g_sbLastMarker.find("Sky") != std::string::npos) {
       const auto& obj0 = g_gxState.textures[0].texObj;
       if (obj0.wrap_s() == GX_MIRROR || obj0.wrap_t() == GX_MIRROR) {
         const auto* pn = reinterpret_cast<const float*>(&g_gxState.pnMtx[g_gxState.currentPnMtx].pos);
         bool isFar = std::fabs(pn[3]) > 10000.0f;
-        if (dbg != nullptr) {
+        if (dbg) {
           static long n = 0;
           if (++n <= 200)
-            std::fprintf(stderr, "[skip-mirror] far=%d tex=%ux%u trans=%.1f\n", isFar ? 1 : 0, obj0.width(),
-                         obj0.height(), pn[3]);
+            lucent::debug(chSkipMirror, "far={} tex={}x{} trans={:.1f}", isFar ? 1 : 0, obj0.width(),
+                          obj0.height(), pn[3]);
         }
         if ((isFar && far != nullptr) || (!isFar && near != nullptr)) {
           return;

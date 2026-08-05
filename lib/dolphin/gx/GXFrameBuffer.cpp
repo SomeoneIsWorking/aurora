@@ -1,3 +1,4 @@
+#include <lucent/log.h>
 #include "gx.hpp"
 #include "__gx.h"
 
@@ -10,6 +11,16 @@
 
 #include <algorithm>
 #include <cmath>
+
+namespace {
+// SB_COPY_DBG was an uncached std::getenv per EFB-copy / clear-register write. Now a lucent
+// channel, looked up once. Enable with LUCENT_DEBUG=copydbg.
+inline bool sb_copy_dbg_chan() {
+  static const lucent::Channel ch{"copydbg"};
+  return static_cast<bool>(ch);
+}
+} // namespace
+
 
 // Frame ordinal for SB_COPY_DBG_AFTER. Provided by the runtime (sms-boot's frame seam, or the
 // recomp's present counter); weak so aurora still links standalone, where it reads 0 and the
@@ -230,7 +241,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   }
   ++handle.revision;
   g_gxState.copyTextures[dest] = handle;
-  if (std::getenv("SB_COPY_DBG") != nullptr) {
+  if (sb_copy_dbg_chan()) {
     static long n = 0;
     // SB_COPY_DBG_AFTER=<retrace>: don't start logging until the run reaches that frame.
     // The 40-line budget is otherwise spent entirely on boot's display copies, long before
@@ -342,7 +353,7 @@ void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor,
 }
 
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
-  if (std::getenv("SB_COPY_DBG") != nullptr) {
+  if (sb_copy_dbg_chan()) {
     std::fprintf(stderr, "[disp-copy-src] left=%u top=%u wd=%u ht=%u\n", left, top, wd, ht);
   }
   // Real HW: GXSetDispCopySrc and GXSetTexCopySrc program the SAME BP
@@ -367,7 +378,7 @@ void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
 }
 
 void GXSetDispCopyDst(u16 wd, u16 ht) {
-  if (std::getenv("SB_COPY_DBG") != nullptr) {
+  if (sb_copy_dbg_chan()) {
     std::fprintf(stderr, "[disp-copy-dst] wd=%u ht=%u\n", wd, ht);
   }
   // Same shared BP dst-size registers as GXSetTexCopyDst (see GXSetDispCopySrc
@@ -404,7 +415,7 @@ void GXSetCopyClear(GXColor color, u32 depth) {
   // SB_COPY_DBG=1: log every copy-clear color change — the deferred-clear
   // model clears next-frame-start with the LAST color set, which is wrong if
   // the game sets different colors for different copies within a frame.
-  if (std::getenv("SB_COPY_DBG") != nullptr) {
+  if (sb_copy_dbg_chan()) {
     static long n = 0;
     std::fprintf(stderr, "[copy-clear-set] n=%ld rgba=(%u,%u,%u,%u) z=%06x\n", ++n, color.r, color.g, color.b,
                  color.a, depth);
@@ -457,7 +468,7 @@ void GXCopyDisp(void* dest, GXBool clear) {
 void GXCopyTex(void* dest, GXBool clear) {
   // SB_COPY_DBG: log every EFB->texture copy (the mirror capture + the mid-scene
   // "snapshot" retail composites the title backdrop from). Distinct from the disp copy.
-  if (std::getenv("SB_COPY_DBG") != nullptr) {
+  if (sb_copy_dbg_chan()) {
     static long n = 0;
     std::fprintf(stderr, "[tex-copy] n=%ld dest=%p clear=%d\n", ++n, dest, clear != GX_FALSE);
   }

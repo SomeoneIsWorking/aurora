@@ -68,6 +68,15 @@ add_subdirectory(extern)
 include(cmake/aurora_core.cmake)
 include(cmake/aurora_os.cmake)
 if (AURORA_ENABLE_GX)
+# lucent is THE logger for this project (global directive): channel-gated debug, one call site per
+# line, no ad-hoc getenv+fprintf. Fetched here rather than by each consumer so BOTH runtimes get it —
+# sms-recomp already used it, sms-boot did not, and aurora's own diagnostics were the sprawl.
+include(FetchContent)
+FetchContent_Declare(lucent
+  GIT_REPOSITORY https://github.com/SomeoneIsWorking/lucent.git
+  GIT_TAG main)
+FetchContent_MakeAvailable(lucent)
+
   include(cmake/aurora_gx.cmake)
   include(cmake/aurora_gd.cmake)
 endif ()
