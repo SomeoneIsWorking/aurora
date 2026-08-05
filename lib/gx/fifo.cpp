@@ -74,6 +74,34 @@ uint32_t end_display_list() {
 
 bool in_display_list() { return detail::sInDisplayList; }
 
+
+// --- Draw-pass idempotence probe (SB_DOUBLE_DRAW in MarDirectorDirect.cpp) -------------------
+//
+// Game-native 60fps interpolation renders the draw phases twice per logic tick, so those passes
+// must emit the SAME commands both times — anything that differs is state the pass mutated as it
+// ran. These let the game mark the fifo, run a pass, hash what it emitted, REWIND, and run it
+// again, so the second pass replaces the first rather than adding to it (no doubled geometry, no
+// staging overflow, and the frame still renders normally from the final pass).
+extern "C" uint32_t sb_gx_fifo_mark(void) { return detail::sBufferSize; }
+extern "C" void sb_gx_fifo_rewind(uint32_t mark) {
+  // Only ever shrinks. Growing here would expose uninitialised bytes to the parser.
+  if (mark <= detail::sBufferSize) {
+    detail::sBufferSize = mark;
+  }
+}
+extern "C" uint64_t sb_gx_fifo_hash(uint32_t from, uint32_t to) {
+  if (detail::sBufferData == nullptr || to <= from || to > detail::sBufferSize) {
+    return 0; // caller checks the byte count separately; 0 here means "nothing to hash"
+  }
+  // FNV-1a; no dependency on aurora's xxhash from this TU.
+  uint64_t h = 1469598103934665603ull;
+  for (uint32_t i = from; i < to; ++i) {
+    h ^= detail::sBufferData[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
 void drain() {
   if (detail::sBufferSize == 0) {
     return;
