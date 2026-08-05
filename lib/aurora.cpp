@@ -42,6 +42,9 @@ namespace aurora {
 static AuroraFrameSink g_frameSink = nullptr;
 static void* g_frameSinkUser = nullptr;
 static int g_frameSinkEvery = 0;
+// aurora_set_dump_tag: a short role label the caller stamps onto the next dump's filename, so a
+// dump series is self-describing rather than needing its files identified by inference.
+static char g_dumpTag[32] = {0};
 
 AuroraConfig g_config;
 uint32_t g_sdlCustomEventsStart;
@@ -602,6 +605,19 @@ void end_frame_impl(bool replayEmission) noexcept {
       if (s_dumpEvery > 0) {
         job->path += "." + std::to_string(s_dumpSeq++);
       }
+      // The caller's label for THIS present, appended to the filename.
+      //
+      // A dump series carries no record of what each present WAS. When a runtime issues more than
+      // one kind of present per game tick (a main frame and an interpolated sub-frame), the role of
+      // each file has to be inferred from the pattern of the diffs — and inferring it wrongly is
+      // silent, because every file looks equally valid. Putting the role in the NAME makes the
+      // artifact self-describing, and removes the join between "dump index" and "what the runtime
+      // was doing", which is exactly the kind of cross-instrument ordinal join that has produced
+      // false findings in this project before.
+      if (g_dumpTag[0] != '\0') {
+        job->path += ".";
+        job->path += g_dumpTag;
+      }
       const uint32_t bytesPerRow = ((job->width * 4 + 255) / 256) * 256;
       const wgpu::BufferDescriptor bd{
           .label = "framebuffer dump",
@@ -911,6 +927,13 @@ void aurora_set_frame_sink(AuroraFrameSink fn, void* user, int everyNFrames) {
   aurora::g_frameSink = fn;
   aurora::g_frameSinkUser = user;
   aurora::g_frameSinkEvery = (fn != nullptr) ? everyNFrames : 0;
+}
+void aurora_set_dump_tag(const char* tag) {
+  if (tag == nullptr) {
+    aurora::g_dumpTag[0] = '\0';
+    return;
+  }
+  std::snprintf(aurora::g_dumpTag, sizeof(aurora::g_dumpTag), "%s", tag);
 }
 void aurora_set_log_level(AuroraLogLevel level) { aurora::g_config.logLevel = level; }
 void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusLost = value; }

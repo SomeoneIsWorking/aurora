@@ -173,6 +173,12 @@ void aurora_fifo_replay(const uint8_t* data, uint32_t size, int bigEndian);
 typedef void (*AuroraFrameSink)(const uint8_t* rgba, uint32_t width, uint32_t height, void* user);
 void aurora_set_frame_sink(AuroraFrameSink fn, void* user, int everyNFrames);
 
+/* Stamp a short role label onto subsequent SB_DUMP_FRAME filenames (e.g. "main", "sub").
+ * A runtime that issues more than one kind of present per tick otherwise produces a dump
+ * series whose files must be identified by inference; the label makes each artifact say
+ * what it is. Pass NULL to clear. */
+void aurora_set_dump_tag(const char* tag);
+
 void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);
 void aurora_set_background_input(bool value);
