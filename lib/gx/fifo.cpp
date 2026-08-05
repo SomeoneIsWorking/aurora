@@ -88,14 +88,22 @@ void drain() {
   // per-vertex max-index scan. Printed per drain (one frame) so it lines up with SB_PROFILE_GFX.
   {
     extern int64_t g_dpTotalNs, g_dpScanNs;
-    extern long g_dpCalls;
+    extern long g_dpCalls, g_dpVerts[8], g_dpVertTotal, g_dpPrimKind[8];
     if (g_dpCalls > 0) {
       std::fprintf(stderr, "[drawprim] calls=%ld total=%.2fms scan=%.2fms (%.0f%% of draw_prim)\n",
                    g_dpCalls, g_dpTotalNs / 1e6, g_dpScanNs / 1e6,
                    g_dpTotalNs ? 100.0 * (double)g_dpScanNs / (double)g_dpTotalNs : 0.0);
+      std::fprintf(stderr,
+                   "[drawprim] verts/prim: 1-2:%ld 3:%ld 4:%ld 5-6:%ld 7-12:%ld 13-24:%ld "
+                   "25-48:%ld 49+:%ld | total verts=%ld mean=%.1f\n",
+                   g_dpVerts[0], g_dpVerts[1], g_dpVerts[2], g_dpVerts[3], g_dpVerts[4],
+                   g_dpVerts[5], g_dpVerts[6], g_dpVerts[7], g_dpVertTotal,
+                   (double)g_dpVertTotal / (double)g_dpCalls);
       std::fflush(stderr);
       g_dpTotalNs = g_dpScanNs = 0;
       g_dpCalls = 0;
+      g_dpVertTotal = 0;
+      for (int i = 0; i < 8; ++i) { g_dpVerts[i] = 0; g_dpPrimKind[i] = 0; }
     }
   }
   detail::sDrainDraws = 0;
