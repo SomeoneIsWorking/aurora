@@ -2039,6 +2039,17 @@ uint64_t g_arrContentChanged = 0, g_arrDataCacheHits = 0;
 // large change, worth sizing before proposing. This measures the ceiling on that win.
 std::unordered_map<uint64_t, uint64_t> g_arrHashPrevFrame;
 uint64_t g_arrSameAsPrevBytes = 0, g_arrChangedVsPrevBytes = 0, g_arrNewVsPrevBytes = 0;
+// Does a given array land at the SAME storage offset every frame? If it does, the single
+// persistent g_storageBuffer already holds its bytes from last frame and the memcpy into staging
+// is pure waste — which makes skipping it a small local change rather than a persistent allocator.
+// Offsets come from append order, so this is a property of scene-walk determinism: measure it.
+std::unordered_map<uint64_t, uint32_t> g_arrOffsetPrevFrame, g_arrOffsetThisFrame;
+uint64_t g_arrOffsetStable = 0, g_arrOffsetMoved = 0;
+uint64_t g_arrPersistUploads = 0, g_arrPersistHits = 0, g_arrArenaFull = 0;
+// Thin accessors so fifo.cpp's report does not need the gfx headers.
+uint64_t sb_arena_used() { return gfx::persistent_storage_used(); }
+size_t sb_arena_entries() { return gfx::persistent_storage_entries(); }
+uint64_t g_arrPersistUploadBytes = 0, g_arrPersistHitBytes = 0;
 long g_dpMergedCalls = 0, g_dpUnmergedCalls = 0, g_dpEarlyReturns = 0;
 uint64_t g_dpWholeTicks = 0;
 // Control: two back-to-back reads with nothing between them. This is what ONE probe costs, and
@@ -4259,7 +4270,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       // these exact bytes may already have been uploaded this frame under a different slot state
       // — the game re-points a slot at A, then B, then back at A. The upload belongs to the data,
       // so look it up by data identity before paying for another copy. See gx.hpp.
-      const uint64_t upKey = array_upload_key(array.data, effSize);
+      const ArrayUploadKey upKey{array.data, effSize};
       const gfx::Range* hit = array_upload_lookup(upKey);
       gfx::Range range;
       if (hit != nullptr) {
@@ -4268,7 +4279,31 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
           ++g_arrDataCacheHits;
         }
       } else {
-        range = gfx::push_storage(static_cast<const uint8_t*>(array.data), effSize);
+        // Persistent arena first: this array is almost certainly byte-identical to the copy the
+        // GPU already holds from last frame (measured: 100% of 20.44 MB/frame is unchanged), in
+        // which case the hash is the whole cost and no upload happens at all. The hash is the
+        // change detector — there is no way to observe the game rewriting an array otherwise, and
+        // a stale binding here is silent geometry corruption.
+        const uint64_t contentHash =
+            static_cast<uint64_t>(xxh3_hash_s(static_cast<const uint8_t*>(array.data), effSize));
+        bool uploaded = false;
+        range = gfx::push_storage_persistent(static_cast<const uint8_t*>(array.data), effSize, upKey,
+                                             contentHash, &uploaded);
+        if (range.size == 0) {
+          // Arena full — fall back to the per-frame path rather than binding a bogus range.
+          range = gfx::push_storage(static_cast<const uint8_t*>(array.data), effSize);
+          if (sb_drawprim_profile()) {
+            ++g_arrArenaFull;
+          }
+        } else if (sb_drawprim_profile()) {
+          if (uploaded) {
+            ++g_arrPersistUploads;
+            g_arrPersistUploadBytes += effSize;
+          } else {
+            ++g_arrPersistHits;
+            g_arrPersistHitBytes += effSize;
+          }
+        }
         array_upload_store(upKey, range);
       }
       ranges.vaRanges[i - GX_VA_POS] = range;
@@ -4300,6 +4335,17 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
           } else {
             g_arrChangedVsPrevBytes += effSize;
           }
+        }
+        {
+          const auto oit = g_arrOffsetPrevFrame.find(key);
+          if (oit != g_arrOffsetPrevFrame.end()) {
+            if (oit->second == range.offset) {
+              ++g_arrOffsetStable;
+            } else {
+              ++g_arrOffsetMoved;
+            }
+          }
+          g_arrOffsetThisFrame[key] = range.offset;
         }
         const auto it = g_arrUploadHash.find(key);
         if (it == g_arrUploadHash.end()) {

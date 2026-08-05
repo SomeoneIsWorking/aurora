@@ -1,4 +1,6 @@
 #include "common.hpp"
+
+#include <unordered_map>
 #include "interp.hpp"
 
 #include "clear.hpp"
@@ -1457,8 +1459,10 @@ void initialize() {
                VertexBufferSize, "Shared Vertex Buffer");
   createBuffer(g_indexBuffer, wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst, IndexBufferSize,
                "Shared Index Buffer");
-  createBuffer(g_storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, StorageBufferSize,
-               "Shared Storage Buffer");
+  // Sized StorageBufferSize + PersistentStorageSize: the low region mirrors staging 1:1, the high
+  // region is the persistent geometry arena (see PersistentStorageSize in common.hpp).
+  createBuffer(g_storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
+               StorageBufferSize + PersistentStorageSize, "Shared Storage Buffer");
   for (size_t i = 0; i < g_stagingBuffers.size(); ++i) {
     const auto label = fmt::format("Staging Buffer {}", i);
     createBuffer(g_stagingBuffers[i], wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc, StagingBufferSize,
@@ -1594,6 +1598,9 @@ void shutdown() {
   g_indexBuffer = {};
   g_storageBuffer = {};
   g_stagingBuffers.fill({});
+  // The persistent arena's offsets are only meaningful for the g_storageBuffer being torn down
+  // here. Keeping them would hand out ranges into a destroyed buffer on the next device bring-up.
+  persistent_storage_reset();
   for (auto& packet : g_framePackets) {
     packet = {};
   }
@@ -2363,6 +2370,85 @@ Range push_uniform(const uint8_t* data, size_t length) {
 Range push_storage(const uint8_t* data, size_t length) {
   ZoneScoped;
   return push(current_frame_packet().storage, data, length, g_cachedLimits.minStorageBufferOffsetAlignment);
+}
+
+// --- Persistent geometry arena -------------------------------------------------------------
+// See PersistentStorageSize in common.hpp for why this exists and why the cheaper trick (relying
+// on staging retaining its bytes) is unsound.
+namespace {
+struct PersistentArrayEntry {
+  uint32_t offset;
+  uint32_t size;
+  uint64_t hash;
+};
+std::unordered_map<ArrayUploadKey, PersistentArrayEntry, ArrayUploadKeyHash> sPersistentArrays;
+uint64_t sPersistentTop = StorageBufferSize;
+} // namespace
+
+uint64_t persistent_storage_used() { return sPersistentTop - StorageBufferSize; }
+size_t persistent_storage_entries() { return sPersistentArrays.size(); }
+
+static void write_storage_region(uint64_t offset, const uint8_t* data, size_t length) {
+  // WriteBuffer requires a 4-byte multiple size and offset. Array extents are not guaranteed to
+  // be one, and rounding the size UP would read past the end of the game's array — so the tail is
+  // copied through a small padded scratch instead of over-reading guest memory.
+  const size_t whole = length & ~size_t{3};
+  if (whole > 0) {
+    g_device.GetQueue().WriteBuffer(g_storageBuffer, offset, data, whole);
+  }
+  const size_t tail = length - whole;
+  if (tail > 0) {
+    uint8_t pad[4] = {};
+    std::memcpy(pad, data + whole, tail);
+    g_device.GetQueue().WriteBuffer(g_storageBuffer, offset + whole, pad, 4);
+  }
+}
+
+// Returns a range in the persistent arena, uploading only when the content hash differs from what
+// is already there. `outUploaded` reports whether a GPU write actually happened. A returned range
+// with size 0 means the arena is full and the caller must fall back to the per-frame path — never
+// a silent partial result.
+Range push_storage_persistent(const uint8_t* data, size_t length, ArrayUploadKey key,
+                              uint64_t contentHash, bool* outUploaded) {
+  if (outUploaded != nullptr) {
+    *outUploaded = false;
+  }
+  if (length == 0 || data == nullptr) {
+    return {0, 0};
+  }
+  const auto it = sPersistentArrays.find(key);
+  if (it != sPersistentArrays.end() && it->second.size == length) {
+    if (it->second.hash != contentHash) {
+      // Same array, rewritten in place by the game: refresh the SAME region so every draw that
+      // already resolved this offset stays correct.
+      write_storage_region(it->second.offset, data, length);
+      it->second.hash = contentHash;
+      if (outUploaded != nullptr) {
+        *outUploaded = true;
+      }
+    }
+    return {it->second.offset, static_cast<uint32_t>(length)};
+  }
+  const uint64_t alignment = g_cachedLimits.minStorageBufferOffsetAlignment;
+  const uint64_t off = AURORA_ALIGN(sPersistentTop, alignment);
+  // Reserve a 4-byte MULTIPLE. write_storage_region finishes a non-multiple length with a 4-byte
+  // padded write, which would otherwise spill up to 3 bytes into whatever is allocated next.
+  const uint64_t reserved = AURORA_ALIGN(length, 4);
+  if (off + reserved > StorageBufferSize + PersistentStorageSize) {
+    return {0, 0}; // full — caller falls back
+  }
+  sPersistentTop = off + reserved;
+  write_storage_region(off, data, length);
+  sPersistentArrays[key] = {static_cast<uint32_t>(off), static_cast<uint32_t>(length), contentHash};
+  if (outUploaded != nullptr) {
+    *outUploaded = true;
+  }
+  return {static_cast<uint32_t>(off), static_cast<uint32_t>(length)};
+}
+
+void persistent_storage_reset() {
+  sPersistentArrays.clear();
+  sPersistentTop = StorageBufferSize;
 }
 
 Range push_texture_data(const uint8_t* data, u32 bytesPerRow, u32 rowsPerImage) {
