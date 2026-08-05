@@ -301,9 +301,10 @@ struct AttrArray {
 //
 // Lifetime is one frame, cleared alongside AttrArray::cachedRange when the frame packet's storage
 // buffer is reset — the ranges index into that buffer and do not outlive it.
-uint64_t array_upload_key(const void* data, u32 size);
-const gfx::Range* array_upload_lookup(uint64_t key);
-void array_upload_store(uint64_t key, gfx::Range range);
+using ArrayUploadKey = gfx::ArrayUploadKey;
+using ArrayUploadKeyHash = gfx::ArrayUploadKeyHash;
+const gfx::Range* array_upload_lookup(ArrayUploadKey key);
+void array_upload_store(ArrayUploadKey key, gfx::Range range);
 void array_upload_cache_clear();
 inline bool operator==(const AttrArray& lhs, const AttrArray& rhs) {
   return lhs.data == rhs.data && lhs.size == rhs.size && lhs.stride == rhs.stride && lhs.le == rhs.le;

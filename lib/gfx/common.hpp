@@ -201,6 +201,20 @@ inline constexpr bool UseTextureBuffer = true;
 inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
 inline constexpr uint64_t VertexBufferSize = 3145728;    // 3mb
 inline constexpr uint64_t IndexBufferSize = 1048576;     // 1mb
+// Persistent geometry arena, appended AFTER the staging-mirrored storage region.
+//
+// The per-frame storage path re-uploads every indexed array every frame. Measured on Delfino:
+// 20.44 MB/frame of which 100% is byte-identical to the previous frame, and every array lands at
+// the same offset every frame. The obvious shortcut -- skip the staging write and rely on the
+// bytes still being there -- is UNSOUND: the staging buffer is Unmap()'d and re-MapAsync'd each
+// frame, so its contents are undefined across frames per the WebGPU mapping contract.
+//
+// So stable arrays live here instead, written once with queue.WriteBuffer and re-written only when
+// their content hash changes. This region sits past StorageBufferSize so the staging->GPU copy,
+// which maps staging offsets 1:1 onto storage offsets, cannot collide with it. The static bind
+// group binds the whole buffer with no dynamic offset and shaders index it by byte offset from a
+// uniform, so nothing about the binding changes.
+inline constexpr uint64_t PersistentStorageSize = 33554432; // 32mb
 inline constexpr uint64_t StorageBufferSize = 50331648;  // 48mb (was 8mb, a
 // title-era size). Measured: a single Delfino Plaza pass (SB_SKIP_GHOST=1, ghost
 // pass OFF) overflows 8MB — gameplay map geometry genuinely needs more indexed-
@@ -378,7 +392,30 @@ template <typename T>
 static Range push_uniform(const T& data) {
   return push_uniform(reinterpret_cast<const uint8_t*>(&data), sizeof(T));
 }
+// Identity of an indexed vertex array upload: the EXACT (pointer, size) pair, compared field by
+// field. An earlier version folded them into one u64 as `(ptr << 8) ^ size`, which is lossy —
+// size's high bits land on pointer bits, so two distinct arrays can collide and the cache then
+// serves one array's bytes for another. That is silent geometry corruption, and it bought nothing:
+// the map can compare the real fields just as cheaply.
+struct ArrayUploadKey {
+  const void* data;
+  uint32_t size;
+  bool operator==(const ArrayUploadKey& rhs) const { return data == rhs.data && size == rhs.size; }
+};
+struct ArrayUploadKeyHash {
+  size_t operator()(const ArrayUploadKey& k) const {
+    return std::hash<const void*>{}(k.data) ^ (static_cast<size_t>(k.size) * 0x9E3779B97F4A7C15ull);
+  }
+};
 Range push_storage(const uint8_t* data, size_t length);
+// Persistent geometry arena (see PersistentStorageSize above). Uploads only when contentHash
+// differs from what the arena already holds for `key`. A returned range of size 0 means the arena
+// is full — the caller MUST fall back to push_storage, never treat it as a valid binding.
+Range push_storage_persistent(const uint8_t* data, size_t length, ArrayUploadKey key,
+                              uint64_t contentHash, bool* outUploaded);
+uint64_t persistent_storage_used();
+size_t persistent_storage_entries();
+void persistent_storage_reset();
 template <typename T>
 static Range push_storage(ArrayRef<T> data) {
   return push_storage(reinterpret_cast<const uint8_t*>(data.data()), data.size() * sizeof(T));

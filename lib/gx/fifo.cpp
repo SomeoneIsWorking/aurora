@@ -192,6 +192,24 @@ void drain() {
         std::fprintf(stderr, "[drawprim]   arrays: data-keyed cache hits (uploads avoided)=%llu\n",
                      (unsigned long long)g_arrDataCacheHits);
         g_arrDataCacheHits = 0;
+        {
+          extern uint64_t g_arrPersistUploads, g_arrPersistHits, g_arrArenaFull;
+          extern uint64_t g_arrPersistUploadBytes, g_arrPersistHitBytes;
+          // fifo.cpp does not pull in the gfx headers; forward-declare what the report needs.
+          extern uint64_t sb_arena_used();
+          extern size_t sb_arena_entries();
+
+          std::fprintf(stderr,
+                       "[drawprim]   arena: reused=%llu (%.2f MB, NOT uploaded)  uploaded=%llu (%.2f MB)  "
+                       "full-fallbacks=%llu  arena used=%.2f MB in %zu entries\n",
+                       (unsigned long long)g_arrPersistHits, (double)g_arrPersistHitBytes / 1048576.0,
+                       (unsigned long long)g_arrPersistUploads, (double)g_arrPersistUploadBytes / 1048576.0,
+                       (unsigned long long)g_arrArenaFull,
+                       (double)sb_arena_used() / 1048576.0,
+                       sb_arena_entries());
+          g_arrPersistUploads = g_arrPersistHits = g_arrArenaFull = 0;
+          g_arrPersistUploadBytes = g_arrPersistHitBytes = 0;
+        }
         // The precondition for caching uploads by DATA identity rather than by slot registration.
         std::fprintf(stderr,
                      "[drawprim]   arrays: in-frame content changes under an unchanged (ptr,size): %llu%s\n",
@@ -210,6 +228,17 @@ void drain() {
                        tot > 0 ? 100.0 * (double)g_arrSameAsPrevBytes / tot : 0.0,
                        (double)g_arrChangedVsPrevBytes / 1048576.0,
                        (double)g_arrNewVsPrevBytes / 1048576.0);
+          extern std::unordered_map<uint64_t, uint32_t> g_arrOffsetPrevFrame, g_arrOffsetThisFrame;
+          extern uint64_t g_arrOffsetStable, g_arrOffsetMoved;
+          std::fprintf(stderr,
+                       "[drawprim]   arrays: storage offset vs prev frame: stable=%llu moved=%llu%s\n",
+                       (unsigned long long)g_arrOffsetStable, (unsigned long long)g_arrOffsetMoved,
+                       g_arrOffsetMoved == 0
+                           ? "  <- deterministic; the GPU buffer already holds these bytes"
+                           : "  <- offsets move; skipping the copy needs a persistent allocator");
+          g_arrOffsetPrevFrame = g_arrOffsetThisFrame;
+          g_arrOffsetThisFrame.clear();
+          g_arrOffsetStable = g_arrOffsetMoved = 0;
           g_arrHashPrevFrame = g_arrUploadHash; // carry this frame's hashes into the next
           g_arrSameAsPrevBytes = g_arrChangedVsPrevBytes = g_arrNewVsPrevBytes = 0;
         }
