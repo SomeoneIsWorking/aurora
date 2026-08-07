@@ -1863,7 +1863,91 @@ static void handle_draw_overrun [[noreturn]] (u32 totalVtxBytes, const u8* data,
   FATAL("draw vertex data overrun: need {} bytes at pos {}, have {}", totalVtxBytes, pos, size);
 }
 
+// Denominators for the position-sourced texgen work. Every one is a DENOMINATOR: "0 texture
+// matrices patched" means one thing when no draw was a candidate and the opposite when many were
+// and the gate rejected them all, and the numerator alone cannot tell those apart.
+long g_texgenPosSourced = 0;    // draws with a position-sourced matrix texgen (the candidate set)
+long g_texgenRejectIndexed = 0; // ... rejected here: no single matrix to rewrite, or slot unknown
+long g_texgenEyeSpace = 0;      // ... passed to interpolation, which applies its own stability gate
+
+// Which texture matrices of this draw are driven by the VERTEX POSITION, and so have to move when
+// the position matrices do. Bit k = the shader's `postex_mtx[k]`, which is why the index expression
+// below is copied from shader.cpp rather than re-derived.
+//
+// WHY THIS EXISTS. A GX texgen sourced from GX_TG_POS reads the RAW vertex attribute, not the
+// position after the position matrix. Interpolation moves the POSITION matrices — for a paired draw
+// to its own in-between pose, for an unpaired one to the in-between viewpoint — and has never
+// touched the TEXTURE matrices. Where the texture matrix is a projection through the same camera,
+// the geometry then advances half a tick while its UVs stay on the previous tick's mapping, so the
+// projected image slides across the surface it is painted on. That happens ONLY while the camera or
+// the object is moving, which is exactly how it was reported.
+//
+// This function decides only "is the position what feeds this UV, and is there a single matrix to
+// rewrite". It deliberately does NOT decide whether the texture matrix contains the camera — that
+// cannot be read off one frame's state, and guessing it wrong corrupts object-locked projections
+// (a decal's UVs are correct unchanged when the camera moves). Interpolation settles it by
+// measuring, across ticks, whether the matrix behaves like a projection composed with this draw's
+// model-view; see the stability gate in gfx/interp.cpp.
+static uint32_t eye_space_texgen_mask(const gx::ShaderInfo& info) {
+  uint32_t mask = 0;
+  for (u8 i = 0; i < g_gxState.numTexGens && i < MaxTexCoord; ++i) {
+    if (!info.sampledTexCoords.test(i)) {
+      continue; // the shader never emits this texcoord
+    }
+    const auto& tcg = g_gxState.tcgs[i];
+    if (tcg.src != GX_TG_POS || (tcg.type != GX_TG_MTX2x4 && tcg.type != GX_TG_MTX3x4)) {
+      continue;
+    }
+    ++g_texgenPosSourced;
+    // A per-vertex texture-matrix index means there is no single matrix in the uniform block that
+    // this draw uses, and an identity texgen matrix means there is no matrix at all. A per-vertex
+    // POSITION-matrix index means the model-view differs per vertex, so the correction below has no
+    // single matrix to express itself against either.
+    if (info.indexAttr.test(GX_VA_TEX0MTXIDX + i) || tcg.mtx == GX_IDENTITY ||
+        info.indexAttr.test(GX_VA_PNMTXIDX)) {
+      ++g_texgenRejectIndexed;
+      continue;
+    }
+    ++g_texgenEyeSpace;
+    // The SAME index expression the shader uses (`ubuf.postex_mtx[tcg.mtx / 3]`, shader.cpp), not a
+    // re-derivation of it. GX_TEXMTX0 is 30, so this lands at MaxPnMtx and above — the texture half
+    // of the shared postex_mtx array. Written this way so the two cannot drift apart.
+    const u32 idx = tcg.mtx / 3;
+    ASSERT(idx >= MaxPnMtx && idx < MaxPnMtx + MaxTexMtx,
+           "texgen {} matrix {} maps to postex_mtx[{}], outside the texture block [{}, {})", i,
+           underlying(tcg.mtx), idx, MaxPnMtx, MaxPnMtx + MaxTexMtx);
+    mask |= 1u << idx;
+  }
+  return mask;
+}
+
 // Draw command handler - parses vertices inline and caches results
+// Byte offset of GX_VA_POS within a vertex record, and whether it is the one shape the vertex lerp
+// can handle: DIRECT, three components, f32. GX's attribute order is fixed (PNMTXIDX, the eight
+// TEXnMTXIDX, POS, ...), so the offset is the sum of what precedes POS under the current descriptor.
+static void calculate_pos_layout(GXVtxFmt fmt, u16& posOffset, u8& posF32XYZ) {
+  const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+  u32 off = 0;
+  for (int i = GX_VA_PNMTXIDX; i < GX_VA_POS; ++i) {
+    switch (g_gxState.vtxDesc[i]) {
+    case GX_NONE: break;
+    case GX_DIRECT: {
+      const auto attr = static_cast<GXAttr>(i);
+      off += comp_type_size(attr, vtxFmt.attrs[i].type) * comp_cnt_count(attr, vtxFmt.attrs[i].cnt);
+      break;
+    }
+    case GX_INDEX8: off += 1; break;
+    case GX_INDEX16: off += 2; break;
+    }
+  }
+  posOffset = static_cast<u16>(off);
+  const auto& pf = vtxFmt.attrs[GX_VA_POS];
+  posF32XYZ = (g_gxState.vtxDesc[GX_VA_POS] == GX_DIRECT && pf.type == GX_F32 &&
+               pf.cnt == GX_POS_XYZ)
+                  ? 1u
+                  : 0u;
+}
+
 static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
   u32 vtxSize = 0;
   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
@@ -1915,6 +1999,7 @@ long g_sbPushedDrawCount = 0; // exported: SB_NO_ZWRITE_DRAWS window check in gx
 // draw, and those draws would then pair with the wrong object's matrices — a silent, plausible
 // wrong answer rather than a visible failure.
 uint64_t g_pendingDrawTag = 0;
+uint8_t g_pendingDrawPop = 0;
 // Coverage, so "tagging is on" can be distinguished from "tagging is silently doing nothing".
 long g_taggedDrawCount = 0;
 long g_untaggedDrawCount = 0;
@@ -4663,6 +4748,12 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     instanceCount = vtxCount;
   }
   if (s_prof) _pa = _pt();
+  // Where POS lives inside this draw's vertex record. Computed here because the descriptor state
+  // that determines it is current NOW and gone by the time the recorded frame is interpolated.
+  u16 posOffset = 0;
+  u8 posF32XYZ = 0;
+  calculate_pos_layout(fmt, posOffset, posF32XYZ);
+  const uint32_t texMtxCamMask = eye_space_texgen_mask(info);
   auto uniformRange = build_uniform(info, vertRange.offset, ranges);
   if (s_prof) { auto n = _pt(); sb_gx_prof_add(3, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
   gfx::push_draw_command(DrawData{
@@ -4676,6 +4767,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .bindGroups = bindGroups,
       .dstAlpha = g_gxState.dstAlpha,
       .tag = g_pendingDrawTag,
+      .pop = g_pendingDrawPop,
       // The block order is pnMtx.pos, then the texture matrices, then pnMtx.nrm — see build_uniform.
       // Spelled out with both counts rather than doubling one: MaxPnMtx and MaxTexMtx happen to be
       // equal today, and a change to either would silently misplace the normal matrices.
@@ -4683,6 +4775,11 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .mtxNrmOffset = g_lastUniformMtxOffset +
                       (u32)((MaxPnMtx + MaxTexMtx) * sizeof(Mat3x4<float>)),
       .ortho = g_gxState.projType == GX_ORTHOGRAPHIC ? (u8)1 : (u8)0,
+      .vtxStride = static_cast<u16>(g_gxState.lastVtxSize),
+      .posOffset = posOffset,
+      .posF32XYZ = posF32XYZ,
+      .texMtxCamMask = texMtxCamMask,
+      .pnMtxSlot = static_cast<uint8_t>(g_gxState.currentPnMtx),
   });
   if (g_pendingDrawTag != 0) {
     ++g_taggedDrawCount;
@@ -4903,6 +5000,10 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     // again when it moves to the next object.
     g_pendingDrawTag = read_u64(data + pos, bigEndian);
     pos += 8;
+  } else if (subCmd == GX_AURORA_DRAW_POP) {
+    CHECK(pos + 1 <= size, "GX_AURORA_DRAW_POP read overrun");
+    g_pendingDrawPop = data[pos];
+    pos += 1;
   } else if (subCmd == GX_AURORA_DESTROY_TEXOBJ) {
     CHECK(pos + 4 <= size, "GX_AURORA_DESTROY_TEXOBJ read overrun");
     evict_texture_object(read_u32(data + pos, bigEndian));

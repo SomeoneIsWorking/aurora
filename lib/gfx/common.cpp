@@ -649,10 +649,15 @@ std::unordered_map<const void*, uint32_t> g_copyResolvedAtPass;
 const void* g_pendingResolveDest = nullptr;
 } // namespace
 
+long g_noteSampledCalls = 0;
+long g_noteSampledRefused = 0;
+
 void note_copy_texture_sampled(const void* dest) {
   if (dest == nullptr || g_recordingFrame == nullptr || g_recordingFrame->replayEmission) {
+    ++g_noteSampledRefused;
     return;
   }
+  ++g_noteSampledCalls;
   // The pass currently recording. A sample inside the SAME pass that later resolves still counts as
   // "before the copy", because the resolve happens at the end of the pass.
   const uint32_t pass = g_currentRenderPass == UINT32_MAX ? 0 : g_currentRenderPass;
@@ -679,7 +684,19 @@ bool is_cross_frame_feedback(const void* dest, uint32_t copyPass) {
   if (it == g_copySampledAtPass.end()) {
     return false;   // never sampled this frame: nothing here proves it is feedback
   }
-  return it->second < copyPass;
+  // <=, NOT <. The resolve does not sit at some unknown point inside the pass — resolve_pass()
+  // attaches it to the CURRENT pass and ends it, so every draw recorded in that pass happened
+  // BEFORE the copy by construction. A same-pass sample therefore read what the PREVIOUS frame left
+  // in the texture, which is exactly what feedback means.
+  //
+  // The strict form made this classifier structurally unable to see feedback in this game: SMS
+  // composites the dash trail and copies the result inside ONE pass, so every copy scored
+  // intra-frame and the count read 0 suppressed of 55,198 over 13,800 ticks. That zero looked like
+  // "this scene has no feedback effects" and was really "this classifier cannot represent the case".
+  // note_copy_texture_sampled had documented the correct rule all along ("A sample inside the SAME
+  // pass that later resolves still counts as before the copy"); the two functions disagreed and the
+  // selftest encoded the disagreement rather than catching it.
+  return it->second <= copyPass;
 }
 
 // Run the classifier against BOTH classes it must separate, before it is trusted on a real frame.
@@ -701,7 +718,11 @@ bool copy_classifier_selftest() {
   const Case cases[] = {
       {"sampled BEFORE the copy (previous frame's contents)", kFeedback, 3, true},
       {"sampled AFTER the copy (this frame's consumer)", kIntra, 2, false},
-      {"sampled in the SAME pass as the copy (order unknown)", kSame, 2, false},
+      // Same-pass IS feedback: resolve_pass ends the pass, so a draw recorded in it precedes the
+      // copy. This case previously expected `false` with the rationale "order unknown", which was
+      // the classifier's own limitation written down as a property of the world.
+      {"sampled in the SAME pass as the copy (the resolve ENDS the pass, so the sample precedes it)",
+       kSame, 2, true},
       {"never sampled at all", kUnsampled, 2, false},
   };
   for (const Case& c : cases) {
@@ -871,7 +892,39 @@ bool interpolate_recorded_frame(float alpha) {
       if (!pass.resolveTarget || pass.resolveDest == nullptr) {
         continue;
       }
-      if (is_cross_frame_feedback(pass.resolveDest, i)) {
+      // AURORA_EFB_FEEDBACK=present: let the interpolated emission perform the feedback copy too,
+      // so the effect advances once per PRESENT rather than once per game tick.
+      //
+      // Why this is worth a switch rather than a decision. A temporal-feedback effect is a filter
+      // over the frame sequence, and the dash afterimage composites the previous copy back over the
+      // viewport each time it runs. Suppressing it here keeps the filter running at the SIM rate,
+      // which preserves the retail trail length exactly — and leaves the ghost stepping at 30 Hz
+      // behind a Mario drawn at 60, which is what the user reports. Running it per present makes the
+      // ghost advance with him, at the cost of halving the filter's time constant: the same
+      // per-step decay applied twice as often is a shorter trail in wall-clock terms.
+      //
+      // The note this replaces claimed running it twice makes the trail "full length on one present
+      // and half on the next". That is a claim about alternation and it is measurable; the switch
+      // exists so it can be measured rather than argued.
+      //   (unset)  classify, and suppress only what the classifier calls feedback  [default]
+      //   present   never suppress — the effect advances once per PRESENT
+      //   tick      suppress EVERY copy on the interpolated emission, classifier or not
+      //
+      // The third mode exists because the classifier reports 0 feedback copies in this game (they
+      // are all sampled in a LATER pass than the one that writes them, i.e. genuinely intra-frame),
+      // so `present` and the default are byte-identical and neither can tell you whether the copy
+      // RATE is what makes a screen effect judder. `tick` forces the other end of the axis so the
+      // question is answerable by looking rather than by argument.
+      static const int s_feedbackMode = [] {
+        const char* e = std::getenv("AURORA_EFB_FEEDBACK");
+        if (e == nullptr) return 0;
+        if (std::strcmp(e, "present") == 0) return 1;
+        if (std::strcmp(e, "tick") == 0) return 2;
+        return 0;
+      }();
+      const bool suppress = s_feedbackMode == 2 ||
+                            (s_feedbackMode == 0 && is_cross_frame_feedback(pass.resolveDest, i));
+      if (suppress) {
         pass.resolveTarget = {};   // feedback: leave it to the replay emission, once per tick
         ++thisTick;
       } else {
@@ -880,6 +933,17 @@ bool interpolate_recorded_frame(float alpha) {
     }
     s_suppressed += thisTick;
     if ((++s_ticks % 300) == 0) {
+      // The classifier's INPUT, printed beside its output. "0 suppressed" has two completely
+      // different causes — no copy is feedback, or nothing ever told the classifier that a copy's
+      // result was sampled — and without this line they are the same number.
+      Log.info("  classifier input: note_copy_texture_sampled accepted {} call(s), refused {} "
+               "(null dest, no recording frame, or the replay emission); {} distinct copy dest(s) "
+               "have a recorded sample this frame.{}",
+               g_noteSampledCalls, g_noteSampledRefused, g_copySampledAtPass.size(),
+               g_noteSampledCalls == 0
+                   ? "  <-- NEVER ACCEPTED A SAMPLE. The verdict below is not about the scene; the "
+                     "classifier was never given anything to classify."
+                   : "");
       Log.info("EFB copies over {} ticks: {} suppressed on the interpolated emission (cross-frame "
                "feedback, sampled only BEFORE the pass that writes them) and {} kept (intra-frame, "
                "a later pass reads them). Both numbers matter: all-suppressed means an intra-frame "
@@ -903,12 +967,13 @@ bool interpolate_recorded_frame(float alpha) {
              "this tick has no in-between to show",
              interp::tick_index());
   }
-  for (const auto& pass : frame.renderPasses) {
-    for (const auto& cmd : pass.commands) {
+  for (auto& pass : frame.renderPasses) {
+    for (auto& cmd : pass.commands) {
       if (cmd.type != CommandType::Draw || cmd.data.draw.type != ShaderType::GX) {
         continue;
       }
-      const gx::DrawData& d = cmd.data.draw.gx;
+      gx::DrawData& d = cmd.data.draw.gx;
+
       if (d.uniformRange.offset + d.uniformRange.size > snap.size()) {
         continue;   // outside the snapshot: cannot have been recorded by this frame
       }
@@ -917,13 +982,57 @@ bool interpolate_recorded_frame(float alpha) {
       // genuinely paired already carries it, because the camera is baked into the matrices being
       // lerped. Everything else — untagged, or tagged but unpaired this tick — takes the camera
       // delta alone. Leaving ANY draw on the current viewpoint is what tears the frame.
-      if (!interp::patch_draw(d.tag, d.vtxCount, snap.data() + d.uniformRange.offset, dst,
-                              d.uniformRange.size, d.mtxPosOffset, d.mtxNrmOffset, alpha) &&
-          d.ortho == 0) {
+      // THE AUDIT. Every draw lands in exactly one of these five, so the columns sum to the draw
+      // count and a population cannot quietly go missing between them.
+      interp::note_disposition(d.pop,
+                               d.ortho != 0 ? interp::Disposition::SnappedOrtho
+                                            : interp::Disposition::Pending);
+      // BILLBOARDS FIRST. A JPA particle's position lives in its VERTEX data, so patch_draw would
+      // pair it and lerp an identity matrix against an identity matrix — a no-op that also
+      // SUPPRESSES the camera delta, leaving the particle worse off than untagged. patch_billboard
+      // recognises the tag by having a recorded world position for it and applies the object's own
+      // displacement as a translation on top of the camera delta.
+      if (interp::patch_billboard(d.tag, snap.data() + d.uniformRange.offset, dst,
+                                  d.uniformRange.size, d.mtxPosOffset, d.mtxNrmOffset, alpha)) {
+        interp::note_disposition(d.pop, interp::Disposition::Billboard);
+        continue;
+      }
+
+      // ── DEFORMING GEOMETRY: interpolate the VERTICES ──────────────────────────────────────────
+      //
+      // LAST, deliberately. A flag or the sea ripple grid rebuilds its mesh every tick, so its
+      // motion is in the vertex data and no matrix reaches it — but "has direct f32 positions and a
+      // tag" also describes a JPA billboard, whose positions are baked in EYE SPACE. Lerping those
+      // across two ticks mixes two different view transforms; running this before patch_billboard
+      // did exactly that and moved 516,562 particle draws off the correct path onto this one.
+      // Ordering it after the specific paths makes it the fallback it should be.
+      //
+      // The lerp goes into a SEPARATE buffer and only THIS emission's command is repointed at it.
+      // Both emissions replay the same recorded passes and therefore the same vertRange, so
+      // patching in place would corrupt the tick's own frame — uniforms escape that because the
+      // snapshot re-pushes them, vertices have no such path. The snapshot's copy of this command
+      // keeps the original range, so the replay emission still draws the tick exactly.
+      if (d.posF32XYZ != 0 && d.tag != 0 && d.vtxCount > 0 && d.vertRange.size > 0 &&
+          d.vertRange.offset + d.vertRange.size <= frame.verts.size()) {
+        std::vector<uint8_t> tmp(d.vertRange.size);
+        memcpy(tmp.data(), frame.verts.data() + d.vertRange.offset, d.vertRange.size);
+        if (interp::patch_vertices(d.tag, d.vtxCount, d.vtxStride, d.posOffset,
+                                   frame.verts.data() + d.vertRange.offset, tmp.data(), alpha)) {
+          d.vertRange = push_verts(tmp.data(), tmp.size(), 4);
+          interp::note_disposition(d.pop, interp::Disposition::Paired);
+          continue;
+        }
+      }
+      if (interp::patch_draw(d.tag, d.vtxCount, snap.data() + d.uniformRange.offset, dst,
+                             d.uniformRange.size, d.mtxPosOffset, d.mtxNrmOffset, alpha,
+                             d.texMtxCamMask, d.pnMtxSlot)) {
+        interp::note_disposition(d.pop, interp::Disposition::Paired);
+      } else if (d.ortho == 0) {
         // Perspective only. An orthographic draw's matrix is not model x view, so a camera delta
         // does not belong in it — it would slide the HUD bodily every other frame.
         interp::patch_camera_only(snap.data() + d.uniformRange.offset, dst, d.uniformRange.size,
-                                  d.mtxPosOffset, d.mtxNrmOffset);
+                                  d.mtxPosOffset, d.mtxNrmOffset, d.texMtxCamMask);
+        interp::note_disposition(d.pop, interp::Disposition::CameraOnly);
       }
     }
   }
