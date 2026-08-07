@@ -1,5 +1,7 @@
 #include "gpu.hpp"
 
+#include <cstdlib>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -198,9 +200,23 @@ wgpu::PresentMode best_present_mode(bool vsync) {
     return false;
   };
   if (vsync) {
-    if (supports(wgpu::PresentMode::FifoRelaxed)) {
+    // STRICT Fifo, not FifoRelaxed, when the caller asks for vsync.
+    //
+    // FifoRelaxed exists to present IMMEDIATELY when the frame missed its vblank, trading tearing
+    // for latency. For a renderer emitting one image per tick that is the right trade. For
+    // interpolated 60fps it defeats the purpose: the whole reason vsync is requested is that a tick
+    // emits TWO images and they must land on two DIFFERENT refreshes. A late tick is the common
+    // case, not the exception — measured at 94% on this machine — so under FifoRelaxed the pair is
+    // presented back to back exactly as it was under Mailbox, and the in-between image gets no
+    // display time. Strict Fifo queues both and the display shows each for at least one refresh,
+    // which is the property being paid for.
+    //
+    // AURORA_PRESENT_RELAXED=1 restores the old preference for A/B.
+    const char* relaxed = std::getenv("AURORA_PRESENT_RELAXED");
+    if (relaxed != nullptr && relaxed[0] == '1' && supports(wgpu::PresentMode::FifoRelaxed)) {
       return wgpu::PresentMode::FifoRelaxed;
     }
+    return wgpu::PresentMode::Fifo;
   } else {
     // Dawn only disables CAMetalLayer displaySyncEnabled for Immediate on Metal
     if (g_backendType != wgpu::BackendType::Metal && supports(wgpu::PresentMode::Mailbox)) {

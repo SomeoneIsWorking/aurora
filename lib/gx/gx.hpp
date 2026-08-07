@@ -547,10 +547,16 @@ namespace fifo {
 // Draw identity supplied by the emitter via GX_AURORA_DRAW_TAG, stamped onto every DrawData until
 // the next tag; 0 = untagged. Reset once per frame in gfx::end_frame — see the comment there.
 extern uint64_t g_pendingDrawTag;
+extern uint8_t g_pendingDrawPop;
 // Coverage counters, so an emitter that has silently stopped tagging is visible as a number rather
 // than as a mysteriously non-interpolating scene.
 extern long g_taggedDrawCount;
 extern long g_untaggedDrawCount;
+// Denominators for the eye-space texgen gate (eye_space_texgen_mask). The numerator lives with the
+// patching code in gfx/interp.cpp; both are printed on one line so neither can be read alone.
+extern long g_texgenPosSourced;
+extern long g_texgenRejectIndexed;
+extern long g_texgenEyeSpace;
 // Untagged draws split by projection: an untagged draw snaps, which is right for screen-space 2D
 // and a defect for world geometry. One percentage cannot distinguish them.
 extern long g_untaggedOrthoDrawCount;

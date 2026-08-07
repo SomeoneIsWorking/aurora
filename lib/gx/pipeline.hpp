@@ -18,6 +18,10 @@ struct DrawData {
   // a draw with the same object's draw in the previous tick for interpolation. Never derived from a
   // draw ordinal — see the sub-opcode's comment in GXAurora.h for why that cannot work.
   uint64_t tag;
+  // Which game-side system emitted this draw (GX_AURORA_DRAW_POP). Not an identity — an audit
+  // label, so the interpolation report can say WHICH populations interpolate rather than quoting
+  // one global percentage that cannot separate a correctly-snapping HUD from stuttering geometry.
+  uint8_t pop;
   // Byte offset of pnMtx[0].pos within this draw's uniform block, and of pnMtx[0].nrm. Recorded at
   // build time because the layout is not fixed — an optional lineMode block shifts everything after
   // it by 16 bytes, and lineMode is not otherwise recoverable from a DrawData. Interpolation writes
@@ -29,6 +33,36 @@ struct DrawData {
   // not — applying a viewpoint change to it displaces the HUD bodily every other frame, which reads
   // as perfectly EVEN motion to a smoothness metric and so hides behind a good-looking score.
   uint8_t ortho;
+  // Vertex layout, recorded so interpolation can find the POSITION floats inside each raw GC vertex
+  // record without re-deriving the descriptor state, which is long gone by the time the recorded
+  // frame is patched. posOffset is the byte offset of GX_VA_POS within a vertex; posF32XYZ says the
+  // attribute is DIRECT, three components, f32 — the only shape the vertex lerp handles. Anything
+  // else and it declines rather than reinterpreting bytes it does not understand.
+  uint16_t vtxStride;
+  uint16_t posOffset;
+  uint8_t posF32XYZ;
+  // Which entries of the shader's `postex_mtx` array hold a TEXTURE matrix that must receive the
+  // interpolated camera delta alongside the position matrices. Bit k = postex_mtx[k], so the bits
+  // that can ever be set are MaxPnMtx..MaxPnMtx+MaxTexMtx-1 (the texture block; the low bits are
+  // the position matrices, which patch_camera_only handles unconditionally).
+  //
+  // WHY THIS EXISTS. A GX texgen sourced from GX_TG_POS reads the RAW vertex attribute, not the
+  // position after the position matrix. SMS's water refraction is built on that: the quad is
+  // authored in EYE space, drawn with an identity PNMTX and a view-less projection texture matrix,
+  // so its screen UV is `texmtx * eye_position`. Moving only the position matrix to the
+  // interpolated viewpoint draws that quad in the right place while its UVs still map to the
+  // previous viewpoint — the reflection sits in the WRONG PLACE, and only while the camera moves,
+  // which is exactly how it was reported.
+  //
+  // The bit is set ONLY where composing the delta is provably the same reprojection as the one the
+  // position matrix receives: see the gate in command_processor.cpp. Blanket-patching every
+  // position-sourced texgen would corrupt object-locked projections, whose UVs are correct
+  // unchanged when the camera moves.
+  uint32_t texMtxCamMask;
+  // Which position matrix this draw uses, needed to divide the model-view back out of a
+  // position-sourced texture matrix. Only meaningful when the mask is non-zero, which the
+  // record-time gate only allows for draws whose matrix index is NOT per-vertex.
+  uint8_t pnMtxSlot;
 };
 
 constexpr uint32_t GXPipelineConfigVersion = 13;

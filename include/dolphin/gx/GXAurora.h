@@ -104,6 +104,16 @@ extern "C" {
 #define GX_AURORA_VIEW_MTX 0x003C
 
 /**
+ * Label the draws that follow with the POPULATION they belong to — the game-side system that
+ * emitted them (a J3D shape, a shadow volume, a JPA particle...). Payload: 1 byte.
+ *
+ * This is not an identity and nothing pairs on it. It exists so the interpolation audit can report
+ * WHICH systems interpolate and which snap, per population, instead of one global percentage that
+ * cannot tell a correctly-snapping HUD from world geometry stuttering. Latched like the tag.
+ */
+#define GX_AURORA_DRAW_POP 0x003D
+
+/**
  * Draw primitives with the vertex count derived from a byte length, as written by
  * GXBegin(prim, fmt, GX_AUTO). Must be followed by a u8 draw opcode (vtxfmt|prim),
  * a u32 vertex data byte length, then that many bytes of vertex data. The byte length
