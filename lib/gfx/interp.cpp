@@ -37,6 +37,15 @@ constexpr uint32_t kOneMtxBytes = 12 * sizeof(float);
 
 // One draw's transform state, keyed by (tag, ordinal within that tag).
 struct Entry {
+  // WHICH TICK THIS SAMPLE IS FROM, and the answer is always "the previous one" — which is worth
+  // measuring precisely because it did not have to be. The tables are a prev/cur swap, and if `cur`
+  // were merely overwritten rather than cleared, a tag that skipped a tick would find a TWO-tick-old
+  // entry sitting where the previous tick's should be. Pairing against that while `alpha` assumes a
+  // one-tick spacing moves the object by the wrong fraction of a step, and it reads as a successful
+  // pairing in every count there is. begin_tick() clears g_cur, so it cannot happen — and the stamp
+  // is what turns that from a property of the code into a number (see g_pairedStale, measured 0 of
+  // 333,348 pairings).
+  long stamp = -1;
   float pos[kMtxFloats];
   float nrm[kMtxFloats];
   uint32_t vtxCount;   // the consistency check — see below
@@ -74,6 +83,8 @@ long g_mismatched = 0;
 // of 293,000 was unattributable. The vertex path already splits its misses this way; this is the
 // same split for the matrices.
 long g_popGap[256] = {}, g_popMismatch[256] = {}, g_popRefused[256] = {};
+// Pairings made against a sample that is NOT one tick old. See Entry::stamp.
+long g_pairedFresh = 0, g_pairedStale = 0, g_pairedStaleMaxAge = 0;
 
 // How far a paired draw's TRANSLATION moved between the two ticks, in world units. This is the
 // direct check on whether "the previous tick's matrices" really are that object's previous
@@ -361,6 +372,7 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
   std::memcpy(mine.pos, src + mtxPosOffset, kMtxBytes);
   std::memcpy(mine.nrm, src + mtxNrmOffset, kMtxBytes);
   mine.vtxCount = vtxCount;
+  mine.stamp = g_tickIndex;
 
   const auto it = g_prev.find(tag);
   if (it == g_prev.end() || it->second.size() <= ordinal) {
@@ -389,6 +401,16 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     return false;
   }
 
+  // Is this pairing against LAST tick's sample, or an older one the swap left behind?
+  {
+    const long age = (was.stamp >= 0) ? (g_tickIndex - was.stamp) : -1;
+    if (age == 1) {
+      ++g_pairedFresh;
+    } else {
+      ++g_pairedStale;
+      if (age > g_pairedStaleMaxAge) g_pairedStaleMaxAge = age;
+    }
+  }
   ++g_paired;
   {
     const float dx = mine.pos[3] - was.pos[3];
@@ -1003,6 +1025,28 @@ void report_vertex_interp() {
            "collision rather than a spacing problem.",
            g_vtxFirstSight, g_vtxGapHist[0], g_vtxGapHist[1], g_vtxGapHist[2], g_vtxGapHist[3],
            g_vtxGapHist[4], g_vtxGapHist[5], g_vtxGapHist[6], g_vtxGapHist[7], g_vtxGapHist[8]);
+  // HOW OLD THE SAMPLE EACH PAIRING USED ACTUALLY WAS. A pairing counts as a success whatever the
+  // spacing, so this is the only place a wrong-spacing pairing can show up at all.
+  {
+    const long total = g_pairedFresh + g_pairedStale;
+    if (total == 0) {
+      Log.info("  pairing freshness: NOTHING paired, so nothing was measured here.");
+    } else {
+      Log.info("  pairing freshness: {} of {} pairing(s) used the PREVIOUS tick's sample ({:.2f}%); "
+               "{} used an older one, up to {} tick(s) old. `alpha` places the in-between frame "
+               "assuming a one-tick spacing, so every stale pairing moves its object by the wrong "
+               "fraction of a step — and it is counted as a success everywhere else.{}",
+               g_pairedFresh, total, 100.0 * (double)g_pairedFresh / (double)total, g_pairedStale,
+               g_pairedStaleMaxAge,
+               g_pairedStale == 0
+                   ? "  Zero here means the tables never hand back a stale sample, which is what "
+                     "begin_tick()'s clear of g_cur is supposed to guarantee. It is corroborated "
+                     "rather than merely asserted: the self-test's gap case draws a tag, skips a "
+                     "tick and draws again, and the table REFUSES that pairing instead of "
+                     "returning the older sample."
+                   : "  A NONZERO count means the swap is handing back samples it should not.");
+    }
+  }
   // WHY EACH POPULATION'S MATRIX RESIDUAL EXISTS. Printed only for populations that HAVE one, and
   // with all three causes even when two are zero: "12 gaps" alone leaves the reader to assume the
   // other two were zero rather than unmeasured.
