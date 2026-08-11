@@ -2000,6 +2000,7 @@ long g_sbPushedDrawCount = 0; // exported: SB_NO_ZWRITE_DRAWS window check in gx
 // wrong answer rather than a visible failure.
 uint64_t g_pendingDrawTag = 0;
 uint8_t g_pendingDrawPop = 0;
+uint8_t g_pendingDrawExact = 0;
 // Coverage, so "tagging is on" can be distinguished from "tagging is silently doing nothing".
 long g_taggedDrawCount = 0;
 long g_untaggedDrawCount = 0;
@@ -4768,6 +4769,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .dstAlpha = g_gxState.dstAlpha,
       .tag = g_pendingDrawTag,
       .pop = g_pendingDrawPop,
+      .exact = g_pendingDrawExact,
       // The block order is pnMtx.pos, then the texture matrices, then pnMtx.nrm — see build_uniform.
       // Spelled out with both counts rather than doubling one: MaxPnMtx and MaxTexMtx happen to be
       // equal today, and a change to either would silently misplace the normal matrices.
@@ -5003,6 +5005,10 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
   } else if (subCmd == GX_AURORA_DRAW_POP) {
     CHECK(pos + 1 <= size, "GX_AURORA_DRAW_POP read overrun");
     g_pendingDrawPop = data[pos];
+    pos += 1;
+  } else if (subCmd == GX_AURORA_DRAW_EXACT) {
+    CHECK(pos + 1 <= size, "GX_AURORA_DRAW_EXACT read overrun");
+    g_pendingDrawExact = data[pos];
     pos += 1;
   } else if (subCmd == GX_AURORA_DESTROY_TEXOBJ) {
     CHECK(pos + 4 <= size, "GX_AURORA_DESTROY_TEXOBJ read overrun");

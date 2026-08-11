@@ -985,8 +985,17 @@ bool interpolate_recorded_frame(float alpha) {
       // THE AUDIT. Every draw lands in exactly one of these five, so the columns sum to the draw
       // count and a population cannot quietly go missing between them.
       interp::note_disposition(d.pop,
-                               d.ortho != 0 ? interp::Disposition::SnappedOrtho
-                                            : interp::Disposition::Pending);
+                               d.ortho != 0   ? interp::Disposition::SnappedOrtho
+                               : d.exact != 0 ? interp::Disposition::SnappedExact
+                                              : interp::Disposition::Pending);
+      // EXACT: the emitter has declared this draw screen-space under a perspective projection (an
+      // identity position matrix with eye-space vertices — SMS_FillScreenAlpha's dst-alpha mask).
+      // The ortho test cannot see it and the camera delta must not touch it: sliding a full-screen
+      // mask by a fraction of the camera's motion is not smoothing, it is moving something that is
+      // nailed to the display.
+      if (d.exact != 0) {
+        continue;
+      }
       // BILLBOARDS FIRST. A JPA particle's position lives in its VERTEX data, so patch_draw would
       // pair it and lerp an identity matrix against an identity matrix — a no-op that also
       // SUPPRESSES the camera delta, leaving the particle worse off than untagged. patch_billboard

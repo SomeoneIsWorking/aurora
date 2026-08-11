@@ -101,6 +101,8 @@ enum class Disposition : uint8_t {
                     // for STATIC world geometry this is exactly correct, and no sound test to
                     // separate the two has been built — see the note in interp.cpp
   SnappedOrtho,     // 2D/HUD; correct, a screen-space element has no meaningful in-between
+  SnappedExact,     // declared screen-space-under-perspective by the emitter (GX_AURORA_DRAW_EXACT):
+                    // correct, and correct for a reason the ortho test cannot see
   SnappedNoIdentity,// perspective with nothing to pair on — the honest remaining gap
   Count
 };
@@ -131,6 +133,11 @@ void report_audit();
 // How many population slots exist. The host allocates ids out of this space at runtime (one per
 // newly-discovered emitter site), so it needs the ceiling rather than assuming one.
 int max_populations();
+
+// How many outcomes Disposition has. The host duplicates the enum's ORDER across this boundary (the
+// enum is in an internal header), so it needs to be able to check that assumption rather than hold
+// it silently — a new outcome on one side only shifts every column.
+int audit_disposition_count();
 
 // Read one population's whole audit row into `out`, which must hold (int)Disposition::Count longs,
 // indexed by Disposition. The host's graphics registry persists these per emitter across runs,
