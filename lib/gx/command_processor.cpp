@@ -4783,6 +4783,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .texMtxCamMask = texMtxCamMask,
       .pnMtxSlot = static_cast<uint8_t>(g_gxState.currentPnMtx),
   });
+  // ONE-SHOT, unlike the tag. A tag identifies an OBJECT and legitimately covers every draw that
+  // object emits; "present this exactly" is a property of ONE primitive, and the function that
+  // emits an exact screen quad often goes on to emit ordinary interpolating geometry from the same
+  // call (TModelWaterManager::drawShineShadowVolume emits both its screen quads and its sphere-slice
+  // display lists). A latch there would freeze the slices too, and the emitter has no seam at which
+  // to clear it — GXEnd is not a function in this build. Consuming it here is the semantic that
+  // matches what the flag means.
+  g_pendingDrawExact = 0;
   if (g_pendingDrawTag != 0) {
     ++g_taggedDrawCount;
   } else {

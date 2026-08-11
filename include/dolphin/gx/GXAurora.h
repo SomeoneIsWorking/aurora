@@ -114,8 +114,12 @@ extern "C" {
 #define GX_AURORA_DRAW_POP 0x003D
 
 /**
- * Mark the draws that follow as EXACT: they must be presented unchanged on an interpolated frame.
- * u8 payload, 0 or 1, latched like the tag.
+ * Mark the NEXT draw as EXACT: it must be presented unchanged on an interpolated frame. u8 payload,
+ * 0 or 1, and CONSUMED by the draw it precedes — unlike the tag, which is latched.
+ *
+ * One-shot because "present this exactly" is a property of one primitive, not of an object: the
+ * function that emits an exact screen quad usually goes on to emit ordinary interpolating geometry
+ * from the same call, and a latch would freeze that too.
  *
  * This is for geometry that is in SCREEN SPACE BY CONSTRUCTION under a perspective projection —
  * the game loads an IDENTITY position matrix and emits vertices that are already in eye space, so
