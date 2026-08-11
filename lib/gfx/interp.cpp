@@ -88,12 +88,25 @@ long g_objDeltaN = 0;
 // can actually be identified rather than merely counted.
 constexpr int kObjBuckets = 7;   // [0,0.1) [0.1,1) [1,10) [10,100) [100,1k) [1k,10k) [10k,inf)
 long g_objHist[kObjBuckets] = {};
+// THE SAME HISTOGRAM, PER POPULATION. The global one says 21,866 paired draws moved 10-100 world
+// units in a 30th of a second and calls them mispairings; that sentence is a CLAIM about what
+// objects can do, and it was never checked against an object whose speed is known. Attributing it
+// says WHICH systems are in the tail, which is the first thing a reader needs in order to decide
+// whether the tail is Mario running or pairing returning another object's transform.
+long g_objHistPop[256][kObjBuckets] = {};
 constexpr int kWorstDraws = 6;
 struct WorstDraw { double delta = -1.0; uint64_t tag = 0; uint32_t ordinal = 0; long tick = -1; };
 WorstDraw g_worstDraw[kWorstDraws];
 // Counted separately because "attribution was not available" and "attribution says zero" must not
 // look alike: on the first tick, or any tick with no previous view, the camera cannot be removed.
 long g_objDeltaUnavailable = 0;
+// Beyond this, a paired delta is not motion. See the note at the use site for why a threshold is
+// defensible here and was not for the camera cut: a three-decade gap in the distribution, and a
+// measured ground truth (a running Mario, 58.5 units/tick max) far below it.
+constexpr double kDiscontinuity = 100.0;
+long g_snappedDiscontinuity = 0;
+double g_snappedDiscontinuityMax = 0.0;
+double g_acceptedMax = 0.0;
 
 // ---- CAMERA ------------------------------------------------------------------------------------
 // A GC Mtx as it arrives: 3 rows of 4 floats, p' = R*p + t with R the leading 3x3 and t the last
@@ -248,7 +261,7 @@ void begin_tick() {
 
 bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* dst,
                 uint32_t uniformSize, uint32_t mtxPosOffset, uint32_t mtxNrmOffset, float alpha,
-                uint32_t texMtxCamMask, uint32_t pnMtxSlot) {
+                uint32_t texMtxCamMask, uint32_t pnMtxSlot, uint8_t pop) {
   if (tag == 0 || dst == nullptr || src == nullptr) {
     return false; // untagged: no identity of its own. The caller applies the camera delta instead.
   }
@@ -336,12 +349,47 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     g_objDeltaSum += od;
     if (od > g_objDeltaMax) { g_objDeltaMax = od; }
     ++g_objDeltaN;
+    // ── THE DISCONTINUITY SNAP ──────────────────────────────────────────────────────────────────
+    //
+    // A pair this far apart is not an object moving, whatever produced it. Either two different
+    // objects shared a tag for one tick, or the object genuinely teleported — and the correct
+    // frame is the same in both cases: show it where it is, do not sweep it across the screen.
+    // Interpolating one of these puts a whole model in mid-air for half a frame.
+    //
+    // THIS IS A THRESHOLD, which this project distrusts on principle, so here is the evidence —
+    // and the part of it that is NOT clean, because a gate justified by an overstated distribution
+    // is the same mistake in the other direction.
+    //
+    // Measured over a 593-tick plaza run with Mario driven by a pad script: 669,750 paired draws
+    // below 100 units/tick, then 36 in [100,1k), 73 in [1k,10k) and 73 in [10k,inf). So it is NOT
+    // three empty decades — the decade just above the bound holds 36 draws, and whether those are
+    // fast objects or mispairs is not known. What IS clean: an independent ground truth sits inside
+    // the bulk (gpMario, measured running, peaks at 58.5 units/tick — motion_truth.cpp, claim
+    // C034), and the two failure modes are not symmetric. Snapping a genuinely fast object costs
+    // one frame of interpolation on 36 draws out of 670,000; interpolating a mispair sweeps a whole
+    // model across the screen. The bound is set to the safe side of that asymmetry.
+    //
+    // Contrast the camera-cut threshold this project correctly REFUSED: there the distribution had
+    // a populated middle with no gap at all (34 ticks in [10,100), 36 in [100,1k)) AND both failure
+    // modes were bad — a missed cut and a cut real motion look equally wrong — so the game was made
+    // to declare its cuts instead. If an object ever needs the same treatment, that is the road.
+    //
+    // It reports itself. If the count climbs, or the largest ACCEPTED delta creeps toward the
+    // bound, then some object really does move that fast and the bound is cutting real motion —
+    // which is the failure this kind of gate is prone to, so it is measured rather than assumed.
+    if (od >= kDiscontinuity) {
+      ++g_snappedDiscontinuity;
+      if (od > g_snappedDiscontinuityMax) { g_snappedDiscontinuityMax = od; }
+      return false;   // the caller falls back to the camera delta alone, which is correct here
+    }
+    if (od > g_acceptedMax) { g_acceptedMax = od; }
     {
       int bucket = 0;
       for (double edge = 0.1; bucket < kObjBuckets - 1 && od >= edge; edge *= 10.0) {
         ++bucket;
       }
       ++g_objHist[bucket];
+      ++g_objHistPop[pop][bucket];
       int slot = -1;
       double lowest = od;
       for (int i = 0; i < kWorstDraws; ++i) {
@@ -996,7 +1044,12 @@ void reset_stats() {
   g_transDeltaN = 0;
   g_objDeltaSum = g_objDeltaMax = 0.0;
   g_objDeltaN = g_objDeltaUnavailable = 0;
+  g_snappedDiscontinuity = 0;
+  g_snappedDiscontinuityMax = g_acceptedMax = 0.0;
   for (int i = 0; i < kObjBuckets; ++i) { g_objHist[i] = 0; }
+  for (int p = 0; p < kMaxPop; ++p) {
+    for (int i = 0; i < kObjBuckets; ++i) { g_objHistPop[p][i] = 0; }
+  }
   for (int i = 0; i < kWorstDraws; ++i) { g_worstDraw[i] = WorstDraw{}; }
   for (int i = 0; i < kCamBuckets; ++i) { g_camHist[i] = 0; }
   g_camEyeSum = g_camEyeMax = g_camRotSumDeg = g_camRotMaxDeg = 0.0;
@@ -1062,14 +1115,14 @@ bool selftest() {
     set_view_matrix(v0);
     begin_camera_delta(0.5f);
     write_draw_block(src.data(), kPos, kNrm, v0, c.obj0[0], c.obj0[1], c.obj0[2]);
-    patch_draw(1, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0);
+    patch_draw(1, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0);
     end_tick();
 
     begin_tick();
     set_view_matrix(v1);
     begin_camera_delta(0.5f);
     write_draw_block(src.data(), kPos, kNrm, v1, c.obj1[0], c.obj1[1], c.obj1[2]);
-    const bool paired = patch_draw(1, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0);
+    const bool paired = patch_draw(1, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0);
 
     const double gotTotal = g_transDeltaN ? g_transDeltaSum / (double)g_transDeltaN : -1.0;
     const double gotObj = g_objDeltaN ? g_objDeltaSum / (double)g_objDeltaN : -1.0;
@@ -1149,13 +1202,48 @@ void report() {
              "with the total above: total >> object means the camera moved the world; object large "
              "means pairing returned another object's transform.",
              g_objDeltaSum / (double)g_objDeltaN, g_objDeltaMax, g_objDeltaN, g_objDeltaUnavailable);
+    // WHAT THIS LINE USED TO SAY WAS WRONG, and it is worth the space to say so where the number is
+    // printed. It read "anything from [10,100) up is a pose no object reaches in 1/30 s, so those
+    // counts are the mispairings" — a threshold nobody had measured, condemning 84,507 draws on a
+    // plaza run. gpMario, walking and running under a pad script, spends 90 of 593 ticks in
+    // [10,100) and peaks at 58.5 units/tick (sms-recomp/frame_interp/motion_truth.cpp, claim C034).
+    // [10,100) is what MOTION looks like in this game's units.
+    //
+    // The boundary the data actually supports is 100, and it is supported by a GAP rather than by a
+    // preference: the same run has 84,507 draws below it and 182 at or above, three decades away.
     Log.info("  object-motion distribution (world units/tick): [0,0.1) {} | [0.1,1) {} | [1,10) {} | "
-             "[10,100) {} | [100,1k) {} | [1k,10k) {} | [10k,inf) {}. Ordinary animation lives in "
-             "the first two buckets; anything from [10,100) up is a pose no object reaches in 1/30 "
-             "s, so those counts are the mispairings, and their SHARE says whether this is a broad "
-             "defect or a few pathological objects.",
+             "[10,100) {} | [100,1k) {} | [1k,10k) {} | [10k,inf) {}. The first FOUR buckets are "
+             "ordinary motion — a running Mario measures up to 58 units/tick. Only [100,inf) is "
+             "beyond anything the game's own objects were observed to do, and those are the "
+             "mispairings (or genuine teleports, which must snap either way).",
              g_objHist[0], g_objHist[1], g_objHist[2], g_objHist[3], g_objHist[4], g_objHist[5],
              g_objHist[6]);
+    // WHO IS IN THE TAIL. Printed for every population with any draw at 10 units/tick or more,
+    // because "6.8% of paired draws moved impossibly far" and "Mario and the particles moved fast"
+    // are the same number until it is attributed.
+    Log.info("  discontinuity snap: {} paired draw(s) refused for moving >= {:.0f} units in one "
+             "tick (largest refused {:.1f}); largest delta ACCEPTED was {:.1f}. The gap between "
+             "that last number and the bound is the margin — if it closes, something in this scene "
+             "moves faster than the ground truth the bound was set from, and the bound is now "
+             "cutting real motion.",
+             g_snappedDiscontinuity, kDiscontinuity, g_snappedDiscontinuityMax, g_acceptedMax);
+    for (int p = 0; p < kMaxPop; ++p) {
+      long tail = 0, total = 0;
+      for (int b = 0; b < kObjBuckets; ++b) {
+        total += g_objHistPop[p][b];
+        if (b >= 3) { tail += g_objHistPop[p][b]; }
+      }
+      if (tail == 0) {
+        continue;
+      }
+      Log.info("    motion tail by population: {:<24} {} of {} paired draw(s) at >=10 units/tick "
+               "({:.1f}%) — buckets [10,100) {} | [100,1k) {} | [1k,10k) {} | [10k,inf) {}. The "
+               "first of those is ordinary motion; the rest are the suspect ones.",
+               g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p))
+                                    : g_popName[p],
+               tail, total, total ? 100.0 * (double)tail / (double)total : 0.0,
+               g_objHistPop[p][3], g_objHistPop[p][4], g_objHistPop[p][5], g_objHistPop[p][6]);
+    }
     for (int i = 0; i < kWorstDraws; ++i) {
       if (g_worstDraw[i].tick >= 0) {
         // The tag is (guest J3DShape << 32 | instance draw-matrix pointer), so both halves are

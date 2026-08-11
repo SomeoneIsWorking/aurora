@@ -1034,7 +1034,7 @@ bool interpolate_recorded_frame(float alpha) {
       }
       if (interp::patch_draw(d.tag, d.vtxCount, snap.data() + d.uniformRange.offset, dst,
                              d.uniformRange.size, d.mtxPosOffset, d.mtxNrmOffset, alpha,
-                             d.texMtxCamMask, d.pnMtxSlot)) {
+                             d.texMtxCamMask, d.pnMtxSlot, d.pop)) {
         interp::note_disposition(d.pop, interp::Disposition::Paired);
       } else if (d.ortho == 0) {
         // Perspective only. An orthographic draw's matrix is not model x view, so a camera delta
