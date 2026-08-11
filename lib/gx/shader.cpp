@@ -1337,9 +1337,15 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
     } else if (tcg.src == GX_TG_TANGENT) {
       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, nbt_slice_local(NbtSlice::T));
     } else
-      UNLIKELY FATAL("unhandled tcg src {} at tcg[{}] (type={} mtx={} postMtx={})",
+      UNLIKELY FATAL("unhandled tcg src {} at tcg[{}] (type={} mtx={} postMtx={}) — this texgen has "
+                     "received {} XF config write(s) in this run, and numTexGens is {}. src {} is "
+                     "GX_MAX_TEXGENSRC, the never-configured sentinel: with ZERO writes a TEV stage "
+                     "is sampling a texcoord the guest never set up (a real GX state the hardware "
+                     "would read as stale registers, not a decode gap); with a NONZERO count the "
+                     "write arrived and this decode dropped it, which is ours to fix.",
                      underlying(tcg.src), i, underlying(tcg.type),
-                     underlying(tcg.mtx), underlying(tcg.postMtx));
+                     underlying(tcg.mtx), underlying(tcg.postMtx),
+                     g_gxState.tcgWrites[i], g_gxState.numTexGens, underlying(tcg.src));
     if (tcg.type == GX_TG_MTX2x4 || tcg.type == GX_TG_MTX3x4) {
       if (info.indexAttr.test(GX_VA_TEX0MTXIDX + i)) {
         vtxXfrAttrs += fmt::format("\n    var tc{0}_tmp = tc{0} * ubuf.postex_mtx[in_texmtxidx{0} / 3u];", i);

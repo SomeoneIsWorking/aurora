@@ -878,12 +878,34 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
     config.shaderConfig.lineMode = 0;
   }
   config.shaderConfig.tevSwapTable = g_gxState.tevSwapTable;
+  // THE HARDWARE QUIRK FOR A TEXCOORD ABOVE numTexGens: it reads TEXCOORD0.
+  //
+  // A TEV stage may name a texcoord the XF was never told to generate. That is not a state the
+  // hardware rejects — the texgen unit emits numTexGens coordinates and a stage indexing past them
+  // takes coord 0 (Dolphin's PixelShaderGen.cpp says so at its TEV-stage and indirect-stage sites,
+  // citing Luigi's Mansion, whose developers left numtexgens at 1 while a stage referenced coord 1,
+  // bug 11462; console shows occasional glitching, coord 0 is the close-enough behaviour).
+  //
+  // Aurora had no such rule: it copied only numTexGens tcgs into the shader config, shader_info then
+  // set the sampled bit for the out-of-range coord anyway, and generation hit the never-configured
+  // sentinel and called FATAL. SMS reaches it — one material in stage 8 (Pianta Village) samples
+  // TEXCOORD1 with numTexGens == 1 and killed the process before a single frame of that stage
+  // rendered. Remapping HERE, where the stages are copied, keeps the two halves consistent: the
+  // sampled-coord bookkeeping and the coordinate the shader reads are the same index by
+  // construction, rather than agreeing by luck downstream.
+  const auto clampTexCoord = [](GXTexCoordID id, u8 numTexGens) {
+    return (id != GX_TEXCOORD_NULL && static_cast<u32>(id) >= numTexGens) ? GX_TEXCOORD0 : id;
+  };
   for (u8 i = 0; i < g_gxState.numTevStages; ++i) {
     config.shaderConfig.tevStages[i] = g_gxState.tevStages[i];
+    config.shaderConfig.tevStages[i].texCoordId =
+        clampTexCoord(g_gxState.tevStages[i].texCoordId, g_gxState.numTexGens);
   }
   config.shaderConfig.tevStageCount = g_gxState.numTevStages;
   for (u8 i = 0; i < g_gxState.numIndStages; ++i) {
     config.shaderConfig.indStages[i] = g_gxState.indStages[i];
+    config.shaderConfig.indStages[i].texCoordId =
+        clampTexCoord(g_gxState.indStages[i].texCoordId, g_gxState.numTexGens);
   }
   config.shaderConfig.numIndStages = g_gxState.numIndStages;
   for (u8 i = 0; i < MaxColorChannels; ++i) {

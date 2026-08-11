@@ -1802,6 +1802,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           u32 tcIdx = reg - 0x40;
           if (tcIdx < MaxTexCoord) {
             auto& tcg = g_gxState.tcgs[tcIdx];
+            ++g_gxState.tcgWrites[tcIdx];
             bool proj = bp_get(val, 1, 1) != 0;
             u32 form = bp_get(val, 1, 2);
             u32 tgType = bp_get(val, 3, 4);
@@ -1824,6 +1825,16 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
                                                    GX_TG_TEX5, GX_TG_TEX6, GX_TG_TEX7};
             if (srcRow < 13) {
               tcg.src = rowToSrc[srcRow];
+            } else {
+              // SILENTLY SKIPPED INPUT IS A FAILURE, NOT A FILTER. This branch used to do nothing,
+              // which left tcg.src at whatever it was before (GX_MAX_TEXGENSRC on a fresh state) and
+              // moved the failure three subsystems away, to shader generation's "unhandled tcg src
+              // 21" — a message that names neither the register nor the writer. Say it here, where
+              // the offending value is still in hand.
+              Log.error("XF texgen {}: source row {} is out of range (val 0x{:08X}); tcg.src left at "
+                        "{}. This write came from the guest stream, so either the game configured a "
+                        "row this decode does not know or the FIFO parse mis-framed the write.",
+                        tcIdx, srcRow, val, underlying(tcg.src));
             }
             g_gxState.stateDirty = true;
           }
