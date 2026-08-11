@@ -752,6 +752,13 @@ struct VertRec {
 };
 std::unordered_map<uint64_t, VertRec> g_vertPrev;
 long g_vtxPatched = 0, g_vtxUnpaired = 0, g_vtxCountChanged = 0;
+// Count-change alignment: of the draws whose vertex count changed, how many had their shared
+// segment at the FRONT and how many at the BACK, plus the mean per-coordinate distance of the
+// winning and losing alignment. Both sums exist so the win rate can be read against whether the
+// winner is actually close — one of two numbers is always smaller, which makes a bare win rate
+// unfalsifiable.
+long g_vtxAlignPrefix = 0, g_vtxAlignSuffix = 0;
+double g_vtxAlignWinSum = 0.0, g_vtxAlignLoseSum = 0.0;
 
 // The buffer holds raw GC vertex records: big-endian floats, byte-swapped by the shader when it
 // reads them (gx/shader.cpp bswap32). So every read swaps in and every write swaps back out — a
@@ -843,6 +850,42 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
   } else {
     ++g_vtxCountChanged;
     ++g_vtxPopCountChanged[pop];
+    // IS THE SHARED PART A PREFIX OR A SUFFIX? A count change is currently a hard snap, and for a
+    // particle chain that gained a link that is heavier than it needs to be: the links that already
+    // existed still correspond, and only the new one has no partner. But WHICH end grows is a
+    // property of how the chain is built, and guessing it would lerp two unrelated segments
+    // together — worse than snapping.
+    //
+    // So this measures it instead of assuming. Both alignments are scored on the same min(N) shared
+    // vertices, and BOTH means are reported: if the winner's mean is not far below the loser's, the
+    // shared segment is not really shared and neither alignment is usable. A win rate alone would
+    // hide that, because one of two numbers is always smaller.
+    const size_t prevN = rec.pos.size() / 3;
+    const size_t m = prevN < vtxCount ? prevN : vtxCount;
+    if (m > 0) {
+      double pre = 0.0;
+      double suf = 0.0;
+      for (size_t v = 0; v < m; ++v) {
+        for (int c = 0; c < 3; ++c) {
+          const double dp = (double)cur[v * 3 + c] - (double)rec.pos[v * 3 + c];
+          pre += dp < 0 ? -dp : dp;
+          const double ds = (double)cur[(vtxCount - m + v) * 3 + c] -
+                            (double)rec.pos[(prevN - m + v) * 3 + c];
+          suf += ds < 0 ? -ds : ds;
+        }
+      }
+      pre /= (double)(m * 3);
+      suf /= (double)(m * 3);
+      if (pre <= suf) {
+        ++g_vtxAlignPrefix;
+        g_vtxAlignWinSum += pre;
+        g_vtxAlignLoseSum += suf;
+      } else {
+        ++g_vtxAlignSuffix;
+        g_vtxAlignWinSum += suf;
+        g_vtxAlignLoseSum += pre;
+      }
+    }
   }
 
   rec.pos.swap(cur);
@@ -874,6 +917,25 @@ void report_vertex_interp() {
            "collision rather than a spacing problem.",
            g_vtxFirstSight, g_vtxGapHist[0], g_vtxGapHist[1], g_vtxGapHist[2], g_vtxGapHist[3],
            g_vtxGapHist[4], g_vtxGapHist[5], g_vtxGapHist[6], g_vtxGapHist[7], g_vtxGapHist[8]);
+  // WHERE THE SHARED SEGMENT SITS on a count change. This does not change behaviour — a count
+  // change still snaps — it says whether lerping the shared part would be sound, and for which end.
+  if (g_vtxCountChanged > 0) {
+    const long aligned = g_vtxAlignPrefix + g_vtxAlignSuffix;
+    if (aligned == 0) {
+      Log.info("  count-change alignment: {} draw(s) changed vertex count but NONE could be "
+               "scored (no shared vertices at all). Nothing can be said about which end grows.",
+               g_vtxCountChanged);
+    } else {
+      const double win = g_vtxAlignWinSum / (double)aligned;
+      const double lose = g_vtxAlignLoseSum / (double)aligned;
+      Log.info("  count-change alignment: of {} scored draw(s), {} matched better as a PREFIX (the "
+               "shared vertices are at the front, growth at the back) and {} as a SUFFIX. Mean "
+               "per-coordinate distance {:.3f} for the winning alignment against {:.3f} for the "
+               "losing one — a ratio near 1 means NEITHER end really corresponds and lerping the "
+               "shared segment would smear two unrelated shapes, whatever the win rate says.",
+               aligned, g_vtxAlignPrefix, g_vtxAlignSuffix, win, lose);
+    }
+  }
   // BY POPULATION, because the two failure modes mean opposite things and the total cannot separate
   // them. A COUNT CHANGE is a ceiling: a particle chain that gained a link, or a mesh rebuilt at a
   // different resolution, has no vertex correspondence and snapping is the correct answer. A
