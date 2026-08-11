@@ -1026,7 +1026,8 @@ bool interpolate_recorded_frame(float alpha) {
         std::vector<uint8_t> tmp(d.vertRange.size);
         memcpy(tmp.data(), frame.verts.data() + d.vertRange.offset, d.vertRange.size);
         if (interp::patch_vertices(d.tag, d.vtxCount, d.vtxStride, d.posOffset,
-                                   frame.verts.data() + d.vertRange.offset, tmp.data(), alpha)) {
+                                   frame.verts.data() + d.vertRange.offset, tmp.data(), alpha,
+                                   d.pop)) {
           d.vertRange = push_verts(tmp.data(), tmp.size(), 4);
           interp::note_disposition(d.pop, interp::Disposition::Paired);
           continue;

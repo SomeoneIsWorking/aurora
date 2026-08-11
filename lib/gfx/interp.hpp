@@ -124,7 +124,7 @@ void note_disposition(uint8_t pop, Disposition d);
 // between two unrelated shapes is worse than snapping), or when the layout is not the one shape it
 // understands.
 bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t posOffset,
-                    const uint8_t* src, uint8_t* dst, float alpha);
+                    const uint8_t* src, uint8_t* dst, float alpha, uint8_t pop);
 void report_vertex_interp();
 // Population names, registered by the host so the report reads as systems rather than numbers.
 void name_population(uint8_t pop, const char* name);
