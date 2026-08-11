@@ -885,6 +885,26 @@ bool interpolate_recorded_frame(float alpha) {
     // for both purposes — cross-frame for the dash trail, intra-frame for the title's sky composite
     // — so suppressing "the texture TAfterEffect samples" blanked the title background on every
     // interpolated present.
+    // ── WAIT FOR THE WORKER BEFORE TOUCHING RECORDED PASSES ───────────────────────────────────
+    //
+    // The loop below WRITES into frame.renderPasses, and those RenderPass objects were handed to
+    // the render worker as each pass was sealed — long before this runs. Two things were wrong with
+    // that, and only one of them was visible:
+    //
+    //  * the crash. `pass.resolveTarget = {}` nulled a handle while the worker was encoding the
+    //    same pass, and tex_copy_conv::execute faulted dereferencing it. Reading the field twice in
+    //    the caller proved it: 0x12825140 when tested, 0x0 a few instructions later, in the same
+    //    function with no store between. Stage 24 died about one run in two with interpolation on
+    //    and never once with it off, which is exactly the shape of a race this path alone creates.
+    //  * the quiet one. Whether a copy was suppressed at all depended on whether the worker had
+    //    already encoded that pass — so the classifier's decision was applied to some passes and
+    //    silently lost on others, differently every run. A frame that renders correctly by winning
+    //    a race is not a frame that renders correctly.
+    //
+    // Synchronizing costs a pipeline stall once per interpolated tick. That is real and it is
+    // stated rather than hidden; it is also the only ordering under which the mutation means
+    // anything, because the alternative is a decision applied to a random subset of the frame.
+    render_worker::synchronize();
     static long s_suppressed = 0, s_kept = 0, s_ticks = 0;
     long thisTick = 0;
     for (uint32_t i = 0; i < frame.renderPasses.size(); ++i) {
@@ -2229,6 +2249,14 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
   }
 
   if (passInfo.resolveTarget) {
+    // THE SAME FIELD, READ TWICE, MUST GIVE THE SAME ANSWER. A crash in tex_copy_conv::execute
+    // faulting at 0x10 (a null TextureRef + offsetof attachmentTextureView) reached here past the
+    // `if` above, which means the handle was non-null when tested and null by the time the request
+    // was built. Either that is true — and this is a lifetime race on the RenderPass, not a missing
+    // resolve target — or the two loads are of different things and the whole diagnosis is wrong.
+    // Reading it into a local and comparing is what tells those apart; a null-check that merely
+    // skipped the copy would hide which one it is.
+    const TextureRef* const dstAtCheck = passInfo.resolveTarget.get();
     const auto& dstSize = passInfo.resolveTarget->size;
     const bool needsConversion = tex_copy_conv::needs_conversion(passInfo.resolveFormat);
     const bool needsScaling = dstSize.width != static_cast<uint32_t>(passInfo.resolveRect.width) ||
@@ -2244,6 +2272,14 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
         .dst = passInfo.resolveTarget,
         .sampleFilter = needsScaling ? tex_copy_conv::SampleFilter::Linear : tex_copy_conv::SampleFilter::Nearest,
     };
+    if (convReq.dst.get() != dstAtCheck) {
+      Log.fatal("EFB copy target changed underneath this pass: it was {} when tested and {} when "
+                "the request was built, in the SAME function with no intervening store. The "
+                "RenderPass this reads from has been destroyed or reused by another thread while "
+                "the render worker was encoding it. pass fmt {}, frame {}, replay {}",
+                static_cast<const void*>(dstAtCheck), static_cast<const void*>(convReq.dst.get()),
+                static_cast<int>(passInfo.resolveFormat), frame.frameId, frame.replayEmission);
+    }
     if (needsConversion) {
       tex_copy_conv::run(cmd, convReq);
     } else if (needsScaling) {
