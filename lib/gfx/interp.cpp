@@ -63,8 +63,36 @@ struct Entry {
 
 // Two generations. `prev` is what the last tick recorded; `cur` is being filled by this tick and
 // becomes `prev` at end_tick.
-std::unordered_map<uint64_t, std::vector<Entry>> g_prev;
-std::unordered_map<uint64_t, std::vector<Entry>> g_cur;
+// ONE table, not a prev/cur swap. A swap can only ever offer the immediately previous tick, so an
+// object that drew, skipped a tick and drew again had nothing to pair with and snapped — 562 of J3D
+// world geometry's 822 misses on a Delfino run, 90 of 90 for the shadow alpha cubes, 293 of 304 for
+// the screen wipes. Keeping the last sample per (tag, ordinal) with the tick it came from lets those
+// pair against a sample that is genuinely theirs, with `alpha` reweighted for the spacing — the same
+// generalisation the vertex path already makes, and for the same reason: interpolating between the
+// two most recent samples of one object, weighted by how far apart they are, is the correct answer,
+// and the one-tick rule was approximating a spacing that was not there.
+std::unordered_map<uint64_t, std::vector<Entry>> g_ent;
+
+// How stale a sample may be before the older pose stops describing anywhere the object has recently
+// been. Past this a snap is safer than a sweep across whatever happened while nobody was looking.
+// The same bound the vertex path uses, deliberately: two paths disagreeing about how old is too old
+// would show up as one part of an object interpolating while another snapped.
+constexpr long kMaxGapMtx = 4;
+
+// The camera, per tick, for as far back as a pair may reach. The object-motion attribution and the
+// discontinuity gate both divide the camera out of a sample, and the camera that belongs to a sample
+// is the one from ITS tick — using the previous tick's for a three-tick-old sample would charge the
+// object with the camera's motion and refuse it as a teleport. A pair whose camera is not in this
+// ring is refused rather than paired against the wrong one.
+struct InvViewSample {
+  long stamp = -1;
+  float m[12] = {};
+};
+InvViewSample g_invHist[kMaxGapMtx + 2];
+long g_gapPaired = 0, g_gapRefusedNoCamera = 0, g_gapTooStale = 0;
+// How long the gaps actually ARE. Deciding a bound from a count of refusals is guessing; this says
+// whether the misses are near-misses or absences of a wholly different order.
+long g_mtxGapHist[10] = {};
 
 // How far into each tag we are THIS tick. Reset every tick; this is the ordinal that is scoped to a
 // tag rather than global.
@@ -305,7 +333,8 @@ bool affine_inverse(const float* m, float* out) {
 } // namespace
 
 void begin_tick() {
-  g_cur.clear();
+  // The sample table is NOT cleared: it is the per-object history a gapped pair reads from. Only the
+  // per-tick ordinal cursor resets.
   g_cursor.clear();
 }
 
@@ -364,20 +393,32 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     everSeenParts = ordinal + 1;
   }
 
-  auto& curVec = g_cur[tag];
-  if (curVec.size() <= ordinal) {
-    curVec.resize(ordinal + 1);
+  auto& vec = g_ent[tag];
+  if (vec.size() <= ordinal) {
+    vec.resize(ordinal + 1);
   }
-  Entry& mine = curVec[ordinal];
+  // The PREVIOUS sample, taken by value before this tick's overwrites it. One table means `mine` and
+  // `was` are the same slot, so the copy is what keeps them distinct — writing first and reading
+  // after would pair every draw with itself and read as 100% interpolation of nothing.
+  const Entry was = vec[ordinal];
+  Entry& mine = vec[ordinal];
   std::memcpy(mine.pos, src + mtxPosOffset, kMtxBytes);
   std::memcpy(mine.nrm, src + mtxNrmOffset, kMtxBytes);
   mine.vtxCount = vtxCount;
   mine.stamp = g_tickIndex;
+  mine.texValid = false;
+  mine.texIdx = 0;
+  mine.objDelta = was.objDelta;
 
-  const auto it = g_prev.find(tag);
-  if (it == g_prev.end() || it->second.size() <= ordinal) {
-    ++g_unpaired;   // new object this tick, or it drew fewer parts last tick.
+  const long gap = (was.stamp >= 0) ? (g_tickIndex - was.stamp) : -1;
+  // BUCKET EVERY GAP, not only the refused ones. The first version incremented this inside the
+  // refusal branch, so buckets 1-4 — exactly the recoverable range the histogram exists to size —
+  // could never be reached, and the output read "no near-misses" when it meant "not counted".
+  if (gap >= 1) ++g_mtxGapHist[gap < 9 ? (size_t)gap : 9];
+  if (gap < 1 || gap > kMaxGapMtx) {
+    ++g_unpaired;   // never drawn before, or its last sample is too old to describe it.
     if (!firstEverSighting) ++g_popGap[pop];
+    if (gap > kMaxGapMtx) ++g_gapTooStale;
     // A BIRTH IS NOT A DEFECT, and it is the only kind of miss that can never be fixed by better
     // pairing: there is no previous pose to interpolate from. Reported separately so a population
     // that behaves perfectly does not sit at "99.7% PARTIAL" for the run's whole length because of
@@ -388,7 +429,20 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     }
     return false;
   }
-  const Entry& was = it->second[ordinal];
+
+  // The camera that belongs to `was`. Refuse rather than substitute: pairing a three-tick-old pose
+  // against this tick's camera would attribute the camera's whole motion to the object.
+  const float* invViewWas = nullptr;
+  for (const InvViewSample& v : g_invHist) {
+    if (v.stamp == was.stamp) { invViewWas = v.m; break; }
+  }
+  if (gap > 1 && invViewWas == nullptr) {
+    ++g_unpaired;
+    ++g_popGap[pop];
+    ++g_gapRefusedNoCamera;
+    return false;
+  }
+  if (gap > 1) ++g_gapPaired;
 
   // THE CHECK THAT KEEPS THE ORDINAL HONEST. Pairing within a tag assumes the object replays the
   // same display list each tick. If it did not, the vertex counts differ, and interpolating between
@@ -425,11 +479,11 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
   // the translation of M is the object's own world position. Comparing THOSE across the two ticks
   // separates "this object moved" from "the whole world moved because the camera did", which the
   // delta above cannot do. Slot 0 on both sides, matching the delta above.
-  if (g_haveInvCur && g_haveInvPrev) {
+  if (g_haveInvCur && (invViewWas != nullptr || g_haveInvPrev)) {
     float objCur[12];
     float objPrev[12];
     compose(g_invViewCur, mine.pos, objCur);
-    compose(g_invViewPrev, was.pos, objPrev);
+    compose(invViewWas != nullptr ? invViewWas : g_invViewPrev, was.pos, objPrev);
     const double ox = objCur[3] - objPrev[3];
     const double oy = objCur[7] - objPrev[7];
     const double oz = objCur[11] - objPrev[11];
@@ -479,10 +533,13 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     // itself after one tick. The magnitude rule did not catch that either (it accepted anything
     // under 100 forever); what bounds it is the tag's own quality, measured separately, and within
     // a tick tags were found not to collide at all (frame_interp/shape_identity.cpp).
+    // SCALED BY THE SPACING. `od` is the distance over `gap` ticks, so comparing it against a
+    // per-tick allowance would refuse every gapped pair as a teleport purely for having waited.
     constexpr double kContinuityRatio = 4.0;
-    const double allowed = (was.objDelta > 0.0)
-                               ? std::max(kDiscontinuity, kContinuityRatio * was.objDelta)
-                               : kDiscontinuity;
+    const double allowed = ((was.objDelta > 0.0)
+                                ? std::max(kDiscontinuity, kContinuityRatio * was.objDelta)
+                                : kDiscontinuity) *
+                           (double)gap;
     mine.objDelta = od;
     if (od >= allowed) {
       // The first few refusals, with both world positions. A count and a magnitude cannot tell a
@@ -536,8 +593,12 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
   } else {
     ++g_objDeltaUnavailable;
   }
-  const float a = alpha;
-  const float b = 1.0f - alpha;
+  // ALPHA, REWEIGHTED FOR THE SPACING. `alpha` says where the presentation frame sits between the
+  // PREVIOUS TICK and this one. When the paired sample is `gap` ticks old the same moment sits at
+  // 1 - (1 - alpha)/gap of the way from it to here — for gap 1 this is alpha unchanged, so every
+  // consecutive pair behaves exactly as before. Identical to the vertex path's rule, on purpose.
+  const float a = 1.0f - (1.0f - alpha) / (float)gap;
+  const float b = 1.0f - a;
   auto* outPos = reinterpret_cast<float*>(dst + mtxPosOffset);
   auto* outNrm = reinterpret_cast<float*>(dst + mtxNrmOffset);
   for (uint32_t i = 0; i < kMtxFloats; ++i) {
@@ -1047,6 +1108,23 @@ void report_vertex_interp() {
                    : "  A NONZERO count means the swap is handing back samples it should not.");
     }
   }
+  // WHAT THE GAP TOLERANCE ACTUALLY DID. Three numbers, because "0 recovered" has three different
+  // causes and the fix for each is different: the gaps are longer than the bound, the camera for the
+  // older sample was not retained, or there were no gaps to recover in the first place.
+  Log.info("  gap tolerance (bound {} tick(s)): {} pairing(s) made across a skipped tick, {} "
+           "refused for a sample older than the bound, {} refused because the camera from that "
+           "sample's tick was no longer retained.{}",
+           kMaxGapMtx, g_gapPaired, g_gapTooStale, g_gapRefusedNoCamera,
+           (g_gapPaired == 0 && g_gapTooStale == 0 && g_gapRefusedNoCamera == 0)
+               ? "  All three zero means no draw ever skipped a tick and came back — the tolerance "
+                 "was never exercised, so this run says nothing about whether it works."
+               : "");
+  Log.info("  gap LENGTHS, in ticks: 1 {} | 2 {} | 3 {} | 4 {} | 5 {} | 6 {} | 7 {} | 8 {} | 9+ {}. "
+           "This is what decides whether raising the bound would help: near-misses clustered at 2-4 "
+           "are recoverable, a tail at 9+ is an object that was CULLED and came back, and sweeping "
+           "that one across wherever it went while off-screen is exactly what snapping prevents.",
+           g_mtxGapHist[1], g_mtxGapHist[2], g_mtxGapHist[3], g_mtxGapHist[4], g_mtxGapHist[5],
+           g_mtxGapHist[6], g_mtxGapHist[7], g_mtxGapHist[8], g_mtxGapHist[9]);
   // WHY EACH POPULATION'S MATRIX RESIDUAL EXISTS. Printed only for populations that HAVE one, and
   // with all three causes even when two are zero: "12 gaps" alone leaves the reader to assume the
   // other two were zero rather than unmeasured.
@@ -1211,6 +1289,13 @@ bool begin_camera_delta(float alpha) {
   // wants them independently of patching: a tick that cannot be interpolated is exactly the kind of
   // tick worth measuring.
   g_haveInvCur = g_haveViewCur && affine_inverse(g_viewCur, g_invViewCur);
+  // Keep this tick's inverse view for as long as a gapped pair may reach back for it. Written here,
+  // where it is computed, so the ring cannot hold a matrix that was never valid.
+  if (g_haveInvCur) {
+    InvViewSample& slot = g_invHist[(size_t)(g_tickIndex % (long)(sizeof(g_invHist) / sizeof(g_invHist[0])))];
+    slot.stamp = g_tickIndex;
+    std::memcpy(slot.m, g_invViewCur, sizeof(slot.m));
+  }
   g_haveInvPrev = g_haveViewPrev && affine_inverse(g_viewPrev, g_invViewPrev);
   if (g_haveInvCur && g_haveInvPrev) {
     // The camera's own step: eye position (the INVERSE view's translation — the view's own
@@ -1440,8 +1525,7 @@ namespace {
 // Zero every accumulator. Used by the self-test so it cannot leave its synthetic samples in the
 // numbers a real run reports.
 void reset_stats() {
-  g_prev.clear();
-  g_cur.clear();
+  g_ent.clear();
   g_cursor.clear();
   g_paired = g_unpaired = g_mismatched = 0;
   g_transDeltaSum = g_transDeltaMax = 0.0;
@@ -1615,7 +1699,10 @@ bool selftest() {
                    &birthSecond);
     end_tick();
 
-    // kGapTag returns. It cannot pair (nothing last tick) but it is NOT a birth.
+    // kGapTag returns after ONE skipped tick. It must now PAIR — that is the gap tolerance — and it
+    // must not be a birth. Before the tolerance landed this case asserted the opposite, and the
+    // self-test failing when the behaviour changed is the control doing its job rather than a
+    // regression.
     bool birthReturn = true;
     begin_tick();
     set_view_matrix(v);
@@ -1640,12 +1727,46 @@ bool selftest() {
                 "the audit denominator.",
                 pairedSecond, birthSecond);
     }
-    if (pairedReturn || birthReturn) {
+    if (!pairedReturn || birthReturn) {
       ok = false;
-      Log.error("SELFTEST FAILED [birth flag]: a tag that drew, skipped a tick, and came back "
-                "reported paired={} birth={} (want false/false). It reads every unpaired draw as a "
-                "birth, so the audit's 100% rows would be a tautology.",
+      Log.error("SELFTEST FAILED [gap tolerance]: a tag that drew, skipped ONE tick and came back "
+                "reported paired={} birth={} (want true/false). Either the gap tolerance is not "
+                "reaching a two-tick-old sample, or an unpaired draw is being called a birth — the "
+                "second would make the audit's 100% rows a tautology.",
                 pairedReturn, birthReturn);
+    }
+
+    // AND THE OTHER SIDE OF THE BOUND. A tolerance with no upper limit is not a tolerance, and a
+    // limit nobody has seen refuse anything is indistinguishable from an infinite one. This tag
+    // waits kMaxGapMtx + 1 ticks, which MUST be refused.
+    constexpr uint64_t kStaleTag = 0xB300u;
+    bool birthStale = true;
+    begin_tick();
+    set_view_matrix(v);
+    begin_camera_delta(0.5f);
+    write_draw_block(src.data(), kPos, kNrm, v, 0, 0, 0);
+    patch_draw(kStaleTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0);
+    end_tick();
+    for (long i = 0; i < kMaxGapMtx + 1; ++i) {
+      begin_tick();
+      set_view_matrix(v);
+      begin_camera_delta(0.5f);
+      end_tick();
+    }
+    begin_tick();
+    set_view_matrix(v);
+    begin_camera_delta(0.5f);
+    write_draw_block(src.data(), kPos, kNrm, v, 0, 0, 0);
+    const bool pairedStale =
+        patch_draw(kStaleTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0,
+                   &birthStale);
+    end_tick();
+    if (pairedStale || birthStale) {
+      ok = false;
+      Log.error("SELFTEST FAILED [gap bound]: a sample {} tick(s) old reported paired={} birth={} "
+                "(want false/false). A tolerance with no upper bound sweeps an object across "
+                "wherever it went while nobody was looking.",
+                kMaxGapMtx + 2, pairedStale, birthStale);
     }
   }
 
@@ -1658,7 +1779,8 @@ bool selftest() {
              "measurement rather than a switch nobody has seen move. The birth flag was run "
              "against both classes too: a never-seen tag reads birth, and a tag that drew, skipped "
              "a tick and returned reads NOT a birth — so the audit's birth column cannot be "
-             "swallowing real gaps.");
+             "swallowing real gaps. The gap tolerance is bounded at both ends: a one-tick gap "
+             "PAIRS and a gap past the limit is REFUSED, both demonstrated rather than assumed.");
   }
   return ok;
 }
@@ -1666,7 +1788,6 @@ bool selftest() {
 long tick_index() { return g_tickIndex; }
 
 void end_tick() {
-  g_prev.swap(g_cur);
   if (g_haveViewCur) {
     std::memcpy(g_viewPrev, g_viewCur, sizeof(g_viewPrev));
     g_haveViewPrev = true;
