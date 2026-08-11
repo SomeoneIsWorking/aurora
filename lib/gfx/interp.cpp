@@ -172,6 +172,7 @@ long g_cameraPatched = 0;
 // its offset diagnostic is never reached for exactly the draws that rely on this path — the skip
 // below was therefore completely silent, and a silently-skipped draw renders from the CURRENT
 // viewpoint while the rest of the frame is at the in-between one.
+long g_billboardBirth = 0, g_billboardGap = 0;
 long g_billboardPatched = 0;
 long g_billboardUnpaired = 0;
 long g_camRefusedNoDelta = 0;
@@ -888,6 +889,17 @@ bool patch_billboard(uint64_t tag, const uint8_t* src, uint8_t* dst, uint32_t un
   // stampCur == g_tickIndex, which is never true; it reported 0 patched and 375,451 "unpaired",
   // which the report's own denominator caught in one run.
   if (b.stampCur + 1 != g_tickIndex || b.stampPrev + 1 != b.stampCur) {
+    // WHICH KIND OF MISS, because "new particle, or one that skipped a tick" is two facts and only
+    // one of them is a ceiling. A particle that has never had a previous position is a BIRTH and no
+    // pairing can exist for it — in a system that spawns and kills continuously that is simply the
+    // rate. A particle whose samples exist but are not adjacent has drawn, stopped and drawn again,
+    // and that is a question about the seam or about tag reuse. Counting them together makes a
+    // birth rate and a defect indistinguishable.
+    if (b.stampPrev == 0) {
+      ++g_billboardBirth;
+    } else {
+      ++g_billboardGap;
+    }
     ++g_billboardUnpaired;
     return false;
   }
@@ -1349,6 +1361,13 @@ void report() {
                  "the tags never reached the draw. A particle-heavy scene reporting 0 here means the "
                  "seam is not connected, NOT that particles do not move."
                : "");
+  if (g_billboardUnpaired != 0) {
+    Log.info("  of those unpaired: {} were a particle's FIRST sighting (a birth — no pair can exist, "
+             "and in a system that spawns continuously this is the spawn rate, not a defect) and {} "
+             "had samples that were not adjacent (drew, stopped, drew again — that one is a question "
+             "about the seam or about tag reuse).",
+             g_billboardBirth, g_billboardGap);
+  }
   Log.info("paired-draw translation delta between ticks: mean {:.3f} max {:.3f} world units over {} "
            "samples. A real object moves a fraction of a unit per 1/30 s — a mean in the hundreds "
            "means pairing is returning some OTHER transform, which the smoothness metric cannot "
