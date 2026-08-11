@@ -472,6 +472,8 @@ void name_population(uint8_t pop, const char* name) {
 
 int max_populations() { return kMaxPop; }
 
+int audit_disposition_count() { return (int)Disposition::Count; }
+
 void audit_row(uint8_t pop, long* out, int outLen) {
   if (out == nullptr) {
     return;
@@ -496,7 +498,7 @@ void note_disposition(uint8_t pop, Disposition d) {
 
 void report_audit() {
   static const char* kName[(int)Disposition::Count] = {
-      "unclaimed", "PAIRED", "billboard", "camera-only", "snap:2D", "snap:NO-ID"};
+      "unclaimed", "PAIRED", "billboard", "camera-only", "snap:2D", "snap:EXACT", "snap:NO-ID"};
   long total = 0;
   for (int p = 0; p < kMaxPop; ++p) {
     for (int d = 0; d < (int)Disposition::Count; ++d) {
@@ -512,8 +514,8 @@ void report_audit() {
            "PAIRED and billboard interpolate; snap:2D is CORRECT (a screen-space element has no "
            "in-between); camera-only and snap:NO-ID are the defects — geometry that follows the "
            "camera but not its own motion, or nothing at all.");
-  Log.info("  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11}  {}", "population", "PAIRED", "billboard",
-           "camera-only", "snap:2D", "snap:NO-ID", "verdict");
+  Log.info("  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11} {:>11}  {}", "population", "PAIRED",
+           "billboard", "camera-only", "snap:2D", "snap:EXACT", "snap:NO-ID", "verdict");
   // Ordered by size, and CAPPED — the population space is now the whole u8 range because the host
   // allocates ids to emitter sites it discovers at runtime, so a run can legitimately fill dozens of
   // rows. The cap is on the SMALL rows, never the large ones, and what it drops is stated with its
@@ -549,17 +551,20 @@ void report_audit() {
     // A 2D population with no interpolated draws is CORRECT, not a failure — a screen-space
     // element has no meaningful in-between. Saying "interpolates (0.0% move)" of it, as the first
     // version did, is the report contradicting itself in one line.
-    const char* verdict = (bad == 0 && good == 0) ? "CORRECT (2D: no in-between exists)"
+    const char* verdict = (bad == 0 && good == 0 && g_audit[p][(int)Disposition::SnappedExact] > 0 &&
+                           g_audit[p][(int)Disposition::SnappedOrtho] == 0)
+                              ? "CORRECT (screen-space: must NOT move)"
+                          : (bad == 0 && good == 0) ? "CORRECT (2D: no in-between exists)"
                           : bad == 0              ? "interpolates"
                           : good == 0             ? "SNAPS ENTIRELY"
                                                   : "PARTIAL";
-    Log.info("  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11}  {} ({:.1f}% interpolate; camera-only is "
-             "an UPPER BOUND on the defect, not a measurement — see the note in interp.cpp)",
+    Log.info("  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11} {:>11}  {} ({:.1f}% interpolate; "
+             "camera-only is an UPPER BOUND on the defect, not a measurement — see interp.cpp)",
              g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p))
                                   : g_popName[p],
              g_audit[p][(int)Disposition::Paired], g_audit[p][(int)Disposition::Billboard],
              g_audit[p][(int)Disposition::CameraOnly], g_audit[p][(int)Disposition::SnappedOrtho],
-             noId, verdict,
+             g_audit[p][(int)Disposition::SnappedExact], noId, verdict,
              // Denominator is what OUGHT to move: 2D and provably-static draws are excluded,
              // because a percentage that counts them as failures cannot reach 100 even when the
              // path is perfect.

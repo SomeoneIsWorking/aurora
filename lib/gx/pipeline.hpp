@@ -22,6 +22,10 @@ struct DrawData {
   // label, so the interpolation report can say WHICH populations interpolate rather than quoting
   // one global percentage that cannot separate a correctly-snapping HUD from stuttering geometry.
   uint8_t pop;
+  // Present this draw EXACTLY on an interpolated frame (GX_AURORA_DRAW_EXACT): screen-space
+  // geometry under a perspective projection, which the ortho test cannot see and the camera delta
+  // must not touch.
+  uint8_t exact;
   // Byte offset of pnMtx[0].pos within this draw's uniform block, and of pnMtx[0].nrm. Recorded at
   // build time because the layout is not fixed — an optional lineMode block shifts everything after
   // it by 16 bytes, and lineMode is not otherwise recoverable from a DrawData. Interpolation writes

@@ -114,6 +114,23 @@ extern "C" {
 #define GX_AURORA_DRAW_POP 0x003D
 
 /**
+ * Mark the draws that follow as EXACT: they must be presented unchanged on an interpolated frame.
+ * u8 payload, 0 or 1, latched like the tag.
+ *
+ * This is for geometry that is in SCREEN SPACE BY CONSTRUCTION under a perspective projection —
+ * the game loads an IDENTITY position matrix and emits vertices that are already in eye space, so
+ * they are not a model at a place in the world, they are a shape at a place on the display.
+ * SMS_FillScreenAlpha is the case this exists for: a screen-covering quad that writes only
+ * destination alpha, gating what later passes may draw.
+ *
+ * Such a draw is NOT orthographic, so the ortho path does not cover it, and it must NOT receive the
+ * camera delta: the delta would slide a mask that is supposed to be nailed to the display. "Snaps"
+ * and "must not move" are the same picture on a still frame and different pictures the moment the
+ * camera turns.
+ */
+#define GX_AURORA_DRAW_EXACT 0x003E
+
+/**
  * Draw primitives with the vertex count derived from a byte length, as written by
  * GXBegin(prim, fmt, GX_AUTO). Must be followed by a u8 draw opcode (vtxfmt|prim),
  * a u32 vertex data byte length, then that many bytes of vertex data. The byte length
