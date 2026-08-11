@@ -1093,11 +1093,26 @@ bool selftest() {
     const char* name;
     float eye0[3], eye1[3];   // camera world position, tick 0 -> tick 1
     float obj0[3], obj1[3];   // object world position, tick 0 -> tick 1
+    bool wantPaired;          // false = the discontinuity gate is expected to REFUSE this one
     double wantTotal, wantObj;
   };
+  // THE OBJECT CASE MOVES 50 UNITS, NOT 1000, AND THAT IS THE POINT OF THE THIRD CASE.
+  //
+  // It used to move 1000, and when the discontinuity gate landed (>= 100 units/tick refuses to pair)
+  // this self-test started failing on every run — correctly, because a 1000-unit step is exactly
+  // what the gate exists to refuse. The attribution being tested here is a separate question from
+  // the gate, so the attribution cases now sit INSIDE the accepted range (50 units/tick is ordinary
+  // motion: gpMario peaks at 58.5, claim C034), and the gate gets a case of its own that must be
+  // REFUSED. Two mechanisms, two controls — collapsing them is how the failure went unnoticed for a
+  // whole session of runs that each printed the error.
   const Case cases[] = {
-      {"camera moves 1000, object static", {0, 0, 0}, {1000, 0, 0}, {0, 0, 0}, {0, 0, 0}, 1000.0, 0.0},
-      {"camera static, object moves 1000", {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {1000, 0, 0}, 1000.0, 1000.0},
+      {"camera moves 1000, object static", {0, 0, 0}, {1000, 0, 0}, {0, 0, 0}, {0, 0, 0}, true, 1000.0, 0.0},
+      {"camera static, object moves 50", {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {50, 0, 0}, true, 50.0, 50.0},
+      // The gate's own control: it must FIRE on a step three decades past the bound. Without this,
+      // a gate that never fired (kDiscontinuity set to infinity, the comparison inverted) would pass
+      // every other check in this file, and its report line would read "0 refused" — which is
+      // indistinguishable from a scene that simply contains no discontinuity.
+      {"object teleports 1000 -- must be REFUSED", {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {1000, 0, 0}, false, 0.0, 0.0},
   };
 
   bool ok = true;
@@ -1126,21 +1141,38 @@ bool selftest() {
 
     const double gotTotal = g_transDeltaN ? g_transDeltaSum / (double)g_transDeltaN : -1.0;
     const double gotObj = g_objDeltaN ? g_objDeltaSum / (double)g_objDeltaN : -1.0;
-    const bool pass = paired && std::fabs(gotTotal - c.wantTotal) < 0.01 &&
-                      std::fabs(gotObj - c.wantObj) < 0.01;
+    bool pass;
+    if (c.wantPaired) {
+      pass = paired && std::fabs(gotTotal - c.wantTotal) < 0.01 &&
+             std::fabs(gotObj - c.wantObj) < 0.01;
+    } else {
+      // Refused for the RIGHT REASON: not paired, and the discontinuity counter is the thing that
+      // moved. A draw refused by the vertex-count gate or by a missing previous tick would also
+      // report paired=false, and that would not be this gate working.
+      pass = !paired && g_snappedDiscontinuity == 1;
+    }
     if (!pass) {
       ok = false;
-      Log.error("SELFTEST FAILED [{}]: paired={} total delta {:.3f} (want {:.3f}) object delta "
-                "{:.3f} (want {:.3f}). The camera/object attribution does not discriminate, so any "
-                "conclusion drawn from those two numbers is unfounded.",
-                c.name, paired, gotTotal, c.wantTotal, gotObj, c.wantObj);
+      if (c.wantPaired) {
+        Log.error("SELFTEST FAILED [{}]: paired={} total delta {:.3f} (want {:.3f}) object delta "
+                  "{:.3f} (want {:.3f}). The camera/object attribution does not discriminate, so any "
+                  "conclusion drawn from those two numbers is unfounded.",
+                  c.name, paired, gotTotal, c.wantTotal, gotObj, c.wantObj);
+      } else {
+        Log.error("SELFTEST FAILED [{}]: paired={} (want false), discontinuity refusals {} (want 1). "
+                  "The gate that is supposed to refuse a teleport did not fire on one, so its "
+                  "\"0 refused\" in the audit means nothing.",
+                  c.name, paired, g_snappedDiscontinuity);
+      }
     }
   }
   reset_stats();
   if (ok) {
     Log.info("interp selftest PASSED: camera/object attribution separates a 1000-unit camera move "
-             "(object delta 0) from a 1000-unit object move (object delta 1000) — it has been run "
-             "against both classes, not just the one it is expected to find.");
+             "(object delta 0) from a 50-unit object move (object delta 50) — it has been run "
+             "against both classes, not just the one it is expected to find — and the discontinuity "
+             "gate demonstrably FIRES on a 1000-unit teleport, so its refusal count is a real "
+             "measurement rather than a switch nobody has seen move.");
   }
   return ok;
 }

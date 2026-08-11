@@ -358,6 +358,10 @@ struct GXState {
   std::array<Mat3x4<float>, MaxTexMtx> texMtxs;
   std::array<Mat3x4<float>, MaxPTTexMtx> ptTexMtxs;
   std::array<TcgConfig, MaxTexCoord> tcgs;
+  // DIAGNOSTIC, not state: how many XF texgen-config writes each unit has ever received. A tcg
+  // sitting at its defaults has two very different causes — the guest never configured it, or the
+  // write reached the FIFO and this decode lost it — and the config alone cannot tell them apart.
+  std::array<u32, MaxTexCoord> tcgWrites{};
   std::array<TexCoordScale, MaxTexCoord> texCoordScales;
   u16 lastVtxSize = 0;
   GXVtxFmt lastVtxFmt = GX_MAX_VTXFMT;
