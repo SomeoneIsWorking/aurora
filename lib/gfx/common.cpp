@@ -1033,16 +1033,21 @@ bool interpolate_recorded_frame(float alpha) {
           continue;
         }
       }
+      bool firstEverSighting = false;
       if (interp::patch_draw(d.tag, d.vtxCount, snap.data() + d.uniformRange.offset, dst,
                              d.uniformRange.size, d.mtxPosOffset, d.mtxNrmOffset, alpha,
-                             d.texMtxCamMask, d.pnMtxSlot, d.pop)) {
+                             d.texMtxCamMask, d.pnMtxSlot, d.pop, &firstEverSighting)) {
         interp::note_disposition(d.pop, interp::Disposition::Paired);
       } else if (d.ortho == 0) {
         // Perspective only. An orthographic draw's matrix is not model x view, so a camera delta
         // does not belong in it — it would slide the HUD bodily every other frame.
         interp::patch_camera_only(snap.data() + d.uniformRange.offset, dst, d.uniformRange.size,
                                   d.mtxPosOffset, d.mtxNrmOffset, d.texMtxCamMask);
-        interp::note_disposition(d.pop, interp::Disposition::CameraOnly);
+        // The treatment is the same either way — the camera delta is what an unpaired draw needs.
+        // The AUDIT distinguishes them, because a birth is unpairable by construction and a miss on
+        // an object that drew before is a defect, and one number cannot say which happened.
+        interp::note_disposition(d.pop, firstEverSighting ? interp::Disposition::CameraOnlyBirth
+                                                          : interp::Disposition::CameraOnly);
       }
     }
   }

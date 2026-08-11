@@ -58,7 +58,8 @@ void begin_tick();
 // does not, which is the same tearing failure as an untagged draw.
 bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* dst,
                 uint32_t uniformSize, uint32_t mtxPosOffset, uint32_t mtxNrmOffset, float alpha,
-                uint32_t texMtxCamMask, uint32_t pnMtxSlot, uint8_t pop);
+                uint32_t texMtxCamMask, uint32_t pnMtxSlot, uint8_t pop,
+                bool* outFirstEverSighting = nullptr);
 
 // The view matrix in force for this tick, as the game built it (GC Mtx: 3 rows of 4 floats,
 // p' = M*p). Supplied by the emitter through GX_AURORA_VIEW_MTX, because aurora cannot recover it:
@@ -104,6 +105,13 @@ enum class Disposition : uint8_t {
   SnappedExact,     // declared screen-space-under-perspective by the emitter (GX_AURORA_DRAW_EXACT):
                     // correct, and correct for a reason the ortho test cannot see
   SnappedNoIdentity,// perspective with nothing to pair on — the honest remaining gap
+  CameraOnlyBirth,  // camera-only because this draw had NO PREVIOUS TICK TO PAIR WITH — the object,
+                    // or this part of it, is being seen for the first time in the run. Correct by
+                    // construction: an in-between frame between "did not exist" and "exists" has no
+                    // meaning. Kept apart from CameraOnly because every once-per-tick population
+                    // spends its first tick here, which pinned dozens of otherwise perfect rows at
+                    // "99.7% PARTIAL" forever — a verdict that can never read clean is not a
+                    // measurement.
   Count
 };
 void note_disposition(uint8_t pop, Disposition d);
