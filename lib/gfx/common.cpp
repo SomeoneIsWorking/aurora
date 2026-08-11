@@ -1008,8 +1008,16 @@ bool interpolate_recorded_frame(float alpha) {
         // Measure whether this screen-space draw is actually STILL. See interp.hpp — `snap:2D` is
         // reported as correct on the assumption that a 2D element has no in-between, and that
         // assumption had never been checked against an animating one.
+        // Prefer the draw's OWN vertex data. A 2D element's geometry is in its vertices; the
+        // orthographic position matrix may be one matrix shared by every 2D draw in the frame, and
+        // hashing that attributes one global change to every population separately — which is what
+        // six unrelated sites all reading "387 of 388" turned out to be.
+        const bool haveVerts = d.posF32XYZ != 0 && d.vtxCount > 0 && d.vertRange.size > 0 &&
+                               d.vertRange.offset + d.vertRange.size <= frame.verts.size();
         interp::note_ortho_geometry(d.pop, snap.data() + d.uniformRange.offset,
-                                    d.uniformRange.size, d.mtxPosOffset);
+                                    d.uniformRange.size, d.mtxPosOffset,
+                                    haveVerts ? frame.verts.data() + d.vertRange.offset : nullptr,
+                                    haveVerts ? d.vertRange.size : 0);
       }
       interp::note_disposition(d.pop,
                                d.ortho != 0   ? interp::Disposition::SnappedOrtho

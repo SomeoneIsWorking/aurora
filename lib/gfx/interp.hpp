@@ -131,8 +131,21 @@ void note_disposition(uint8_t pop, Disposition d);
 // been shown to judder — the difference may be smooth motion (an in-between exists) or a discrete
 // content change such as a different glyph or a changed element count (none exists). Telling those
 // apart needs a per-element identity that 2D draws do not carry.
+//
+// `verts` is the draw's own position data when it has any (immediate-mode 2D writes float positions
+// straight into the stream) and null otherwise, in which case the position MATRIX is hashed instead.
+// The two are not the same claim and the report says which was used. Hashing the matrix tells you
+// the element's PLACEMENT changed; its shape may live in vertices this path never saw, so a
+// matrix-hashed row reading 0% means "the placement did not move", not "nothing changed".
+//
+// It is a weaker claim, NOT a broken one, and that had to be measured rather than assumed: six
+// unrelated 2D sites all reading exactly "387 of 388" looked like one shared matrix being reported
+// once per population. Counting the distinct matrices per tick refuted it — 12.48 on average, 31 at
+// most, so the matrices are per-element and the identical counts are simple saturation (each
+// differs on every tick but one). The distinct-matrix line stays in the report because that
+// reasoning has to be re-checkable in any scene, not just the one it was run in.
 void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
-                         uint32_t mtxPosOffset);
+                         uint32_t mtxPosOffset, const uint8_t* verts, uint32_t vertBytes);
 
 // ── VERTEX INTERPOLATION, for geometry that DEFORMS ─────────────────────────────────────────────
 //

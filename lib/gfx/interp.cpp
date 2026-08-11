@@ -746,12 +746,23 @@ struct OrthoTick {
 OrthoTick g_orthoCur[kMaxPop], g_orthoPrev[kMaxPop];
 long g_orthoTicks[kMaxPop] = {};      // ticks with a previous tick to compare against
 long g_orthoChanged[kMaxPop] = {};    // of those, how many differed
+long g_orthoFromVerts[kMaxPop] = {};  // draws hashed from their own vertices
+long g_orthoFromMtx[kMaxPop] = {};    // draws hashed from the position matrix (a weaker claim)
+// IS THE ORTHO POSITION MATRIX SHARED? If every 2D draw in a tick carries the same one, then hashing
+// it measures a single global value and reports it once per population — which is what six unrelated
+// sites all reading "387 of 388" looked like. Inferring that from identical counts is a hypothesis;
+// counting the distinct hashes within a tick is the measurement.
+std::unordered_map<uint64_t, char> g_orthoMtxSeenThisTick;
+long g_orthoMtxTickStamp = -1;
+long g_orthoMtxDistinctSum = 0, g_orthoMtxDistinctTicks = 0, g_orthoMtxDistinctMax = 0;
 } // namespace
 
 void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
-                         uint32_t mtxPosOffset) {
-  if (pop >= kMaxPop || src == nullptr || mtxPosOffset == 0 ||
-      mtxPosOffset + kMtxBytes > uniformSize) {
+                         uint32_t mtxPosOffset, const uint8_t* verts, uint32_t vertBytes) {
+  const bool haveVerts = verts != nullptr && vertBytes > 0;
+  if (pop >= kMaxPop) return;
+  if (!haveVerts &&
+      (src == nullptr || mtxPosOffset == 0 || mtxPosOffset + kMtxBytes > uniformSize)) {
     return;
   }
   OrthoTick& cur = g_orthoCur[pop];
@@ -771,8 +782,23 @@ void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
     cur.stamp = g_tickIndex;
   }
   uint64_t h = 1469598103934665603ull;
-  for (uint32_t i = 0; i < kMtxBytes; ++i) {
-    h = (h ^ src[mtxPosOffset + i]) * 1099511628211ull;
+  if (haveVerts) {
+    ++g_orthoFromVerts[pop];
+    for (uint32_t i = 0; i < vertBytes; ++i) h = (h ^ verts[i]) * 1099511628211ull;
+  } else {
+    ++g_orthoFromMtx[pop];
+    for (uint32_t i = 0; i < kMtxBytes; ++i) h = (h ^ src[mtxPosOffset + i]) * 1099511628211ull;
+    if (g_orthoMtxTickStamp != g_tickIndex) {
+      if (g_orthoMtxTickStamp >= 0) {
+        const long n = (long)g_orthoMtxSeenThisTick.size();
+        g_orthoMtxDistinctSum += n;
+        ++g_orthoMtxDistinctTicks;
+        if (n > g_orthoMtxDistinctMax) g_orthoMtxDistinctMax = n;
+      }
+      g_orthoMtxSeenThisTick.clear();
+      g_orthoMtxTickStamp = g_tickIndex;
+    }
+    g_orthoMtxSeenThisTick[h] = 1;
   }
   h ^= h >> 29;
   h *= 0xbf58476d1ce4e5b9ull;
@@ -789,6 +815,20 @@ void report_ortho_motion() {
              "ticks this run. This says nothing about whether 2D snapping is correct.");
     return;
   }
+  if (g_orthoMtxDistinctTicks > 0) {
+    Log.info("screen-space motion, FIRST the instrument's own limit: across {} tick(s) the "
+             "matrix-hashed 2D draws carried {:.2f} DISTINCT position matrices per tick on average "
+             "(most in any tick: {}). {}",
+             g_orthoMtxDistinctTicks,
+             (double)g_orthoMtxDistinctSum / (double)g_orthoMtxDistinctTicks, g_orthoMtxDistinctMax,
+             (double)g_orthoMtxDistinctSum / (double)g_orthoMtxDistinctTicks < 2.0
+                 ? "That is ONE SHARED MATRIX, so every row below hashed from the matrix is "
+                   "reporting the same global value under a different name — those rows say "
+                   "nothing about their own population's geometry. Only rows hashed from their own "
+                   "vertices are per-population measurements."
+                 : "Enough distinct matrices that the per-population rows below are measuring "
+                   "different things, which is what makes them comparable at all.");
+  }
   Log.info("screen-space motion — whether `snap:2D` is PROVABLY correct or merely unexamined. A "
            "static element has no in-between and snapping it is right. This measures a commutative "
            "hash of every ortho draw's position matrix, per population, per tick, and it can only "
@@ -801,10 +841,18 @@ void report_ortho_motion() {
   for (int p = 0; p < kMaxPop; ++p) {
     if (g_orthoTicks[p] == 0) continue;
     const double pct = 100.0 * (double)g_orthoChanged[p] / (double)g_orthoTicks[p];
-    Log.info("  {:<22} {:>7} of {:>7} tick(s) differed from the previous one ({:.1f}%) — {}",
+    const char* source = (g_orthoFromVerts[p] > 0 && g_orthoFromMtx[p] == 0) ? "own vertices"
+                         : (g_orthoFromMtx[p] > 0 && g_orthoFromVerts[p] == 0)
+                             ? "position MATRIX only — a weaker claim: the matrix places the "
+                               "element but its shape may be in vertices this row never saw, so a "
+                               "row reading 0% is 'the placement did not move', not 'nothing "
+                               "changed'"
+                             : "a mix of own vertices and the position matrix";
+    Log.info("  {:<22} {:>7} of {:>7} tick(s) differed from the previous one ({:.1f}%), hashed from "
+             "{} — {}",
              g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p))
                                   : g_popName[p],
-             g_orthoChanged[p], g_orthoTicks[p], pct,
+             g_orthoChanged[p], g_orthoTicks[p], pct, source,
              g_orthoChanged[p] == 0
                  ? "PROVABLY STILL, so snapping it is exactly right"
                  : "NOT still — could be smooth motion or a discrete content change, and this "
