@@ -115,6 +115,12 @@ double g_acceptedMax = 0.0;
 // matter how many draws were cut there, and the bound looks vindicated by data it removed. What
 // decides whether 100 is the right bound is the SHAPE of what it cuts — a far cluster three decades
 // out is a mispair, a continuous run from 100 upward is real motion being severed.
+// PER-POPULATION vertex-path outcomes. "particle stripe interpolates 63%" is not a number anyone
+// can act on: a chain that gains a particle CHANGES VERTEX COUNT and must snap, which is a ceiling,
+// while a chain that skipped a tick is a seam problem. Same percentage, opposite conclusions.
+long g_vtxPopPatched[256] = {};
+long g_vtxPopUnpaired[256] = {};
+long g_vtxPopCountChanged[256] = {};
 long g_objHistRefused[kObjBuckets] = {};
 long g_refusedPop[256] = {};
 // WHO gets refused, by count rather than by size. The largest single refusal names the most extreme
@@ -718,7 +724,7 @@ inline void put_be_f32(uint8_t* p, float f) {
 } // namespace
 
 bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t posOffset,
-                    const uint8_t* src, uint8_t* dst, float alpha) {
+                    const uint8_t* src, uint8_t* dst, float alpha, uint8_t pop) {
   if (tag == 0 || src == nullptr || dst == nullptr || vtxCount == 0 || stride == 0) {
     return false;
   }
@@ -747,11 +753,14 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
       }
     }
     ++g_vtxPatched;
+    ++g_vtxPopPatched[pop];
     patched = true;
   } else if (!consecutive) {
     ++g_vtxUnpaired;
+    ++g_vtxPopUnpaired[pop];
   } else {
     ++g_vtxCountChanged;
+    ++g_vtxPopCountChanged[pop];
   }
 
   rec.pos.swap(cur);
@@ -772,6 +781,22 @@ void report_vertex_interp() {
            "unrelated meshes.",
            g_vtxPatched, total, 100.0 * (double)g_vtxPatched / (double)total, g_vtxUnpaired,
            g_vtxCountChanged);
+  // BY POPULATION, because the two failure modes mean opposite things and the total cannot separate
+  // them. A COUNT CHANGE is a ceiling: a particle chain that gained a link, or a mesh rebuilt at a
+  // different resolution, has no vertex correspondence and snapping is the correct answer. A
+  // NON-CONSECUTIVE tick is a seam question: the object drew, then did not, then drew again, and
+  // whether that is legitimate (it left the scene) or a tagging gap is worth knowing per system.
+  for (int p = 0; p < kMaxPop; ++p) {
+    const long t = g_vtxPopPatched[p] + g_vtxPopUnpaired[p] + g_vtxPopCountChanged[p];
+    if (t == 0) continue;
+    Log.info("  vertex path: {:<28} {} of {} lerped ({:.1f}%) — {} not consecutive, {} changed "
+             "vertex count",
+             g_popName[p].empty() ? (p == 0 ? std::string("(unlabelled)")
+                                            : "pop " + std::to_string(p))
+                                  : g_popName[p],
+             g_vtxPopPatched[p], t, 100.0 * (double)g_vtxPopPatched[p] / (double)t,
+             g_vtxPopUnpaired[p], g_vtxPopCountChanged[p]);
+  }
 }
 
 void set_tag_world_pos(uint64_t tag, float x, float y, float z) {
