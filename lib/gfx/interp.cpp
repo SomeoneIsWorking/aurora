@@ -47,6 +47,9 @@ struct Entry {
   float texA[12];
   uint32_t texIdx = 0;      // which postex_mtx entry texA came from; 0 = none recorded
   bool texValid = false;
+  // How far this draw's object moved in the tick that produced this entry, camera removed. It is
+  // the object's OWN scale for what "far" means — see the discontinuity test.
+  double objDelta = -1.0;
 };
 
 // Two generations. `prev` is what the last tick recorded; `cur` is being filled by this tick and
@@ -107,6 +110,21 @@ constexpr double kDiscontinuity = 100.0;
 long g_snappedDiscontinuity = 0;
 double g_snappedDiscontinuityMax = 0.0;
 double g_acceptedMax = 0.0;
+// THE REFUSED DELTAS, BUCKETED. Without this the distribution above is a lie by construction: a
+// refused draw returns before it is bucketed, so the accepted histogram reads "[100,inf) 0" no
+// matter how many draws were cut there, and the bound looks vindicated by data it removed. What
+// decides whether 100 is the right bound is the SHAPE of what it cuts — a far cluster three decades
+// out is a mispair, a continuous run from 100 upward is real motion being severed.
+long g_objHistRefused[kObjBuckets] = {};
+long g_refusedPop[256] = {};
+// WHO gets refused, by count rather than by size. The largest single refusal names the most extreme
+// event; the most FREQUENT one names the systematic defect, and 45 refusals per tick sustained is a
+// systematic defect. Keyed by the tag's shape half, because a mispair against a pooled instance
+// changes the instance half every tick while the shape stays put — grouping by the full tag would
+// scatter one cause across hundreds of rows.
+std::unordered_map<uint32_t, long> g_refusedShape;
+int g_refusedShown = 0;
+long g_refusedLastTick = -1;
 
 // ---- CAMERA ------------------------------------------------------------------------------------
 // A GC Mtx as it arrives: 3 rows of 4 floats, p' = R*p + t with R the leading 3x3 and t the last
@@ -356,30 +374,72 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     // frame is the same in both cases: show it where it is, do not sweep it across the screen.
     // Interpolating one of these puts a whole model in mid-air for half a frame.
     //
-    // THIS IS A THRESHOLD, which this project distrusts on principle, so here is the evidence —
-    // and the part of it that is NOT clean, because a gate justified by an overstated distribution
-    // is the same mistake in the other direction.
+    // A FIXED SPEED BOUND WAS TRIED HERE FIRST AND IS GONE; the paragraph below says why, because
+    // the reasoning that produced it was careful and still wrong, which is the kind worth keeping.
+    // It refused any delta >= 100 units/tick, justified on a 593-tick plaza run (669,750 paired
+    // draws below the bound, 182 above) plus an independent ground truth inside the bulk (gpMario
+    // running peaks at 58.5 units/tick — motion_truth.cpp, claim C034, which still holds as an
+    // observation). What that evidence could not contain was a scene faster than the plaza, and
+    // the gate's own margin line was what caught it: in Pianta Village the largest ACCEPTED delta
+    // sat at 99.9 against a bound of 100, and 12,791 draws were being refused per run.
+    // ── IS THIS A TELEPORT, OR JUST SOMETHING FAST? ──────────────────────────────────────────
     //
-    // Measured over a 593-tick plaza run with Mario driven by a pad script: 669,750 paired draws
-    // below 100 units/tick, then 36 in [100,1k), 73 in [1k,10k) and 73 in [10k,inf). So it is NOT
-    // three empty decades — the decade just above the bound holds 36 draws, and whether those are
-    // fast objects or mispairs is not known. What IS clean: an independent ground truth sits inside
-    // the bulk (gpMario, measured running, peaks at 58.5 units/tick — motion_truth.cpp, claim
-    // C034), and the two failure modes are not symmetric. Snapping a genuinely fast object costs
-    // one frame of interpolation on 36 draws out of 670,000; interpolating a mispair sweeps a whole
-    // model across the screen. The bound is set to the safe side of that asymmetry.
+    // The rule used to be a constant: refuse any delta >= 100 world units in a tick. It was
+    // measured — on the PLAZA, where the distribution had 669,750 draws below 100 and 182 above,
+    // three decades out. Pianta Village falsified it. There the refused deltas are contiguous with
+    // the accepted bulk (12,657 in [100,1k) against 41,939 accepted in [10,100)) and printing the
+    // coordinates settled it in one run: a single object walking 323.8 -> 318.3 -> 313.0 -> 307.7
+    // units per tick along a smooth decelerating arc. Correctly paired, genuinely fast, and the
+    // constant was snapping it every frame for 282 ticks.
     //
-    // Contrast the camera-cut threshold this project correctly REFUSED: there the distribution had
-    // a populated middle with no gap at all (34 ticks in [10,100), 36 in [100,1k)) AND both failure
-    // modes were bad — a missed cut and a cut real motion look equally wrong — so the game was made
-    // to declare its cuts instead. If an object ever needs the same treatment, that is the road.
+    // So the test is now the object's own CONTINUITY rather than a global speed limit. A teleport
+    // is a STEP: this tick's motion has no relation to last tick's. Real motion, however fast, is
+    // smooth at 30 Hz — the sequence above changes by ~5 units per tick. An object is therefore
+    // allowed to move as far as it was ALREADY moving, times a generous factor, and the constant
+    // survives only as the floor for an object with no history yet.
     //
-    // It reports itself. If the count climbs, or the largest ACCEPTED delta creeps toward the
-    // bound, then some object really does move that fast and the bound is cutting real motion —
-    // which is the failure this kind of gate is prone to, so it is measured rather than assumed.
-    if (od >= kDiscontinuity) {
+    // WHY THE HISTORY IS STORED EVEN WHEN THE DRAW IS REFUSED: otherwise nothing that starts moving
+    // fast can ever be accepted — its history stays at zero and every tick refuses on the floor,
+    // forever, which is precisely the bug being fixed. Storing it costs one snapped frame at the
+    // moment fast motion begins, and that frame is the one where the object's speed genuinely was
+    // discontinuous.
+    //
+    // WHAT THIS STILL DOES NOT CATCH, stated rather than discovered later: a mispair that is
+    // SUSTAINED — a tag aliased to another object of similarly steady motion — will legitimise
+    // itself after one tick. The magnitude rule did not catch that either (it accepted anything
+    // under 100 forever); what bounds it is the tag's own quality, measured separately, and within
+    // a tick tags were found not to collide at all (frame_interp/shape_identity.cpp).
+    constexpr double kContinuityRatio = 4.0;
+    const double allowed = (was.objDelta > 0.0)
+                               ? std::max(kDiscontinuity, kContinuityRatio * was.objDelta)
+                               : kDiscontinuity;
+    mine.objDelta = od;
+    if (od >= allowed) {
+      // The first few refusals, with both world positions. A count and a magnitude cannot tell a
+      // rotating sub-part (positions tracing an arc around a fixed centre) from an alias (two fixed
+      // points alternating) from a genuine mispair (unrelated positions) — the coordinates can, and
+      // there is no way to reason to the answer from the magnitude alone.
+      // Cap by NOVELTY, not by count: one line per tick, so a sample is not eight lines from the
+      // same tick describing one event. (The first version printed the first eight refusals and all
+      // eight came from tick 10 — a run's whole tail summarised by a single moment.)
+      if (g_refusedShown < 20 && g_tickIndex != g_refusedLastTick) {
+        g_refusedLastTick = g_tickIndex;
+        ++g_refusedShown;
+        Log.info("    refusal #{}: shape {:#010x} instance {:#010x} ordinal {} tick {} — world "
+                 "{:.1f},{:.1f},{:.1f} -> {:.1f},{:.1f},{:.1f}  (delta {:.1f})",
+                 g_refusedShown, (uint32_t)(tag >> 32), (uint32_t)(tag & 0xffffffffu), ordinal,
+                 g_tickIndex, objPrev[3], objPrev[7], objPrev[11], objCur[3], objCur[7], objCur[11],
+                 od);
+      }
       ++g_snappedDiscontinuity;
       if (od > g_snappedDiscontinuityMax) { g_snappedDiscontinuityMax = od; }
+      {
+        int rb = 0;
+        for (double edge = 0.1; rb < kObjBuckets - 1 && od >= edge; edge *= 10.0) { ++rb; }
+        ++g_objHistRefused[rb];
+        ++g_refusedPop[pop];
+        ++g_refusedShape[(uint32_t)(tag >> 32)];
+      }
       return false;   // the caller falls back to the camera delta alone, which is correct here
     }
     if (od > g_acceptedMax) { g_acceptedMax = od; }
@@ -1046,7 +1106,11 @@ void reset_stats() {
   g_objDeltaN = g_objDeltaUnavailable = 0;
   g_snappedDiscontinuity = 0;
   g_snappedDiscontinuityMax = g_acceptedMax = 0.0;
-  for (int i = 0; i < kObjBuckets; ++i) { g_objHist[i] = 0; }
+  for (int i = 0; i < kObjBuckets; ++i) { g_objHist[i] = 0; g_objHistRefused[i] = 0; }
+  for (int p = 0; p < 256; ++p) { g_refusedPop[p] = 0; }
+  g_refusedShape.clear();
+  g_refusedShown = 0;
+  g_refusedLastTick = -1;
   for (int p = 0; p < kMaxPop; ++p) {
     for (int i = 0; i < kObjBuckets; ++i) { g_objHistPop[p][i] = 0; }
   }
@@ -1253,12 +1317,41 @@ void report() {
     // WHO IS IN THE TAIL. Printed for every population with any draw at 10 units/tick or more,
     // because "6.8% of paired draws moved impossibly far" and "Mario and the particles moved fast"
     // are the same number until it is attributed.
-    Log.info("  discontinuity snap: {} paired draw(s) refused for moving >= {:.0f} units in one "
-             "tick (largest refused {:.1f}); largest delta ACCEPTED was {:.1f}. The gap between "
-             "that last number and the bound is the margin — if it closes, something in this scene "
-             "moves faster than the ground truth the bound was set from, and the bound is now "
-             "cutting real motion.",
+    Log.info("  discontinuity snap: {} paired draw(s) refused as DISCONTINUOUS — each moved further "
+             "in one tick than 4x what that same object moved in the tick before, with a floor of "
+             "{:.0f} units for an object with no history yet (largest refused {:.1f}); largest "
+             "delta ACCEPTED was {:.1f}, which is now allowed to exceed the floor because a fast "
+             "object earns its own speed. A count that climbs with scene SPEED rather than with "
+             "scene chaos would mean the ratio is too tight.",
              g_snappedDiscontinuity, kDiscontinuity, g_snappedDiscontinuityMax, g_acceptedMax);
+    if (g_snappedDiscontinuity != 0) {
+      // The refused deltas, on the SAME buckets. The accepted histogram above cannot show these —
+      // a refusal returns before bucketing, so it reads [100,inf) 0 however many were cut — and the
+      // shape here is what says whether the bound is right. Contiguous with the accepted bulk means
+      // it is severing real motion; a cluster decades out means it is catching mispairs.
+      Log.info("    refused-delta distribution (same buckets): [0,0.1) {} | [0.1,1) {} | [1,10) {} | "
+               "[10,100) {} | [100,1k) {} | [1k,10k) {} | [10k,inf) {}",
+               g_objHistRefused[0], g_objHistRefused[1], g_objHistRefused[2], g_objHistRefused[3],
+               g_objHistRefused[4], g_objHistRefused[5], g_objHistRefused[6]);
+      {
+        std::vector<std::pair<uint32_t, long>> v(g_refusedShape.begin(), g_refusedShape.end());
+        std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
+        const size_t n = v.size() < 6 ? v.size() : 6;
+        for (size_t i = 0; i < n; ++i) {
+          Log.info("    refused most often: shape {:#010x} — {} draw(s) of {} total, over {} "
+                   "distinct shape(s)",
+                   v[i].first, v[i].second, g_snappedDiscontinuity, g_refusedShape.size());
+        }
+      }
+      for (int p = 0; p < kMaxPop; ++p) {
+        if (g_refusedPop[p] == 0) continue;
+        Log.info("    refused by population: {:<28} {} draw(s)",
+                 g_popName[p].empty() ? (p == 0 ? std::string("(unlabelled)")
+                                               : "pop " + std::to_string(p))
+                                      : g_popName[p],
+                 g_refusedPop[p]);
+      }
+    }
     for (int p = 0; p < kMaxPop; ++p) {
       long tail = 0, total = 0;
       for (int b = 0; b < kObjBuckets; ++b) {
