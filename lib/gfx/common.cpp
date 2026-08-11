@@ -2651,3 +2651,24 @@ void pop_debug_group() {
 
 const AuroraStats* aurora_get_stats() { return &aurora::gfx::g_stats; }
 float aurora_get_fps() { return aurora::gfx::calculate_fps(); }
+
+namespace aurora {
+// Which mapped staging region a capacity belongs to. Used only by the overflow message in
+// common.hpp, which otherwise reports a bare number and leaves the reader to grep the constants.
+// Sizes are distinct today; if two are ever made equal this reports the ambiguity rather than
+// silently picking one, because a confident wrong name is worse than no name.
+const char* aurora_gfx_staging_region_name(size_t capacity) {
+  const char* found = nullptr;
+  const struct { size_t size; const char* name; } kRegions[] = {
+      {gfx::UniformBufferSize, "uniform"},   {gfx::VertexBufferSize, "vertex"},
+      {gfx::IndexBufferSize, "index"},       {gfx::StorageBufferSize, "storage"},
+      {gfx::TextureUploadSize, "textureUpload"},
+  };
+  for (const auto& r : kRegions) {
+    if (r.size != capacity) continue;
+    if (found != nullptr) return "AMBIGUOUS (two staging regions share this capacity)";
+    found = r.name;
+  }
+  return found != nullptr ? found : "UNKNOWN (capacity matches no staging region constant)";
+}
+} // namespace aurora
