@@ -118,6 +118,10 @@ double g_acceptedMax = 0.0;
 // PER-POPULATION vertex-path outcomes. "particle stripe interpolates 63%" is not a number anyone
 // can act on: a chain that gains a particle CHANGES VERTEX COUNT and must snap, which is a ceiling,
 // while a chain that skipped a tick is a seam problem. Same percentage, opposite conclusions.
+long g_vtxFirstSight = 0;
+long g_vtxGapHist[9] = {};   // index = gap in ticks, 8 = "8 or more"
+long g_vtxGapPatched = 0;   // interpolated across a skipped tick, alpha scaled by the spacing
+long g_vtxTooStale = 0;     // last sample older than the bound: snapped rather than swept
 long g_vtxPopPatched[256] = {};
 long g_vtxPopUnpaired[256] = {};
 long g_vtxPopCountChanged[256] = {};
@@ -741,23 +745,56 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
     cur[v * 3 + 2] = be_f32(p + 8);
   }
 
-  const bool consecutive = rec.stamp + 1 == g_tickIndex;
+  // ── AN OBJECT THAT SKIPS TICKS MAY STILL INTERPOLATE, IF THE ALPHA IS SCALED ────────────────
+  //
+  // The rule was "consecutive ticks or snap", and it cost more than it looked like: the shadow
+  // alpha cubes are drawn by about sixty groups of which only ~18 draw on any given tick, so 2,675
+  // of 5,162 cube draws had no consecutive predecessor and snapped. Their identities are fine —
+  // 62 first sightings in 290 ticks, keys stable — they simply do not draw every tick.
+  //
+  // The generalisation is exact rather than a loosening. `alpha` says where the presentation frame
+  // sits between the PREVIOUS tick and this one. When the last sample is `gap` ticks old, the same
+  // moment sits at 1 - (1 - alpha)/gap of the way from that sample to this one — for gap 1 this is
+  // alpha unchanged, so consecutive pairs behave exactly as before, and for gap 3 the in-between
+  // frame moves a sixth of the way back instead of a half. Interpolating between the two most
+  // recent samples of the same object, weighted by how far apart they are, is the correct answer;
+  // the old rule was approximating a 1-tick spacing that was not there.
+  //
+  // A GAP IS STILL BOUNDED. Past a few ticks the older sample stops describing anything nearby —
+  // the object may have been off-screen, culled, or somewhere else entirely — and a snap is safer
+  // than a sweep across whatever happened while nobody was looking. Draws refused for that are
+  // counted, not silently dropped, so the bound can be judged rather than assumed.
+  constexpr long kMaxGap = 4;
+  const long gap = g_tickIndex - rec.stamp;
+  const bool consecutive = gap >= 1 && gap <= kMaxGap && rec.stamp != 0;
   const bool sameCount = rec.pos.size() == need;
   bool patched = false;
   if (consecutive && sameCount) {
+    const float ga = 1.0f - (1.0f - alpha) / (float)gap;
     for (uint32_t v = 0; v < vtxCount; ++v) {
       uint8_t* q = dst + (size_t)v * stride + posOffset;
       for (int c = 0; c < 3; ++c) {
         const float a = rec.pos[v * 3 + c];
-        put_be_f32(q + c * 4, a + (cur[v * 3 + c] - a) * alpha);
+        put_be_f32(q + c * 4, a + (cur[v * 3 + c] - a) * ga);
       }
     }
     ++g_vtxPatched;
     ++g_vtxPopPatched[pop];
+    if (gap > 1) { ++g_vtxGapPatched; }
     patched = true;
   } else if (!consecutive) {
     ++g_vtxUnpaired;
     ++g_vtxPopUnpaired[pop];
+    if (gap > kMaxGap) { ++g_vtxTooStale; }
+    // The GAP ITSELF, bucketed. Raising a bound because a recovery was disappointing is guessing;
+    // this says whether the misses are near-misses at all. `rec.stamp == 0` is the first sighting
+    // of a tag and is filed separately — it is not a gap, it is an object that has never drawn.
+    if (rec.stamp == 0) {
+      ++g_vtxFirstSight;
+    } else {
+      const long g = gap < 0 ? 0 : gap;
+      ++g_vtxGapHist[g < 8 ? g : 8];
+    }
   } else {
     ++g_vtxCountChanged;
     ++g_vtxPopCountChanged[pop];
@@ -781,6 +818,17 @@ void report_vertex_interp() {
            "unrelated meshes.",
            g_vtxPatched, total, 100.0 * (double)g_vtxPatched / (double)total, g_vtxUnpaired,
            g_vtxCountChanged);
+  Log.info("  of those, {} were interpolated ACROSS a skipped tick with alpha scaled by the spacing "
+           "(an object that does not draw every tick still has two real samples); {} were refused "
+           "for a last sample older than 4 ticks, where the older pose no longer describes anywhere "
+           "the object has recently been.",
+           g_vtxGapPatched, g_vtxTooStale);
+  Log.info("  why the rest missed: {} were a tag's FIRST sighting (never drawn before — no pair can "
+           "exist); gaps for the others, in ticks: 0 {} | 1 {} | 2 {} | 3 {} | 4 {} | 5 {} | 6 {} | "
+           "7 {} | 8+ {}. A gap of 0 means the same tag drew TWICE in one tick, which is a tagging "
+           "collision rather than a spacing problem.",
+           g_vtxFirstSight, g_vtxGapHist[0], g_vtxGapHist[1], g_vtxGapHist[2], g_vtxGapHist[3],
+           g_vtxGapHist[4], g_vtxGapHist[5], g_vtxGapHist[6], g_vtxGapHist[7], g_vtxGapHist[8]);
   // BY POPULATION, because the two failure modes mean opposite things and the total cannot separate
   // them. A COUNT CHANGE is a ceiling: a particle chain that gained a link, or a mesh rebuilt at a
   // different resolution, has no vertex correspondence and snapping is the correct answer. A
