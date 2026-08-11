@@ -644,6 +644,83 @@ void note_disposition(uint8_t pop, Disposition d) {
   ++g_audit[pop][(int)d];
 }
 
+// ── IS THE SCREEN-SPACE GEOMETRY ACTUALLY STILL? ────────────────────────────────────────────────
+namespace {
+struct OrthoTick {
+  uint64_t sum = 0;     // commutative over the tick's draws
+  long count = 0;
+  long stamp = -1;      // tick this belongs to
+};
+OrthoTick g_orthoCur[kMaxPop], g_orthoPrev[kMaxPop];
+long g_orthoTicks[kMaxPop] = {};      // ticks with a previous tick to compare against
+long g_orthoChanged[kMaxPop] = {};    // of those, how many differed
+} // namespace
+
+void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
+                         uint32_t mtxPosOffset) {
+  if (pop >= kMaxPop || src == nullptr || mtxPosOffset == 0 ||
+      mtxPosOffset + kMtxBytes > uniformSize) {
+    return;
+  }
+  OrthoTick& cur = g_orthoCur[pop];
+  if (cur.stamp != g_tickIndex) {
+    // A tick boundary for THIS population. Compare against the last tick it drew in rather than
+    // the numerically previous one: a 2D element that draws every other tick is not "changing"
+    // just because it was absent in between.
+    if (cur.stamp >= 0) {
+      const OrthoTick& was = g_orthoPrev[pop];
+      if (was.stamp >= 0) {
+        ++g_orthoTicks[pop];
+        if (was.sum != cur.sum || was.count != cur.count) ++g_orthoChanged[pop];
+      }
+      g_orthoPrev[pop] = cur;
+    }
+    cur = OrthoTick{};
+    cur.stamp = g_tickIndex;
+  }
+  uint64_t h = 1469598103934665603ull;
+  for (uint32_t i = 0; i < kMtxBytes; ++i) {
+    h = (h ^ src[mtxPosOffset + i]) * 1099511628211ull;
+  }
+  h ^= h >> 29;
+  h *= 0xbf58476d1ce4e5b9ull;
+  h ^= h >> 32;
+  cur.sum += h;
+  ++cur.count;
+}
+
+void report_ortho_motion() {
+  long anyMeasured = 0;
+  for (int p = 0; p < kMaxPop; ++p) anyMeasured += g_orthoTicks[p];
+  if (anyMeasured == 0) {
+    Log.info("screen-space motion: NOTHING was measured — no orthographic draw was seen on two "
+             "ticks this run. This says nothing about whether 2D snapping is correct.");
+    return;
+  }
+  Log.info("screen-space motion — whether `snap:2D` is PROVABLY correct or merely unexamined. A "
+           "static element has no in-between and snapping it is right. This measures a commutative "
+           "hash of every ortho draw's position matrix, per population, per tick, and it can only "
+           "answer one of the two questions: a population that never differs is provably still, so "
+           "snapping it is certainly right. A population that DIFFERS has not been shown to judder "
+           "— the difference may be smooth motion, which does have an in-between this path does "
+           "not produce, or a discrete content change (a different glyph, a meter reading, a "
+           "different number of elements), which does not. Separating those needs a per-element "
+           "identity that 2D draws do not carry.");
+  for (int p = 0; p < kMaxPop; ++p) {
+    if (g_orthoTicks[p] == 0) continue;
+    const double pct = 100.0 * (double)g_orthoChanged[p] / (double)g_orthoTicks[p];
+    Log.info("  {:<22} {:>7} of {:>7} tick(s) differed from the previous one ({:.1f}%) — {}",
+             g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p))
+                                  : g_popName[p],
+             g_orthoChanged[p], g_orthoTicks[p], pct,
+             g_orthoChanged[p] == 0
+                 ? "PROVABLY STILL, so snapping it is exactly right"
+                 : "NOT still — could be smooth motion or a discrete content change, and this "
+                   "measure cannot tell them apart, so `snap:2D` here is a description of what "
+                   "happens rather than a verdict that nothing was lost");
+  }
+}
+
 void report_audit() {
   static const char* kName[(int)Disposition::Count] = {
       "unclaimed", "PAIRED",     "billboard",  "camera-only",

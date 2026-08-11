@@ -1004,6 +1004,13 @@ bool interpolate_recorded_frame(float alpha) {
       // delta alone. Leaving ANY draw on the current viewpoint is what tears the frame.
       // THE AUDIT. Every draw lands in exactly one of these five, so the columns sum to the draw
       // count and a population cannot quietly go missing between them.
+      if (d.ortho != 0) {
+        // Measure whether this screen-space draw is actually STILL. See interp.hpp — `snap:2D` is
+        // reported as correct on the assumption that a 2D element has no in-between, and that
+        // assumption had never been checked against an animating one.
+        interp::note_ortho_geometry(d.pop, snap.data() + d.uniformRange.offset,
+                                    d.uniformRange.size, d.mtxPosOffset);
+      }
       interp::note_disposition(d.pop,
                                d.ortho != 0   ? interp::Disposition::SnappedOrtho
                                : d.exact != 0 ? interp::Disposition::SnappedExact
