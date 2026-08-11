@@ -6,6 +6,7 @@
 
 #include "../internal.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -450,7 +451,12 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
 
 // ── THE AUDIT ───────────────────────────────────────────────────────────────────────────────────
 namespace {
-constexpr int kMaxPop = 16;
+// The full u8 id space, not the 11 hand-written labels it started as. The host allocates the ids
+// above the curated block to EMITTER SITES it discovers at runtime, so this array is the audit's
+// per-emitter table and its size is the ceiling on how many distinct emitters can be told apart.
+// Anything beyond it is reported as an overflow by the host rather than folded into pop 0 — which
+// is why this is 256 (the whole space the stream byte can carry) instead of a round number.
+constexpr int kMaxPop = 256;
 long g_audit[kMaxPop][(int)Disposition::Count] = {};
 std::string g_popName[kMaxPop];
 // A draw is noted Pending first and then, if something claims it, noted again. Resolving Pending
@@ -461,6 +467,17 @@ std::string g_popName[kMaxPop];
 void name_population(uint8_t pop, const char* name) {
   if (pop < kMaxPop && name != nullptr) {
     g_popName[pop] = name;
+  }
+}
+
+int max_populations() { return kMaxPop; }
+
+void audit_row(uint8_t pop, long* out, int outLen) {
+  if (out == nullptr) {
+    return;
+  }
+  for (int d = 0; d < outLen; ++d) {
+    out[d] = (pop < kMaxPop && d < (int)Disposition::Count) ? g_audit[pop][d] : 0;
   }
 }
 
@@ -497,14 +514,30 @@ void report_audit() {
            "camera but not its own motion, or nothing at all.");
   Log.info("  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11}  {}", "population", "PAIRED", "billboard",
            "camera-only", "snap:2D", "snap:NO-ID", "verdict");
+  // Ordered by size, and CAPPED — the population space is now the whole u8 range because the host
+  // allocates ids to emitter sites it discovers at runtime, so a run can legitimately fill dozens of
+  // rows. The cap is on the SMALL rows, never the large ones, and what it drops is stated with its
+  // draw count: a truncated list that does not say it truncated reads as a complete one.
+  std::vector<std::pair<int, long>> rows;
   for (int p = 0; p < kMaxPop; ++p) {
     long sum = 0;
     for (int d = 0; d < (int)Disposition::Count; ++d) {
       sum += g_audit[p][d];
     }
-    if (sum == 0) {
-      continue;
+    if (sum > 0) {
+      rows.emplace_back(p, sum);
     }
+  }
+  std::sort(rows.begin(), rows.end(), [](auto& a, auto& b) { return a.second > b.second; });
+  constexpr size_t kMaxRows = 32;
+  long omittedDraws = 0;
+  size_t omittedRows = 0;
+  for (size_t i = kMaxRows; i < rows.size(); ++i) {
+    ++omittedRows;
+    omittedDraws += rows[i].second;
+  }
+  for (size_t i = 0; i < rows.size() && i < kMaxRows; ++i) {
+    const int p = rows[i].first;
     // Anything still Pending was never claimed by any patch: perspective, no identity.
     const long noId = g_audit[p][(int)Disposition::SnappedNoIdentity] +
                       g_audit[p][(int)Disposition::Pending];
@@ -531,6 +564,12 @@ void report_audit() {
              // because a percentage that counts them as failures cannot reach 100 even when the
              // path is perfect.
              (good + bad) > 0 ? 100.0 * (double)good / (double)(good + bad) : 100.0);
+  }
+  if (omittedRows > 0) {
+    Log.info("  ... and {} further population(s) accounting for {} draw(s), not shown here. Every "
+             "one of them IS recorded — the graphics registry file holds the full list "
+             "(tools/gfx/graphics_db.py list).",
+             omittedRows, omittedDraws);
   }
   Log.info("  A population labelled (unlabelled) is one no seam claims — those are the draws whose "
            "emitter is still unknown, and they are the honest edge of this audit rather than a "
