@@ -60,6 +60,10 @@ std::unordered_map<uint64_t, std::vector<Entry>> g_cur;
 // How far into each tag we are THIS tick. Reset every tick; this is the ordinal that is scoped to a
 // tag rather than global.
 std::unordered_map<uint64_t, uint32_t> g_cursor;
+// How many parts each tag has EVER drawn, across the whole run — not just last tick. This is what
+// separates "this object is new" (nothing to pair with, correct) from "this object drew before and
+// we lost it" (a real gap). One entry per object, not per part.
+std::unordered_map<uint64_t, uint32_t> g_everSeenParts;
 
 long g_paired = 0;
 long g_unpaired = 0;
@@ -290,7 +294,14 @@ void begin_tick() {
 
 bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* dst,
                 uint32_t uniformSize, uint32_t mtxPosOffset, uint32_t mtxNrmOffset, float alpha,
-                uint32_t texMtxCamMask, uint32_t pnMtxSlot, uint8_t pop) {
+                uint32_t texMtxCamMask, uint32_t pnMtxSlot, uint8_t pop,
+                bool* outFirstEverSighting) {
+  // Default it on EVERY path, including the early refusals below. A draw with no tag at all, or one
+  // refused for a bad matrix offset, is not a birth — it is a draw this path cannot identify, and
+  // letting a stale `true` leak out of a previous call would file it as correct-by-construction.
+  if (outFirstEverSighting != nullptr) {
+    *outFirstEverSighting = false;
+  }
   if (tag == 0 || dst == nullptr || src == nullptr) {
     return false; // untagged: no identity of its own. The caller applies the camera delta instead.
   }
@@ -326,6 +337,16 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
 
   const uint32_t ordinal = g_cursor[tag]++;
 
+  // HAS THIS (tag, ordinal) EVER BEEN DRAWN BEFORE IN THIS RUN? Recorded as a high-water mark per
+  // tag, which costs one map entry per object rather than one per part. It is updated on every
+  // call regardless of what happens below, so a draw that fails to pair for some other reason is
+  // still marked as seen and cannot be reported as a birth on a later tick.
+  uint32_t& everSeenParts = g_everSeenParts[tag];
+  const bool firstEverSighting = ordinal >= everSeenParts;
+  if (ordinal + 1 > everSeenParts) {
+    everSeenParts = ordinal + 1;
+  }
+
   auto& curVec = g_cur[tag];
   if (curVec.size() <= ordinal) {
     curVec.resize(ordinal + 1);
@@ -338,6 +359,14 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
   const auto it = g_prev.find(tag);
   if (it == g_prev.end() || it->second.size() <= ordinal) {
     ++g_unpaired;   // new object this tick, or it drew fewer parts last tick.
+    // A BIRTH IS NOT A DEFECT, and it is the only kind of miss that can never be fixed by better
+    // pairing: there is no previous pose to interpolate from. Reported separately so a population
+    // that behaves perfectly does not sit at "99.7% PARTIAL" for the run's whole length because of
+    // its own first tick. A miss on an object that HAS been seen before is a real gap and stays in
+    // the defect column.
+    if (outFirstEverSighting != nullptr) {
+      *outFirstEverSighting = firstEverSighting;
+    }
     return false;
   }
   const Entry& was = it->second[ordinal];
@@ -617,7 +646,8 @@ void note_disposition(uint8_t pop, Disposition d) {
 
 void report_audit() {
   static const char* kName[(int)Disposition::Count] = {
-      "unclaimed", "PAIRED", "billboard", "camera-only", "snap:2D", "snap:EXACT", "snap:NO-ID"};
+      "unclaimed", "PAIRED",     "billboard",  "camera-only",
+      "snap:2D",   "snap:EXACT", "snap:NO-ID", "birth"};
   long total = 0;
   for (int p = 0; p < kMaxPop; ++p) {
     for (int d = 0; d < (int)Disposition::Count; ++d) {
@@ -631,10 +661,11 @@ void report_audit() {
   }
   Log.info("INTERPOLATION AUDIT — every draw, by the system that emitted it and the fate it got. "
            "PAIRED and billboard interpolate; snap:2D is CORRECT (a screen-space element has no "
-           "in-between); camera-only and snap:NO-ID are the defects — geometry that follows the "
-           "camera but not its own motion, or nothing at all.");
-  Log.info("  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11} {:>11}  {}", "population", "PAIRED",
-           "billboard", "camera-only", "snap:2D", "snap:EXACT", "snap:NO-ID", "verdict");
+           "in-between); birth is CORRECT too (nothing existed to interpolate from); camera-only "
+           "and snap:NO-ID are the defects — geometry that follows the camera but not its own "
+           "motion, or nothing at all.");
+  Log.info("  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11} {:>11} {:>8}  {}", "population", "PAIRED",
+           "billboard", "camera-only", "snap:2D", "snap:EXACT", "snap:NO-ID", "birth", "verdict");
   // Ordered by size, and CAPPED — the population space is now the whole u8 range because the host
   // allocates ids to emitter sites it discovers at runtime, so a run can legitimately fill dozens of
   // rows. The cap is on the SMALL rows, never the large ones, and what it drops is stated with its
@@ -667,27 +698,40 @@ void report_audit() {
     // delta and nothing else. Counting it as a defect is what made "97.3% PARTIAL" understate the
     // world-geometry row.
     const long bad = g_audit[p][(int)Disposition::CameraOnly] + noId;
+    // Births are in NEITHER column. A draw whose object is being seen for the first time has no
+    // previous pose to interpolate from, so counting it as a defect makes a perfect population
+    // permanently imperfect — every once-per-tick emitter used to sit at exactly 99.7% for the
+    // whole run because of its own first tick. Counting it as a success would be the opposite lie.
+    const long birth = g_audit[p][(int)Disposition::CameraOnlyBirth];
     // A 2D population with no interpolated draws is CORRECT, not a failure — a screen-space
     // element has no meaningful in-between. Saying "interpolates (0.0% move)" of it, as the first
     // version did, is the report contradicting itself in one line.
-    const char* verdict = (bad == 0 && good == 0 && g_audit[p][(int)Disposition::SnappedExact] > 0 &&
-                           g_audit[p][(int)Disposition::SnappedOrtho] == 0)
-                              ? "CORRECT (screen-space: must NOT move)"
-                          : (bad == 0 && good == 0) ? "CORRECT (2D: no in-between exists)"
-                          : bad == 0              ? "interpolates"
-                          : good == 0             ? "SNAPS ENTIRELY"
-                                                  : "PARTIAL";
-    Log.info("  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11} {:>11}  {} ({:.1f}% interpolate; "
-             "camera-only is an UPPER BOUND on the defect, not a measurement — see interp.cpp)",
+    const char* verdict =
+        // All births and nothing else: the population drew once and never again, so there was
+        // never a pair to make. Saying "2D" of it would be a claim about a projection nobody
+        // measured.
+        (bad == 0 && good == 0 && birth > 0 && g_audit[p][(int)Disposition::SnappedOrtho] == 0 &&
+         g_audit[p][(int)Disposition::SnappedExact] == 0)
+            ? "CORRECT (drew once — a first sighting has nothing to pair with)"
+        : (bad == 0 && good == 0 && g_audit[p][(int)Disposition::SnappedExact] > 0 &&
+           g_audit[p][(int)Disposition::SnappedOrtho] == 0)
+            ? "CORRECT (screen-space: must NOT move)"
+        : (bad == 0 && good == 0) ? "CORRECT (2D: no in-between exists)"
+        : bad == 0                ? "interpolates"
+        : good == 0               ? "SNAPS ENTIRELY"
+                                  : "PARTIAL";
+    Log.info("  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11} {:>11} {:>8}  {} ({:.1f}% interpolate, "
+             "excluding {} first-ever sighting(s) which had nothing to pair with; camera-only is "
+             "an UPPER BOUND on the defect, not a measurement — see interp.cpp)",
              g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p))
                                   : g_popName[p],
              g_audit[p][(int)Disposition::Paired], g_audit[p][(int)Disposition::Billboard],
              g_audit[p][(int)Disposition::CameraOnly], g_audit[p][(int)Disposition::SnappedOrtho],
-             g_audit[p][(int)Disposition::SnappedExact], noId, verdict,
+             g_audit[p][(int)Disposition::SnappedExact], noId, birth, verdict,
              // Denominator is what OUGHT to move: 2D and provably-static draws are excluded,
              // because a percentage that counts them as failures cannot reach 100 even when the
              // path is perfect.
-             (good + bad) > 0 ? 100.0 * (double)good / (double)(good + bad) : 100.0);
+             (good + bad) > 0 ? 100.0 * (double)good / (double)(good + bad) : 100.0, birth);
   }
   if (omittedRows > 0) {
     Log.info("  ... and {} further population(s) accounting for {} draw(s), not shown here. Every "
@@ -1315,13 +1359,91 @@ bool selftest() {
       }
     }
   }
+  // ── THE BIRTH FLAG'S OWN CONTROL ────────────────────────────────────────────────────────────
+  //
+  // The audit now excludes first-ever sightings from the pass/fail denominator, which means a bug
+  // that reported EVERY unpaired draw as a birth would show every population at 100% and look like
+  // success. So the flag is run against both classes: a tag that has never been seen (must read
+  // true) and a tag that drew, went away, and came back (must read FALSE — that is a real gap, and
+  // it is the answer a broken flag cannot give).
+  //
+  // Distinct tags, deliberately: reusing tag 1 would inherit the ever-seen state the cases above
+  // leave behind, and the test would pass or fail on ordering rather than on the mechanism.
+  {
+    float v[12];
+    make_view_at(0, 0, 0, v);
+    constexpr uint64_t kNewTag = 0xB100u;
+    constexpr uint64_t kGapTag = 0xB200u;
+
+    reset_stats();
+    bool birthNew = false;
+    begin_tick();
+    set_view_matrix(v);
+    begin_camera_delta(0.5f);
+    write_draw_block(src.data(), kPos, kNrm, v, 0, 0, 0);
+    const bool pairedFirst =
+        patch_draw(kNewTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0, &birthNew);
+    // Same tick, and the gap tag draws for the first time here so it has a history to lose.
+    write_draw_block(src.data(), kPos, kNrm, v, 0, 0, 0);
+    patch_draw(kGapTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0);
+    end_tick();
+
+    // A tick in which kGapTag does not draw at all. kNewTag draws again and must now PAIR — a flag
+    // stuck at true would be caught here as well.
+    bool birthSecond = false;
+    begin_tick();
+    set_view_matrix(v);
+    begin_camera_delta(0.5f);
+    write_draw_block(src.data(), kPos, kNrm, v, 0, 0, 0);
+    const bool pairedSecond =
+        patch_draw(kNewTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0,
+                   &birthSecond);
+    end_tick();
+
+    // kGapTag returns. It cannot pair (nothing last tick) but it is NOT a birth.
+    bool birthReturn = true;
+    begin_tick();
+    set_view_matrix(v);
+    begin_camera_delta(0.5f);
+    write_draw_block(src.data(), kPos, kNrm, v, 0, 0, 0);
+    const bool pairedReturn =
+        patch_draw(kGapTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0,
+                   &birthReturn);
+    end_tick();
+
+    if (pairedFirst || !birthNew) {
+      ok = false;
+      Log.error("SELFTEST FAILED [birth flag]: a tag never seen before reported paired={} birth={} "
+                "(want false/true). Every first sighting would be filed as a DEFECT, and every "
+                "once-per-tick population would read PARTIAL forever.",
+                pairedFirst, birthNew);
+    }
+    if (!pairedSecond || birthSecond) {
+      ok = false;
+      Log.error("SELFTEST FAILED [birth flag]: the same tag one tick later reported paired={} "
+                "birth={} (want true/false). A flag that stays set would exclude real draws from "
+                "the audit denominator.",
+                pairedSecond, birthSecond);
+    }
+    if (pairedReturn || birthReturn) {
+      ok = false;
+      Log.error("SELFTEST FAILED [birth flag]: a tag that drew, skipped a tick, and came back "
+                "reported paired={} birth={} (want false/false). It reads every unpaired draw as a "
+                "birth, so the audit's 100% rows would be a tautology.",
+                pairedReturn, birthReturn);
+    }
+  }
+
   reset_stats();
   if (ok) {
     Log.info("interp selftest PASSED: camera/object attribution separates a 1000-unit camera move "
              "(object delta 0) from a 50-unit object move (object delta 50) — it has been run "
              "against both classes, not just the one it is expected to find — and the discontinuity "
              "gate demonstrably FIRES on a 1000-unit teleport, so its refusal count is a real "
-             "measurement rather than a switch nobody has seen move.");
+             "measurement rather than a switch nobody has seen move. The birth flag was run "
+             "against both classes too: a never-seen tag reads birth, and a tag that drew, skipped "
+             "a tick and returned reads NOT a birth — so the audit's birth column cannot be "
+             "swallowing real gaps.");
   }
   return ok;
 }
