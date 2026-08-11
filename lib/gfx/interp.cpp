@@ -68,6 +68,12 @@ std::unordered_map<uint64_t, uint32_t> g_everSeenParts;
 long g_paired = 0;
 long g_unpaired = 0;
 long g_mismatched = 0;
+// The matrix path's misses, BY POPULATION and by cause. The audit's camera-only column is the sum
+// of three different things — an object that skipped a tick, one whose display list changed length,
+// and one refused as discontinuous — and a single number cannot say which, so a residual of 832 out
+// of 293,000 was unattributable. The vertex path already splits its misses this way; this is the
+// same split for the matrices.
+long g_popGap[256] = {}, g_popMismatch[256] = {}, g_popRefused[256] = {};
 
 // How far a paired draw's TRANSLATION moved between the two ticks, in world units. This is the
 // direct check on whether "the previous tick's matrices" really are that object's previous
@@ -359,6 +365,7 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
   const auto it = g_prev.find(tag);
   if (it == g_prev.end() || it->second.size() <= ordinal) {
     ++g_unpaired;   // new object this tick, or it drew fewer parts last tick.
+    if (!firstEverSighting) ++g_popGap[pop];
     // A BIRTH IS NOT A DEFECT, and it is the only kind of miss that can never be fixed by better
     // pairing: there is no previous pose to interpolate from. Reported separately so a population
     // that behaves perfectly does not sit at "99.7% PARTIAL" for the run's whole length because of
@@ -378,6 +385,7 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
   // unexplained visual artefact.
   if (was.vtxCount != vtxCount) {
     ++g_mismatched;
+    ++g_popMismatch[pop];
     return false;
   }
 
@@ -472,6 +480,7 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
                  od);
       }
       ++g_snappedDiscontinuity;
+      ++g_popRefused[pop];
       if (od > g_snappedDiscontinuityMax) { g_snappedDiscontinuityMax = od; }
       {
         int rb = 0;
@@ -994,6 +1003,29 @@ void report_vertex_interp() {
            "collision rather than a spacing problem.",
            g_vtxFirstSight, g_vtxGapHist[0], g_vtxGapHist[1], g_vtxGapHist[2], g_vtxGapHist[3],
            g_vtxGapHist[4], g_vtxGapHist[5], g_vtxGapHist[6], g_vtxGapHist[7], g_vtxGapHist[8]);
+  // WHY EACH POPULATION'S MATRIX RESIDUAL EXISTS. Printed only for populations that HAVE one, and
+  // with all three causes even when two are zero: "12 gaps" alone leaves the reader to assume the
+  // other two were zero rather than unmeasured.
+  {
+    bool any = false;
+    for (int p = 0; p < kMaxPop; ++p) {
+      const long total = g_popGap[p] + g_popMismatch[p] + g_popRefused[p];
+      if (total == 0) continue;
+      any = true;
+      Log.info("  matrix residual: {:<22} {} draw(s) did not pair — {} skipped a tick and came "
+               "back (the object was there before, so this is a gap the pairing table lost), {} "
+               "changed display-list length (no vertex correspondence; snapping is correct), {} "
+               "refused as discontinuous (a step change, deliberately not smeared).",
+               g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p))
+                                    : g_popName[p],
+               total, g_popGap[p], g_popMismatch[p], g_popRefused[p]);
+    }
+    if (!any) {
+      Log.info("  matrix residual: NONE — every tagged draw in every population either paired or "
+               "was a first sighting. That is the line to watch: it reading nothing is a result, "
+               "not a missing report.");
+    }
+  }
   // WHERE THE SHARED SEGMENT SITS on a count change. This does not change behaviour — a count
   // change still snaps — it says whether lerping the shared part would be sound, and for which end.
   if (g_vtxCountChanged > 0) {
