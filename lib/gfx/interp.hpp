@@ -116,6 +116,24 @@ enum class Disposition : uint8_t {
 };
 void note_disposition(uint8_t pop, Disposition d);
 
+// Did this SCREEN-SPACE draw's geometry change since the previous tick?
+//
+// `snap:2D` is reported as CORRECT on the grounds that a screen-space element has no meaningful
+// in-between. That is true of a STATIC element and false of an animating one: a wipe closing over
+// the screen, a scrolling meter, a sliding menu all have an in-between, it simply is not a
+// camera-driven one. The claim was never measured, so this measures it — per population, as a
+// commutative hash over every ortho draw's position matrix plus a count, compared tick to tick.
+// Commutative and order-free on purpose: the question is only "did anything change", and joining
+// 2D draws by ordinal is exactly the mistake this project keeps paying for.
+//
+// WHAT IT CANNOT DO, stated so the output is not over-read: it proves STILLNESS, not motion. A
+// population that never differs is certainly correct to snap. A population that differs has not
+// been shown to judder — the difference may be smooth motion (an in-between exists) or a discrete
+// content change such as a different glyph or a changed element count (none exists). Telling those
+// apart needs a per-element identity that 2D draws do not carry.
+void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
+                         uint32_t mtxPosOffset);
+
 // ── VERTEX INTERPOLATION, for geometry that DEFORMS ─────────────────────────────────────────────
 //
 // Flags and the sea ripple grid rebuild their mesh every tick. Their motion is in the VERTICES, not
@@ -137,6 +155,7 @@ void report_vertex_interp();
 // Population names, registered by the host so the report reads as systems rather than numbers.
 void name_population(uint8_t pop, const char* name);
 void report_audit();
+void report_ortho_motion();
 
 // How many population slots exist. The host allocates ids out of this space at runtime (one per
 // newly-discovered emitter site), so it needs the ceiling rather than assuming one.
