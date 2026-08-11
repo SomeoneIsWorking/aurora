@@ -172,12 +172,19 @@ private:
         // constants) so it can be sized to the workload / this points at a
         // runaway upload.
         extern const char* aurora_gfx_last_draw_desc(); // command_processor.cpp
+        // NAME THE REGION. Without it the message gives only a capacity, and identifying which of
+        // verts/uniforms/indices/storage/textureUpload that number belongs to means grepping the
+        // constants below — which is how the last one was diagnosed. The mapping is by capacity
+        // because that is the only thing a ByteBuffer knows about itself.
+        extern const char* aurora_gfx_staging_region_name(size_t capacity); // common.cpp
         std::fprintf(stderr,
-            "[aurora FATAL gfx] mapped ByteBuffer overflow: have %zu bytes "
-            "(capacity %zu), need %zu more -> %zu total. A per-frame staging "
-            "region is too small for this scene (or a runaway upload). "
+            "[aurora FATAL gfx] mapped ByteBuffer overflow: the %s staging region has %zu bytes "
+            "of its %zu-byte capacity used and needs %zu more -> %zu total. Too small for this "
+            "scene, or a runaway upload — the two look identical here, so check whether the size "
+            "is stable across frames (too small) or climbing (runaway). "
             "last draw: %s\n",
-            m_length, m_capacity, size - m_length, size, aurora_gfx_last_draw_desc());
+            aurora_gfx_staging_region_name(m_capacity), m_length, m_capacity, size - m_length, size,
+            aurora_gfx_last_draw_desc());
         abort();
       }
       // Exponential expansion to avoid O(n^2) time complexity.
@@ -200,7 +207,18 @@ namespace aurora::gfx {
 inline constexpr bool UseTextureBuffer = true;
 inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
 inline constexpr uint64_t VertexBufferSize = 3145728;    // 3mb
-inline constexpr uint64_t IndexBufferSize = 1048576;     // 1mb
+// INDEX capacity is derived from VERTEX capacity, not picked independently.
+//
+// It was 1 MB against a 3 MB vertex buffer, and that ratio cannot be right for GX geometry: the
+// indices are Uint16 (gx/pipeline.cpp), a GX vertex with indexed attributes costs about 7 bytes,
+// and fans/strips expand to roughly 2.3 indices per vertex. Filling the vertex buffer therefore
+// needs ~3 MB of indices, three times what was reserved. Pinna Park (stage 13) crashed on exactly
+// that: 1,101,044 bytes of indices against a 1,048,576-byte cap — 5% over, stable frame to frame,
+// no runaway, just a scene slightly larger than a limit that was never tied to anything.
+//
+// 4 MB covers a completely full vertex buffer with headroom and stays proportionate if either is
+// resized later.
+inline constexpr uint64_t IndexBufferSize = 4194304;     // 4mb (see above; ~1.4x VertexBufferSize)
 // Persistent geometry arena, appended AFTER the staging-mirrored storage region.
 //
 // The per-frame storage path re-uploads every indexed array every frame. Measured on Delfino:
