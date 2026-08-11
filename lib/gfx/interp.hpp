@@ -128,6 +128,19 @@ void report_vertex_interp();
 void name_population(uint8_t pop, const char* name);
 void report_audit();
 
+// How many population slots exist. The host allocates ids out of this space at runtime (one per
+// newly-discovered emitter site), so it needs the ceiling rather than assuming one.
+int max_populations();
+
+// Read one population's whole audit row into `out`, which must hold (int)Disposition::Count longs,
+// indexed by Disposition. The host's graphics registry persists these per emitter across runs,
+// which a log line cannot do: a population that appears in one stage and not the next is invisible
+// in a per-run report and obvious in a file that accumulates.
+//
+// The whole row rather than one cell, because every consumer wants the denominator too — a PAIRED
+// count on its own cannot say whether a population interpolates.
+void audit_row(uint8_t pop, long* out, int outLen);
+
 // ── BILLBOARDS ──────────────────────────────────────────────────────────────────────────────────
 //
 // Record a tagged object's WORLD position for this tick. Called by the host from the draw seam that
