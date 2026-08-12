@@ -147,7 +147,14 @@ long g_objHist[kObjBuckets] = {};
 // whether the tail is Mario running or pairing returning another object's transform.
 long g_objHistPop[256][kObjBuckets] = {};
 constexpr int kWorstDraws = 6;
-struct WorstDraw { double delta = -1.0; uint64_t tag = 0; uint32_t ordinal = 0; long tick = -1; };
+// `pop` is recorded alongside the draw because without it these lines cannot be acted on: the
+// list is global, it is printed after the per-population tails, and a reader has no way to
+// tell whether the worst draw belongs to the population they are investigating. Working out
+// that all six belonged to `shadow volume` took cross-referencing the global [1k,10k) count
+// against each population's, which happened to be unambiguous only because one population
+// had all of them.
+struct WorstDraw { double delta = -1.0; uint64_t tag = 0; uint32_t ordinal = 0; long tick = -1;
+                   int pop = 0; };
 WorstDraw g_worstDraw[kWorstDraws];
 // Counted separately because "attribution was not available" and "attribution says zero" must not
 // look alike: on the first tick, or any tick with no previous view, the camera cannot be removed.
@@ -587,7 +594,7 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
         }
       }
       if (slot >= 0) {
-        g_worstDraw[slot] = WorstDraw{od, tag, ordinal, g_tickIndex};
+        g_worstDraw[slot] = WorstDraw{od, tag, ordinal, g_tickIndex, pop};
       }
     }
   } else {
@@ -1971,8 +1978,14 @@ void report() {
       if (g_worstDraw[i].tick >= 0) {
         // The tag is (guest J3DShape << 32 | instance draw-matrix pointer), so both halves are
         // printable guest addresses — the object is identifiable, not just countable.
-        Log.info("  worst draw: {:.3f} units, shape {:#010x} instance {:#010x} ordinal {} on tick {}",
-                 g_worstDraw[i].delta, (uint32_t)(g_worstDraw[i].tag >> 32),
+        const int wp = g_worstDraw[i].pop;
+        Log.info("  worst draw: {:.3f} units, [{}] shape {:#010x} instance {:#010x} ordinal {} on "
+                 "tick {}",
+                 g_worstDraw[i].delta,
+                 g_popName[wp].empty() ? (wp == 0 ? std::string("unlabelled")
+                                                  : "pop " + std::to_string(wp))
+                                       : g_popName[wp],
+                 (uint32_t)(g_worstDraw[i].tag >> 32),
                  (uint32_t)(g_worstDraw[i].tag & 0xffffffffu), g_worstDraw[i].ordinal,
                  g_worstDraw[i].tick);
       }
