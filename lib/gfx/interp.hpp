@@ -163,7 +163,8 @@ void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
 // between two unrelated shapes is worse than snapping), or when the layout is not the one shape it
 // understands.
 bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t posOffset,
-                    bool posS16XYZ, uint8_t posFrac, const uint8_t* src, uint8_t* dst,
+                    bool posS16XYZ, uint8_t posFrac, uint64_t deformF32OffsetMask,
+                    const uint8_t* src, uint8_t* dst,
                     float alpha, uint8_t pop);
 void report_vertex_interp();
 // Population names, registered by the host so the report reads as systems rather than numbers.
