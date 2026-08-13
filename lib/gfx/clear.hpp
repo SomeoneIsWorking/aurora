@@ -9,6 +9,11 @@ struct DrawData {
   PipelineRef pipeline;
   wgpu::Color color;
   float depth = 0.f;
+  // GXCopyTex(clear=true) clears only its source rectangle. This needs an explicit discriminator:
+  // a legitimate copy rectangle can map to zero area when it lies below the visible EFB, and an
+  // empty-rectangle-as-full sentinel would turn that no-op into a destructive full clear.
+  bool rectEnabled = false;
+  ClipRect rect{};
 };
 
 constexpr uint32_t ClearPipelineConfigVersion = 2;
