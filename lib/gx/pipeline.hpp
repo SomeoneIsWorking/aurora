@@ -47,6 +47,12 @@ struct DrawData {
   uint8_t posF32XYZ;
   uint8_t posS16XYZ;
   uint8_t posFrac;
+  // Byte offsets of every DIRECT f32 component other than POS, one bit per byte offset. Deforming
+  // meshes animate more than XYZ: SMS's sea advances two texture-coordinate pairs and its flags
+  // carry ST beside each position. Interpolating positions alone makes the audit read green while
+  // those attributes still step at 30 Hz. Offsets at/above 64 are deliberately not representable;
+  // the command processor counts and reports those rather than silently claiming coverage.
+  uint64_t deformF32OffsetMask;
   // Which entries of the shader's `postex_mtx` array hold a TEXTURE matrix that must receive the
   // interpolated camera delta alongside the position matrices. Bit k = postex_mtx[k], so the bits
   // that can ever be set are MaxPnMtx..MaxPnMtx+MaxTexMtx-1 (the texture block; the low bits are

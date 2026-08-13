@@ -181,6 +181,8 @@ long g_vtxTooStale = 0;     // last sample older than the bound: snapped rather 
 long g_vtxPopPatched[256] = {};
 long g_vtxPopUnpaired[256] = {};
 long g_vtxPopCountChanged[256] = {};
+long g_vtxPopExtraDraws[256] = {};
+long g_vtxPopExtraValues[256] = {};
 long g_objHistRefused[kObjBuckets] = {};
 long g_refusedPop[256] = {};
 // WHO gets refused, by count rather than by size. The largest single refusal names the most extreme
@@ -971,11 +973,13 @@ void report_audit() {
 // ── VERTEX INTERPOLATION ────────────────────────────────────────────────────────────────────────
 namespace {
 struct VertRec {
-  std::vector<float> pos;   // vtxCount * 3, host order
+  std::vector<float> values;   // vtxCount * (XYZ + direct-f32 extras), host order
+  uint64_t extraMask = 0;
   uint64_t stamp = 0;
 };
 std::unordered_map<uint64_t, VertRec> g_vertPrev;
 long g_vtxPatched = 0, g_vtxUnpaired = 0, g_vtxCountChanged = 0;
+long g_vtxExtraDraws = 0, g_vtxExtraValues = 0;
 // Count-change alignment: of the draws whose vertex count changed, how many had their shared
 // segment at the FRONT and how many at the BACK, plus the mean per-coordinate distance of the
 // winning and losing alignment. Both sums exist so the win rate can be read against whether the
@@ -1012,13 +1016,22 @@ inline void put_be_s16(uint8_t* p, int16_t v) {
 } // namespace
 
 bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t posOffset,
-                    bool posS16XYZ, uint8_t posFrac, const uint8_t* src, uint8_t* dst,
+                    bool posS16XYZ, uint8_t posFrac, uint64_t deformF32OffsetMask,
+                    const uint8_t* src, uint8_t* dst,
                     float alpha, uint8_t pop) {
   if (tag == 0 || src == nullptr || dst == nullptr || vtxCount == 0 || stride == 0) {
     return false;
   }
   auto& rec = g_vertPrev[tag];
-  const size_t need = (size_t)vtxCount * 3;
+  // A bit marks the exact byte at which a big-endian f32 begins. Keep the offsets explicit: a
+  // direct matrix-index byte can make a later float unaligned, so a word-index mask would decode
+  // the wrong four bytes while still producing plausible numbers.
+  std::vector<uint8_t> extraOffsets;
+  for (uint32_t off = 0; off < 64; ++off) {
+    if ((deformF32OffsetMask >> off) & 1u) extraOffsets.push_back(static_cast<uint8_t>(off));
+  }
+  const size_t channels = 3 + extraOffsets.size();
+  const size_t need = (size_t)vtxCount * channels;
 
   // Read this tick's positions first — they become `prev` for the next tick either way, so a draw
   // that cannot be interpolated this time still seeds the pair for next time.
@@ -1027,13 +1040,16 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
   for (uint32_t v = 0; v < vtxCount; ++v) {
     const uint8_t* p = src + (size_t)v * stride + posOffset;
     if (posS16XYZ) {
-      cur[v * 3 + 0] = static_cast<float>(be_s16(p)) * posScale;
-      cur[v * 3 + 1] = static_cast<float>(be_s16(p + 2)) * posScale;
-      cur[v * 3 + 2] = static_cast<float>(be_s16(p + 4)) * posScale;
+      cur[v * channels + 0] = static_cast<float>(be_s16(p)) * posScale;
+      cur[v * channels + 1] = static_cast<float>(be_s16(p + 2)) * posScale;
+      cur[v * channels + 2] = static_cast<float>(be_s16(p + 4)) * posScale;
     } else {
-      cur[v * 3 + 0] = be_f32(p);
-      cur[v * 3 + 1] = be_f32(p + 4);
-      cur[v * 3 + 2] = be_f32(p + 8);
+      cur[v * channels + 0] = be_f32(p);
+      cur[v * channels + 1] = be_f32(p + 4);
+      cur[v * channels + 2] = be_f32(p + 8);
+    }
+    for (size_t i = 0; i < extraOffsets.size(); ++i) {
+      cur[v * channels + 3 + i] = be_f32(src + (size_t)v * stride + extraOffsets[i]);
     }
   }
 
@@ -1059,15 +1075,15 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
   constexpr long kMaxGap = 4;
   const long gap = g_tickIndex - rec.stamp;
   const bool consecutive = gap >= 1 && gap <= kMaxGap && rec.stamp != 0;
-  const bool sameCount = rec.pos.size() == need;
+  const bool sameCount = rec.values.size() == need && rec.extraMask == deformF32OffsetMask;
   bool patched = false;
   if (consecutive && sameCount) {
     const float ga = 1.0f - (1.0f - alpha) / (float)gap;
     for (uint32_t v = 0; v < vtxCount; ++v) {
       uint8_t* q = dst + (size_t)v * stride + posOffset;
       for (int c = 0; c < 3; ++c) {
-        const float a = rec.pos[v * 3 + c];
-        const float value = a + (cur[v * 3 + c] - a) * ga;
+        const float a = rec.values[v * channels + c];
+        const float value = a + (cur[v * channels + c] - a) * ga;
         if (posS16XYZ) {
           const float encoded = std::round(value / posScale);
           const float clamped = std::clamp(encoded, -32768.0f, 32767.0f);
@@ -1076,9 +1092,20 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
           put_be_f32(q + c * 4, value);
         }
       }
+      for (size_t i = 0; i < extraOffsets.size(); ++i) {
+        const size_t ch = v * channels + 3 + i;
+        const float value = rec.values[ch] + (cur[ch] - rec.values[ch]) * ga;
+        put_be_f32(dst + (size_t)v * stride + extraOffsets[i], value);
+      }
     }
     ++g_vtxPatched;
     ++g_vtxPopPatched[pop];
+    if (!extraOffsets.empty()) {
+      ++g_vtxExtraDraws;
+      g_vtxExtraValues += static_cast<long>(vtxCount * extraOffsets.size());
+      ++g_vtxPopExtraDraws[pop];
+      g_vtxPopExtraValues[pop] += static_cast<long>(vtxCount * extraOffsets.size());
+    }
     if (gap > 1) { ++g_vtxGapPatched; }
     patched = true;
   } else if (!consecutive) {
@@ -1107,17 +1134,18 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
     // vertices, and BOTH means are reported: if the winner's mean is not far below the loser's, the
     // shared segment is not really shared and neither alignment is usable. A win rate alone would
     // hide that, because one of two numbers is always smaller.
-    const size_t prevN = rec.pos.size() / 3;
+    const size_t prevChannels = 3 + static_cast<size_t>(std::popcount(rec.extraMask));
+    const size_t prevN = prevChannels == 0 ? 0 : rec.values.size() / prevChannels;
     const size_t m = prevN < vtxCount ? prevN : vtxCount;
     if (m > 0) {
       double pre = 0.0;
       double suf = 0.0;
       for (size_t v = 0; v < m; ++v) {
         for (int c = 0; c < 3; ++c) {
-          const double dp = (double)cur[v * 3 + c] - (double)rec.pos[v * 3 + c];
+          const double dp = (double)cur[v * channels + c] - (double)rec.values[v * prevChannels + c];
           pre += dp < 0 ? -dp : dp;
-          const double ds = (double)cur[(vtxCount - m + v) * 3 + c] -
-                            (double)rec.pos[(prevN - m + v) * 3 + c];
+          const double ds = (double)cur[(vtxCount - m + v) * channels + c] -
+                            (double)rec.values[(prevN - m + v) * prevChannels + c];
           suf += ds < 0 ? -ds : ds;
         }
       }
@@ -1135,7 +1163,8 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
     }
   }
 
-  rec.pos.swap(cur);
+  rec.values.swap(cur);
+  rec.extraMask = deformF32OffsetMask;
   rec.stamp = g_tickIndex;
   return patched;
 }
@@ -1147,12 +1176,13 @@ void report_vertex_interp() {
              "deforms' — it means no draw reached the seam, so this says nothing about coverage.");
     return;
   }
-  Log.info("vertex interpolation: {} of {} draw(s) had their POSITIONS lerped ({:.1f}%); {} had no "
+  Log.info("vertex interpolation: {} of {} draw(s) had their POSITIONS lerped ({:.1f}%); {} also "
+           "lerped {} direct-f32 attribute value(s) beyond XYZ (normals/texture coordinates); {} had no "
            "consecutive previous tick (new object, or one that skipped a tick — correctly snaps); "
            "{} changed VERTEX COUNT and were snapped deliberately rather than smeared between two "
            "unrelated meshes.",
-           g_vtxPatched, total, 100.0 * (double)g_vtxPatched / (double)total, g_vtxUnpaired,
-           g_vtxCountChanged);
+           g_vtxPatched, total, 100.0 * (double)g_vtxPatched / (double)total, g_vtxExtraDraws,
+           g_vtxExtraValues, g_vtxUnpaired, g_vtxCountChanged);
   Log.info("  of those, {} were interpolated ACROSS a skipped tick with alpha scaled by the spacing "
            "(an object that does not draw every tick still has two real samples); {} were refused "
            "for a last sample older than 4 ticks, where the older pose no longer describes anywhere "
@@ -1253,13 +1283,14 @@ void report_vertex_interp() {
   for (int p = 0; p < kMaxPop; ++p) {
     const long t = g_vtxPopPatched[p] + g_vtxPopUnpaired[p] + g_vtxPopCountChanged[p];
     if (t == 0) continue;
-    Log.info("  vertex path: {:<28} {} of {} lerped ({:.1f}%) — {} not consecutive, {} changed "
-             "vertex count",
+    Log.info("  vertex path: {:<28} {} of {} lerped ({:.1f}%) — extras: {} draw(s), {} value(s); "
+             "{} not consecutive, {} changed vertex count",
              g_popName[p].empty() ? (p == 0 ? std::string("(unlabelled)")
                                             : "pop " + std::to_string(p))
                                   : g_popName[p],
              g_vtxPopPatched[p], t, 100.0 * (double)g_vtxPopPatched[p] / (double)t,
-             g_vtxPopUnpaired[p], g_vtxPopCountChanged[p]);
+             g_vtxPopExtraDraws[p], g_vtxPopExtraValues[p], g_vtxPopUnpaired[p],
+             g_vtxPopCountChanged[p]);
   }
 }
 
@@ -1633,6 +1664,16 @@ void reset_stats() {
   g_camRefusedNoDelta = g_camRefusedBadOffset = 0;
   g_texMtxPatched = g_texMtxRefusedBadOffset = 0;
   g_texStable = g_texUnstable = g_texNoPrev = g_texSingular = g_texMultiSlot = 0;
+  g_vtxPatched = g_vtxUnpaired = g_vtxCountChanged = 0;
+  g_vtxExtraDraws = g_vtxExtraValues = 0;
+  g_vtxFirstSight = g_vtxGapPatched = g_vtxTooStale = 0;
+  g_vtxAlignPrefix = g_vtxAlignSuffix = 0;
+  g_vtxAlignWinSum = g_vtxAlignLoseSum = 0.0;
+  for (long& n : g_vtxGapHist) n = 0;
+  for (int p = 0; p < 256; ++p) {
+    g_vtxPopPatched[p] = g_vtxPopUnpaired[p] = g_vtxPopCountChanged[p] = 0;
+    g_vtxPopExtraDraws[p] = g_vtxPopExtraValues[p] = 0;
+  }
 }
 
 // Build a view matrix for a camera at world position `eye`, axis-aligned: V = [I | -eye].
@@ -1871,13 +1912,13 @@ bool selftest() {
     begin_tick();
     set_view_matrix(v);
     begin_camera_delta(0.5f);
-    const bool first = patch_vertices(kS16Tag, 1, 6, 0, true, 1, prev, out, 0.5f, 0);
+    const bool first = patch_vertices(kS16Tag, 1, 6, 0, true, 1, 0, prev, out, 0.5f, 0);
     end_tick();
     std::memcpy(out, cur, sizeof(out));
     begin_tick();
     set_view_matrix(v);
     begin_camera_delta(0.5f);
-    const bool second = patch_vertices(kS16Tag, 1, 6, 0, true, 1, cur, out, 0.5f, 0);
+    const bool second = patch_vertices(kS16Tag, 1, 6, 0, true, 1, 0, cur, out, 0.5f, 0);
     end_tick();
     const bool exact = be_s16(out) == 0 && be_s16(out + 2) == 0 && be_s16(out + 4) == 24;
     if (first || !second || !exact || std::memcmp(cur, out, sizeof(cur)) == 0) {
@@ -1886,6 +1927,42 @@ bool selftest() {
                 "(want false/true and 0,0,24). Direct signed-16 positions are either not paired, "
                 "not decoded with their VAT fraction, or not encoded back as GC big-endian values.",
                 first, second, be_s16(out), be_s16(out + 2), be_s16(out + 4));
+    }
+  }
+
+  // ── DEFORMING FLOAT ATTRIBUTES BEYOND POSITION ─────────────────────────────────────────────
+  // SMS's flags are XYZ+ST and the sea has XYZ+colour+two ST pairs. A positions-only test passes
+  // while their UV animation still steps at 30 Hz, which was the user-visible defect. Use an
+  // intentionally unaligned ST pair to prove the byte-offset mask (not word indexing) is honored.
+  {
+    reset_stats();
+    constexpr uint64_t kTag = 0xF32E57u;
+    constexpr uint16_t kStride = 21;
+    constexpr uint64_t kMask = (uint64_t{1} << 13) | (uint64_t{1} << 17);
+    uint8_t prev[kStride] = {}, cur[kStride] = {}, out[kStride] = {};
+    put_be_f32(prev + 0, 0.f); put_be_f32(prev + 4, 2.f); put_be_f32(prev + 8, 4.f);
+    put_be_f32(prev + 13, 10.f); put_be_f32(prev + 17, 20.f);
+    put_be_f32(cur + 0, 2.f); put_be_f32(cur + 4, 4.f); put_be_f32(cur + 8, 6.f);
+    put_be_f32(cur + 13, 14.f); put_be_f32(cur + 17, 28.f);
+    float v[12]; make_view_at(0, 0, 0, v);
+    begin_tick(); set_view_matrix(v); begin_camera_delta(0.5f);
+    const bool first = patch_vertices(kTag, 1, kStride, 0, false, 0, kMask,
+                                      prev, out, 0.5f, 6);
+    end_tick();
+    std::memcpy(out, cur, sizeof(out));
+    begin_tick(); set_view_matrix(v); begin_camera_delta(0.5f);
+    const bool second = patch_vertices(kTag, 1, kStride, 0, false, 0, kMask,
+                                       cur, out, 0.5f, 6);
+    end_tick();
+    const bool exact = be_f32(out + 0) == 1.f && be_f32(out + 4) == 3.f &&
+                       be_f32(out + 8) == 5.f && be_f32(out + 13) == 12.f &&
+                       be_f32(out + 17) == 24.f;
+    if (first || !second || !exact) {
+      ok = false;
+      Log.error("SELFTEST FAILED [deforming f32 attributes]: first={} second={} "
+                "XYZ=({},{},{}) ST=({},{}) (want false/true, 1,3,5 and 12,24)",
+                first, second, be_f32(out), be_f32(out + 4), be_f32(out + 8),
+                be_f32(out + 13), be_f32(out + 17));
     }
   }
 

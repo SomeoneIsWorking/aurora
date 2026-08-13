@@ -1965,6 +1965,46 @@ static void calculate_pos_layout(GXVtxFmt fmt, u16& posOffset, u8& posF32XYZ, u8
   posFrac = pf.frac;
 }
 
+static uint64_t calculate_deform_f32_layout(GXVtxFmt fmt) {
+  const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+  uint32_t off = 0;
+  uint64_t mask = 0;
+  static uint64_t unrepresentable = 0;
+  for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+    switch (g_gxState.vtxDesc[i]) {
+    case GX_NONE: break;
+    case GX_INDEX8: off += 1; break;
+    case GX_INDEX16: off += 2; break;
+    case GX_DIRECT: {
+      const auto attr = static_cast<GXAttr>(i);
+      const auto& af = vtxFmt.attrs[i];
+      const uint32_t count = comp_cnt_count(attr, af.cnt);
+      const uint32_t width = comp_type_size(attr, af.type);
+      // POS has its own f32/s16 path. CLR encodings share numeric enum values with component types
+      // but are never floating point. NRM and TEXn are the only additional float-bearing attrs.
+      if (i != GX_VA_POS && i != GX_VA_CLR0 && i != GX_VA_CLR1 && af.type == GX_F32) {
+        for (uint32_t c = 0; c < count; ++c) {
+          const uint32_t byteOff = off + c * width;
+          if (byteOff < 64) mask |= uint64_t{1} << byteOff;
+          else ++unrepresentable;
+        }
+      }
+      off += width * count;
+      break;
+    }
+    }
+  }
+  if (unrepresentable != 0) {
+    static uint64_t lastReported = 0;
+    if (unrepresentable != lastReported) {
+      lastReported = unrepresentable;
+      Log.warn("deforming f32 layout: {} component(s) landed at byte offset >=64 and are not "
+               "covered by vertex interpolation", unrepresentable);
+    }
+  }
+  return mask;
+}
+
 static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
   u32 vtxSize = 0;
   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
@@ -4773,6 +4813,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   u8 posS16XYZ = 0;
   u8 posFrac = 0;
   calculate_pos_layout(fmt, posOffset, posF32XYZ, posS16XYZ, posFrac);
+  const uint64_t deformF32OffsetMask = calculate_deform_f32_layout(fmt);
   const uint32_t texMtxCamMask = eye_space_texgen_mask(info);
   auto uniformRange = build_uniform(info, vertRange.offset, ranges);
   if (s_prof) { auto n = _pt(); sb_gx_prof_add(3, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
@@ -4801,6 +4842,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .posF32XYZ = posF32XYZ,
       .posS16XYZ = posS16XYZ,
       .posFrac = posFrac,
+      .deformF32OffsetMask = deformF32OffsetMask,
       .texMtxCamMask = texMtxCamMask,
       .pnMtxSlot = static_cast<uint8_t>(g_gxState.currentPnMtx),
   });

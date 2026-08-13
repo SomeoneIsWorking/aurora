@@ -1061,7 +1061,7 @@ bool interpolate_recorded_frame(float alpha) {
         std::vector<uint8_t> tmp(d.vertRange.size);
         memcpy(tmp.data(), frame.verts.data() + d.vertRange.offset, d.vertRange.size);
         if (interp::patch_vertices(d.tag, d.vtxCount, d.vtxStride, d.posOffset, d.posS16XYZ != 0,
-                                   d.posFrac,
+                                   d.posFrac, d.deformF32OffsetMask,
                                    frame.verts.data() + d.vertRange.offset, tmp.data(), alpha,
                                    d.pop)) {
           d.vertRange = push_verts(tmp.data(), tmp.size(), 4);
