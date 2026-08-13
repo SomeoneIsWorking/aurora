@@ -1357,6 +1357,14 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
 
   // Populate new render pass from previous
   const auto msaaSamples = prevPass.msaaSamples;
+  const bool fullRect = rect.x == 0 && rect.y == 0 && rect.width == prevPass.targetSize.width &&
+                        rect.height == prevPass.targetSize.height;
+  // A render-pass loadOp clears the whole attachment. That is faithful only for a full-EFB copy;
+  // GC clears the COPY RECTANGLE after a partial GXCopyTex. Hx_Test5 depends on this literally:
+  // it captures and clears eighty adjacent 64x64 tiles, so a full clear after tile zero makes the
+  // remaining seventy-nine captures black.
+  const bool attachmentColorClear = fullRect && clearColor && clearAlpha;
+  const bool attachmentDepthClear = fullRect && clearDepth;
   RenderPass newPass{
       .label = pass_label("EFB"),
       .colorView = prevPass.colorView,
@@ -1369,8 +1377,8 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
       .msaaSamples = msaaSamples,
       .clearColorValue = clearColorValue,
       .clearDepthValue = clearDepthValue,
-      .clearColor = clearColor && clearAlpha,
-      .clearDepth = clearDepth,
+      .clearColor = attachmentColorClear,
+      .clearDepth = attachmentDepthClear,
       .hasDepth = prevPass.hasDepth,
       .hasStencil = prevPass.hasStencil,
   };
@@ -1378,14 +1386,18 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
   current_render_passes().emplace_back(std::move(newPass));
   ++g_currentRenderPass;
 
-  if (!newPass.clearColor && (clearColor || clearAlpha)) {
-    // If we're only clearing color _or_ alpha, perform a clear draw
+  const bool drawColor = clearColor && !attachmentColorClear;
+  const bool drawAlpha = clearAlpha && !attachmentColorClear;
+  const bool drawDepth = clearDepth && !attachmentDepthClear;
+  if (drawColor || drawAlpha || drawDepth) {
+    // A partial clear, or a full clear of only color/alpha, must be a draw. LoadOp cannot express
+    // either contract. The clear shader writes depth too, so partial depth clears stay rectangular.
     push_draw_command(clear::DrawData{
         .pipeline = pipeline_ref(clear::PipelineConfig{
             .msaaSamples = msaaSamples,
-            .clearColor = clearColor,
-            .clearAlpha = clearAlpha,
-            .clearDepth = false, // Depth cleared via render attachment
+            .clearColor = drawColor,
+            .clearAlpha = drawAlpha,
+            .clearDepth = drawDepth,
         }),
         .color =
             wgpu::Color{
@@ -1393,7 +1405,10 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
                 .g = clearColorValue.y(),
                 .b = clearColorValue.z(),
                 .a = clearColorValue.w(),
-            },
+        },
+        .depth = clearDepthValue,
+        .rectEnabled = !fullRect,
+        .rect = rect,
     });
   }
   push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
