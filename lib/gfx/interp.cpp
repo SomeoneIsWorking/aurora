@@ -1001,10 +1001,19 @@ inline void put_be_f32(uint8_t* p, float f) {
   p[2] = (uint8_t)(w >> 8);
   p[3] = (uint8_t)w;
 }
+inline int16_t be_s16(const uint8_t* p) {
+  return static_cast<int16_t>((uint16_t)p[0] << 8 | p[1]);
+}
+inline void put_be_s16(uint8_t* p, int16_t v) {
+  const uint16_t u = static_cast<uint16_t>(v);
+  p[0] = static_cast<uint8_t>(u >> 8);
+  p[1] = static_cast<uint8_t>(u);
+}
 } // namespace
 
 bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t posOffset,
-                    const uint8_t* src, uint8_t* dst, float alpha, uint8_t pop) {
+                    bool posS16XYZ, uint8_t posFrac, const uint8_t* src, uint8_t* dst,
+                    float alpha, uint8_t pop) {
   if (tag == 0 || src == nullptr || dst == nullptr || vtxCount == 0 || stride == 0) {
     return false;
   }
@@ -1014,11 +1023,18 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
   // Read this tick's positions first — they become `prev` for the next tick either way, so a draw
   // that cannot be interpolated this time still seeds the pair for next time.
   std::vector<float> cur(need);
+  const float posScale = posS16XYZ ? 1.0f / static_cast<float>(1u << posFrac) : 1.0f;
   for (uint32_t v = 0; v < vtxCount; ++v) {
     const uint8_t* p = src + (size_t)v * stride + posOffset;
-    cur[v * 3 + 0] = be_f32(p);
-    cur[v * 3 + 1] = be_f32(p + 4);
-    cur[v * 3 + 2] = be_f32(p + 8);
+    if (posS16XYZ) {
+      cur[v * 3 + 0] = static_cast<float>(be_s16(p)) * posScale;
+      cur[v * 3 + 1] = static_cast<float>(be_s16(p + 2)) * posScale;
+      cur[v * 3 + 2] = static_cast<float>(be_s16(p + 4)) * posScale;
+    } else {
+      cur[v * 3 + 0] = be_f32(p);
+      cur[v * 3 + 1] = be_f32(p + 4);
+      cur[v * 3 + 2] = be_f32(p + 8);
+    }
   }
 
   // ── AN OBJECT THAT SKIPS TICKS MAY STILL INTERPOLATE, IF THE ALPHA IS SCALED ────────────────
@@ -1051,7 +1067,14 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
       uint8_t* q = dst + (size_t)v * stride + posOffset;
       for (int c = 0; c < 3; ++c) {
         const float a = rec.pos[v * 3 + c];
-        put_be_f32(q + c * 4, a + (cur[v * 3 + c] - a) * ga);
+        const float value = a + (cur[v * 3 + c] - a) * ga;
+        if (posS16XYZ) {
+          const float encoded = std::round(value / posScale);
+          const float clamped = std::clamp(encoded, -32768.0f, 32767.0f);
+          put_be_s16(q + c * 2, static_cast<int16_t>(clamped));
+        } else {
+          put_be_f32(q + c * 4, value);
+        }
       }
     }
     ++g_vtxPatched;
@@ -1582,6 +1605,7 @@ namespace {
 void reset_stats() {
   g_ent.clear();
   g_cursor.clear();
+  g_vertPrev.clear();
   g_paired = g_unpaired = g_mismatched = 0;
   g_transDeltaSum = g_transDeltaMax = 0.0;
   g_transDeltaN = 0;
@@ -1822,6 +1846,46 @@ bool selftest() {
                 "(want false/false). A tolerance with no upper bound sweeps an object across "
                 "wherever it went while nobody was looking.",
                 kMaxGapMtx + 2, pairedStale, birthStale);
+    }
+  }
+
+  // ── S16 VERTEX POSITIONS ───────────────────────────────────────────────────────────────────
+  //
+  // Far-LOD grass is direct XYZ s16 with a VAT fractional shift. It is deforming geometry, so the
+  // generic vertex path is the only honest place to reach it; accepting the draw but decoding its
+  // big-endian integers as host floats would render plausible garbage. Seed a previous pose, then
+  // require a half-step to round-trip through the same signed-16, frac=1 representation. The three
+  // axes deliberately include negative-to-positive and positive-to-negative motion.
+  {
+    reset_stats();
+    constexpr uint64_t kS16Tag = 0x51616u;
+    uint8_t prev[6] = {}, cur[6] = {}, out[6] = {};
+    const int16_t previous[3] = {-8, 8, 20};  // {-4, 4, 10} with frac=1
+    const int16_t current[3] = {8, -8, 28};   // {4, -4, 14} with frac=1
+    for (int c = 0; c < 3; ++c) {
+      put_be_s16(prev + c * 2, previous[c]);
+      put_be_s16(cur + c * 2, current[c]);
+    }
+    float v[12];
+    make_view_at(0, 0, 0, v);
+    begin_tick();
+    set_view_matrix(v);
+    begin_camera_delta(0.5f);
+    const bool first = patch_vertices(kS16Tag, 1, 6, 0, true, 1, prev, out, 0.5f, 0);
+    end_tick();
+    std::memcpy(out, cur, sizeof(out));
+    begin_tick();
+    set_view_matrix(v);
+    begin_camera_delta(0.5f);
+    const bool second = patch_vertices(kS16Tag, 1, 6, 0, true, 1, cur, out, 0.5f, 0);
+    end_tick();
+    const bool exact = be_s16(out) == 0 && be_s16(out + 2) == 0 && be_s16(out + 4) == 24;
+    if (first || !second || !exact || std::memcmp(cur, out, sizeof(cur)) == 0) {
+      ok = false;
+      Log.error("SELFTEST FAILED [s16 vertex interpolation]: first={} second={} result=({}, {}, {}) "
+                "(want false/true and 0,0,24). Direct signed-16 positions are either not paired, "
+                "not decoded with their VAT fraction, or not encoded back as GC big-endian values.",
+                first, second, be_s16(out), be_s16(out + 2), be_s16(out + 4));
     }
   }
 
