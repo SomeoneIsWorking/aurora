@@ -1936,7 +1936,8 @@ static uint32_t eye_space_texgen_mask(const gx::ShaderInfo& info) {
 // Byte offset of GX_VA_POS within a vertex record, and whether it is the one shape the vertex lerp
 // can handle: DIRECT, three components, f32. GX's attribute order is fixed (PNMTXIDX, the eight
 // TEXnMTXIDX, POS, ...), so the offset is the sum of what precedes POS under the current descriptor.
-static void calculate_pos_layout(GXVtxFmt fmt, u16& posOffset, u8& posF32XYZ) {
+static void calculate_pos_layout(GXVtxFmt fmt, u16& posOffset, u8& posF32XYZ, u8& posS16XYZ,
+                                 u8& posFrac) {
   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
   u32 off = 0;
   for (int i = GX_VA_PNMTXIDX; i < GX_VA_POS; ++i) {
@@ -1957,6 +1958,11 @@ static void calculate_pos_layout(GXVtxFmt fmt, u16& posOffset, u8& posF32XYZ) {
                pf.cnt == GX_POS_XYZ)
                   ? 1u
                   : 0u;
+  posS16XYZ = (g_gxState.vtxDesc[GX_VA_POS] == GX_DIRECT && pf.type == GX_S16 &&
+               pf.cnt == GX_POS_XYZ)
+                  ? 1u
+                  : 0u;
+  posFrac = pf.frac;
 }
 
 static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
@@ -4764,7 +4770,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // that determines it is current NOW and gone by the time the recorded frame is interpolated.
   u16 posOffset = 0;
   u8 posF32XYZ = 0;
-  calculate_pos_layout(fmt, posOffset, posF32XYZ);
+  u8 posS16XYZ = 0;
+  u8 posFrac = 0;
+  calculate_pos_layout(fmt, posOffset, posF32XYZ, posS16XYZ, posFrac);
   const uint32_t texMtxCamMask = eye_space_texgen_mask(info);
   auto uniformRange = build_uniform(info, vertRange.offset, ranges);
   if (s_prof) { auto n = _pt(); sb_gx_prof_add(3, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
@@ -4791,6 +4799,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .vtxStride = static_cast<u16>(g_gxState.lastVtxSize),
       .posOffset = posOffset,
       .posF32XYZ = posF32XYZ,
+      .posS16XYZ = posS16XYZ,
+      .posFrac = posFrac,
       .texMtxCamMask = texMtxCamMask,
       .pnMtxSlot = static_cast<uint8_t>(g_gxState.currentPnMtx),
   });

@@ -39,12 +39,14 @@ struct DrawData {
   uint8_t ortho;
   // Vertex layout, recorded so interpolation can find the POSITION floats inside each raw GC vertex
   // record without re-deriving the descriptor state, which is long gone by the time the recorded
-  // frame is patched. posOffset is the byte offset of GX_VA_POS within a vertex; posF32XYZ says the
-  // attribute is DIRECT, three components, f32 — the only shape the vertex lerp handles. Anything
-  // else and it declines rather than reinterpreting bytes it does not understand.
+  // frame is patched. posOffset is the byte offset of GX_VA_POS within a vertex. The vertex path
+  // accepts DIRECT XYZ f32 and s16 positions; the latter needs its VAT fractional shift preserved
+  // so an in-between pose is quantised back into the same GC representation the shader consumes.
   uint16_t vtxStride;
   uint16_t posOffset;
   uint8_t posF32XYZ;
+  uint8_t posS16XYZ;
+  uint8_t posFrac;
   // Which entries of the shader's `postex_mtx` array hold a TEXTURE matrix that must receive the
   // interpolated camera delta alongside the position matrices. Bit k = postex_mtx[k], so the bits
   // that can ever be set are MaxPnMtx..MaxPnMtx+MaxTexMtx-1 (the texture block; the low bits are

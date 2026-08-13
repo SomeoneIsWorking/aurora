@@ -152,8 +152,8 @@ void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
 // Flags and the sea ripple grid rebuild their mesh every tick. Their motion is in the VERTICES, not
 // in any matrix, so no amount of matrix work reaches them — this is the only thing that does.
 //
-// `src` is the tick's raw vertex bytes (big-endian GC floats, as the shader reads them) and `dst` a
-// SEPARATE buffer the caller has allocated for the interpolated emission. It must be separate: both
+// `src` is the tick's raw vertex bytes (big-endian GC f32 or s16 positions, as the shader reads
+// them) and `dst` a SEPARATE buffer the caller has allocated for the interpolated emission. It must be separate: both
 // emissions replay the same recorded passes and therefore the same vertRange, so patching in place
 // would corrupt the tick's OWN frame. Uniforms escape this because the snapshot re-pushes them;
 // vertices have no such path.
@@ -163,7 +163,8 @@ void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
 // between two unrelated shapes is worse than snapping), or when the layout is not the one shape it
 // understands.
 bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t posOffset,
-                    const uint8_t* src, uint8_t* dst, float alpha, uint8_t pop);
+                    bool posS16XYZ, uint8_t posFrac, const uint8_t* src, uint8_t* dst,
+                    float alpha, uint8_t pop);
 void report_vertex_interp();
 // Population names, registered by the host so the report reads as systems rather than numbers.
 void name_population(uint8_t pop, const char* name);

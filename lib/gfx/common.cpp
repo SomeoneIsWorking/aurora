@@ -1056,11 +1056,12 @@ bool interpolate_recorded_frame(float alpha) {
       // patching in place would corrupt the tick's own frame — uniforms escape that because the
       // snapshot re-pushes them, vertices have no such path. The snapshot's copy of this command
       // keeps the original range, so the replay emission still draws the tick exactly.
-      if (d.posF32XYZ != 0 && d.tag != 0 && d.vtxCount > 0 && d.vertRange.size > 0 &&
+      if ((d.posF32XYZ != 0 || d.posS16XYZ != 0) && d.tag != 0 && d.vtxCount > 0 && d.vertRange.size > 0 &&
           d.vertRange.offset + d.vertRange.size <= frame.verts.size()) {
         std::vector<uint8_t> tmp(d.vertRange.size);
         memcpy(tmp.data(), frame.verts.data() + d.vertRange.offset, d.vertRange.size);
-        if (interp::patch_vertices(d.tag, d.vtxCount, d.vtxStride, d.posOffset,
+        if (interp::patch_vertices(d.tag, d.vtxCount, d.vtxStride, d.posOffset, d.posS16XYZ != 0,
+                                   d.posFrac,
                                    frame.verts.data() + d.vertRange.offset, tmp.data(), alpha,
                                    d.pop)) {
           d.vertRange = push_verts(tmp.data(), tmp.size(), 4);
