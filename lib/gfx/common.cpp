@@ -588,8 +588,11 @@ std::vector<uint8_t> g_uniformShadow;
 size_t g_uniformShadowSize = 0;
 
 void force_interpolation(float alpha) {
-  g_replayForced = true;
-  g_alphaForced = alpha;
+  // Negative disables the host override. The setting is user-facing and can
+  // change from an in-game menu, so a one-way latch would make the UI say Off
+  // while replay presentation remained on for the rest of the process.
+  g_replayForced = alpha >= 0.0f;
+  g_alphaForced = g_replayForced ? alpha : -1.0f;
 }
 
 bool replay_present_enabled() noexcept {
