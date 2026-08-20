@@ -33,10 +33,12 @@
 #include "tracy/Tracy.hpp"
 
 extern "C" double g_sbGxProf[7];
-// Host hook called between the two presents of an interpolated tick, so the interpolated image is
-// SHOWN at the half-tick rather than issued back-to-back with the tick's own image. Weak: a host
-// that does not pace leaves it null and nothing sleeps.
+// Legacy two-presentation pacing hook, retained for standalone diagnostic users.
 extern "C" __attribute__((weak)) void aurora_replay_midpoint();
+// General host hook fired before each retained-snapshot sample. The host uses it to advance only
+// presentation-side state; game simulation remains untouched.
+extern "C" __attribute__((weak)) void aurora_replay_sample(float alpha, unsigned index,
+                                                            unsigned count);
 
 namespace aurora {
 static AuroraFrameSink g_frameSink = nullptr;
@@ -359,7 +361,7 @@ bool begin_frame() noexcept {
   return true;
 }
 
-// `replayEmission` marks the SECOND emission of a tick under AURORA_REPLAY_PRESENT: a packet whose
+// `replayEmission` marks an additional emission of a tick: a packet whose
 // content was installed by gfx::install_replay_snapshot rather than recorded from the game. It
 // takes the whole present path below (that is the point — presenting is what it exists to do) but
 // must skip the two steps that would consume the NEXT tick's work:
@@ -407,13 +409,16 @@ void end_frame_impl(bool replayEmission) noexcept {
       // Between finish() and end_frame(): finish() has sealed and enqueued the last pass, so every
       // pass in the packet is complete, and the staging buffer is still mapped.
       gfx::capture_replay_snapshot();
-      // Then move THIS emission to an in-between pose. The snapshot already holds the tick's true
-      // matrices, so the replay emission that follows still shows the tick exactly; only the first
-      // of the two presents is displaced backwards in time. Off by default (AURORA_INTERP_ALPHA
+      // Then move THIS emission to the first in-between pose. The snapshot already holds the tick's
+      // true matrices, so retained replay samples can independently reconstruct later poses and the
+      // final replay still shows the tick exactly. Off by default (AURORA_INTERP_ALPHA
       // unset) so the doubled present can be exercised — and its EFB idempotence checked — without
       // interpolation confusing the picture.
       if (gfx::interp_alpha() >= 0.0f) {
-        gfx::interpolate_recorded_frame(gfx::interp_alpha());
+        const unsigned count = gfx::replay_presentation_count();
+        const float alpha = count == 2 ? gfx::interp_alpha()
+                                       : 1.0f / static_cast<float>(count);
+        gfx::interpolate_recorded_frame(alpha);
       }
     }
   }
@@ -858,36 +863,36 @@ void end_frame_impl(bool replayEmission) noexcept {
 void end_frame() noexcept {
   end_frame_impl(false);
 #ifdef AURORA_ENABLE_GX
-  // AURORA_REPLAY_PRESENT=1: emit the same recorded frame a second time. The whole cycle lives
+  // Emit retained samples from the same recorded frame. The whole cycle lives
   // here rather than in the host because presenting is not something gfx::end_frame does on its
   // own — the present blit, the swapchain acquire and the frame sink all live in the callback
-  // that this function builds, so the only way to present a packet twice is to run this function
-  // twice. begin_frame() is reused as-is (swapchain acquire, EFB pass setup, imgui::new_frame);
+  // that this function builds, so each sample needs the full cycle. begin_frame() is reused as-is
+  // (swapchain acquire, EFB pass setup, imgui::new_frame);
   // install_replay_snapshot then throws away the pass it created and puts the snapshot in.
   if (!gfx::replay_present_enabled() || !gfx::has_replay_snapshot()) {
     return;
   }
-  // The host paces the gap between the two presents. vsync is off, so a present reaches the screen
-  // when it is issued: issuing both back to back and sleeping afterwards puts two images on the
-  // display a millisecond apart and then nothing for a whole tick, which is 30 fps with every frame
-  // sent twice however high the present count reads. The first image is a picture of the half-tick
-  // and belongs at the half-tick. Weak, so a host with no pacing of its own (or a headless run)
-  // simply does not sleep.
-  if (aurora_replay_midpoint != nullptr) {
-    aurora_replay_midpoint();
+  const unsigned count = gfx::replay_presentation_count();
+  for (unsigned index = 1; index < count; ++index) {
+    const float alpha = static_cast<float>(index + 1) / static_cast<float>(count);
+    if (aurora_replay_sample != nullptr) {
+      aurora_replay_sample(alpha, index, count);
+    } else if (index == 1 && count == 2 && aurora_replay_midpoint != nullptr) {
+      aurora_replay_midpoint();
+    }
+    if (!begin_frame()) {
+      return;
+    }
+    const bool finalEmission = index + 1 == count;
+    if (!gfx::install_replay_snapshot(finalEmission)) {
+      Log.fatal("Replay snapshot vanished before presentation sample {} of {}", index + 1,
+                count);
+    }
+    if (!finalEmission && gfx::interp_alpha() >= 0.0f) {
+      gfx::interpolate_recorded_frame(alpha, true);
+    }
+    end_frame_impl(true);
   }
-  if (!begin_frame()) {
-    // Paused, or the window went non-presentable between the two emissions. Nothing was opened, so
-    // there is nothing to close; the snapshot is dropped and the next tick captures a fresh one.
-    return;
-  }
-  if (!gfx::install_replay_snapshot()) {
-    // has_replay_snapshot() said yes a moment ago and nothing else consumes snapshots, so this is
-    // a broken invariant, not a runtime condition — and we are now holding an open frame that
-    // would present a blank EFB. Fail at the cause.
-    Log.fatal("Replay snapshot vanished between has_replay_snapshot() and install_replay_snapshot()");
-  }
-  end_frame_impl(true);
 #endif
 }
 } // namespace
@@ -898,6 +903,7 @@ AuroraInfo aurora_initialize(int argc, char* argv[], const AuroraConfig* config)
   return aurora::initialize(argc, argv, *config);
 }
 void aurora_shutdown() { aurora::shutdown(); }
+double aurora_display_refresh_rate() { return aurora::window::display_refresh_rate(); }
 const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(); }
 void aurora_end_frame() { aurora::end_frame(); }

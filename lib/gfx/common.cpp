@@ -61,12 +61,9 @@ static std::string pass_label(std::string_view kind) {
 
 constexpr uint64_t StagingBufferSize = UniformBufferSize + VertexBufferSize + IndexBufferSize + StorageBufferSize +
                                        (UseTextureBuffer ? TextureUploadSize : 0);
-// THREE, not two, because of the replay present (AURORA_REPLAY_PRESENT, see
-// capture_replay_snapshot below): that path emits TWO packets per game tick, and with only two
-// slots the next tick's begin_frame blocks in acquire_frame_slot until the worker has retired the
-// oldest frame — destroying the CPU/GPU overlap that the pool exists to provide. The symptom is
-// not a hang but a silent one: "60fps mode is SLOWER than 30fps". Each slot costs one staging
-// buffer (StagingBufferSize, ~101 MB with the sizes in common.hpp) plus its packet.
+// Three slots preserve overlap for capped 60. Match-refresh may emit more packets from a tick; it
+// deliberately blocks on this bounded pool instead of multiplying ~101 MB staging buffers merely
+// to queue an entire high-refresh tick at once.
 constexpr size_t FrameSlotCount = 3;
 constexpr size_t StagingBufferCount = FrameSlotCount + 3;
 
@@ -528,11 +525,12 @@ static void enqueue_pass(FramePacket& frame, size_t frameSlot, uint32_t passInde
 }
 
 // ---------------------------------------------------------------------------
-// Replay present (AURORA_REPLAY_PRESENT=1): present one recorded frame TWICE.
+// Replay presentation: present one recorded frame more than once.
 //
-// Step 2 of the interpolated-60fps ladder, and deliberately a CONTROL rather than a feature: both
-// presents of a tick carry byte-identical content, so anything that differs between them is the
-// EFB's own history and not the replay. Pass 0 is LoadOp::Load with no eager clear (see the
+// AURORA_REPLAY_PRESENT=1 remains the two-presentation diagnostic control: both presentations of a
+// tick carry byte-identical content, so anything that differs between them is the EFB's own history
+// and not the replay. Host-driven interpolation may instead retain this snapshot for several
+// display-rate samples. Pass 0 is LoadOp::Load with no eager clear (see the
 // LAZY/NO EAGER CLEAR note in begin_frame), so a replayed frame starts from the EFB as the first
 // emission LEFT it rather than as it FOUND it. Whether that is observable cannot be settled by
 // reading the code; this path is how it gets measured.
@@ -572,13 +570,22 @@ struct ReplaySnapshot {
 static ReplaySnapshot g_replaySnapshot;
 
 namespace {
-// Host-set overrides for the two interpolation knobs. They exist so the host can turn the WHOLE
+// Host-set overrides for interpolation policy. They exist so the host can turn the WHOLE
 // feature on with one switch: this is a user-facing mode, and requiring a player to set three
 // environment variables in agreement is a way to ship a broken configuration, not a knob. The env
 // vars still work and still win, because the diagnostic paths (the EFB-idempotence control, the A/B
-// runs) need to drive the two halves independently.
+// runs) need to drive the diagnostic pair independently.
 bool g_replayForced = false;
 float g_alphaForced = -1.0f;
+unsigned g_replayPresentationCount = 2;
+
+bool replay_env_enabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("AURORA_REPLAY_PRESENT");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+  }();
+  return enabled;
+}
 } // namespace
 
 // This tick's uniform bytes in ordinary cached RAM, mirrored at the same offsets as the GPU staging
@@ -595,12 +602,16 @@ void force_interpolation(float alpha) {
   g_alphaForced = g_replayForced ? alpha : -1.0f;
 }
 
+void set_replay_presentation_count(unsigned count) {
+  g_replayPresentationCount = std::clamp(count, 1u, 64u);
+}
+
 bool replay_present_enabled() noexcept {
-  static const bool s_env = [] {
-    const char* e = std::getenv("AURORA_REPLAY_PRESENT");
-    return e != nullptr && e[0] != '\0' && e[0] != '0';
-  }();
-  return s_env || g_replayForced;
+  return replay_env_enabled() || g_replayForced;
+}
+
+unsigned replay_presentation_count() noexcept {
+  return replay_env_enabled() ? 2u : (g_replayForced ? g_replayPresentationCount : 1u);
 }
 
 bool has_replay_snapshot() noexcept { return g_replaySnapshot.valid; }
@@ -635,6 +646,7 @@ namespace {
 // camera_cut.cpp). Consumed by the next interpolate_recorded_frame, which then forces alpha 1 —
 // both emissions show the tick exactly, which is a snap.
 bool g_snapNextTick = false;
+bool g_snapCurrentTick = false;
 long g_snappedTicks = 0;
 } // namespace
 
@@ -829,7 +841,7 @@ bool capture_replay_snapshot() {
 // the snapshot is where the true matrices are read from, and BEFORE end_frame, because that is when
 // the staging is unmapped. Called with the snapshot as the source and the live staging as the
 // destination, so no read ever touches write-combined memory.
-bool interpolate_recorded_frame(float alpha) {
+bool interpolate_recorded_frame(float alpha, bool resampling) {
   ZoneScoped;
   if (g_recordingFrame == nullptr) {
     Log.error("interpolate_recorded_frame: no frame is recording");
@@ -852,10 +864,13 @@ bool interpolate_recorded_frame(float alpha) {
   // viewpoint it never simulated. Force alpha 1 rather than skipping the pass, so the pairing table
   // is still filled from this tick and the tick AFTER the cut can interpolate normally — skipping
   // would leave the table holding the pre-cut pose and move the artefact one frame later.
-  const bool snapping = g_snapNextTick;
-  if (snapping) {
+  if (!resampling) {
+    g_snapCurrentTick = g_snapNextTick;
     g_snapNextTick = false;
-    ++g_snappedTicks;
+    if (g_snapCurrentTick) ++g_snappedTicks;
+  }
+  const bool snapping = g_snapCurrentTick;
+  if (snapping) {
     alpha = 1.0f;
   }
   auto& frame = *g_recordingFrame;
@@ -975,13 +990,13 @@ bool interpolate_recorded_frame(float alpha) {
     }
   }
 
-  interp::begin_tick();
+  interp::begin_tick(resampling);
   // The camera delta is computed ONCE for the tick and applied to every draw that could not be
   // paired. Without it, unpaired draws render from the current viewpoint while paired ones sit at
   // the in-between one, and the frame is drawn from two viewpoints at once — measured as worse than
   // not interpolating at all.
   interp::begin_camera_delta(alpha);
-  if (snapping) {
+  if (snapping && !resampling) {
     // Printed with the tick index so the game's declared cut can be lined up against the per-tick
     // camera measurements in interp::report(). If the snapped ticks do not coincide with the ticks
     // that measured a large camera step, then either the signal is firing on non-cuts or it is
@@ -1095,13 +1110,13 @@ bool interpolate_recorded_frame(float alpha) {
   // and pairing nothing, so every object snaps" produce the same smooth-looking log and the same
   // doubled present count.
   static long s_ticks = 0;
-  if ((++s_ticks % 300) == 0) {
+  if (!resampling && (++s_ticks % 300) == 0) {
     interp::report();
   }
   return true;
 }
 
-bool install_replay_snapshot() {
+bool install_replay_snapshot(bool consume) {
   ZoneScoped;
   if (!g_replaySnapshot.valid) {
     Log.error("install_replay_snapshot: no snapshot has been captured; the replay frame would present "
@@ -1119,7 +1134,8 @@ bool install_replay_snapshot() {
          frame.uniforms.size());
   // Discard the passes begin_frame() created (a fresh EFB pass carrying only its viewport/scissor
   // commands) — the replay's content is the snapshot, entirely.
-  frame.renderPasses = std::move(g_replaySnapshot.renderPasses);
+  frame.renderPasses = consume ? std::move(g_replaySnapshot.renderPasses)
+                               : g_replaySnapshot.renderPasses;
   const size_t uniformSize = g_replaySnapshot.uniforms.size();
   frame.uniforms.append(g_replaySnapshot.uniforms.data(), uniformSize);
   ASSERT(frame.uniforms.size() == uniformSize, "Replay uniform block landed at {} bytes, expected {}",
@@ -1127,7 +1143,9 @@ bool install_replay_snapshot() {
   // CONSUME the snapshot. A tick whose capture failed must fall back to presenting once, never to
   // re-presenting a stale frame — a stale replay is invisible on a static scene and looks like a
   // one-frame stutter on a moving one.
-  g_replaySnapshot = {};
+  if (consume) {
+    g_replaySnapshot = {};
+  }
   frame.replayEmission = true;
   // Nothing further may be recorded into this packet: finish() must find no open pass, because
   // enqueueing a pass a second time would encode it twice.

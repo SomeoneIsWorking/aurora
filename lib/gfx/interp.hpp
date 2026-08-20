@@ -39,7 +39,7 @@
 namespace aurora::gfx::interp {
 
 // Reset the per-tick pairing table's write cursor. Called once per recorded frame.
-void begin_tick();
+void begin_tick(bool resampling = false);
 
 // Record this draw's true matrices for the next tick, and, if the same object drew last tick, write
 // the interpolated matrices into `dst`. `alpha` is 0 at the previous tick's pose and 1 at this one.
