@@ -841,7 +841,8 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   g_dawnInstance->EnableBackendValidation(backend != WGPUBackendType::D3D12);
 #endif
 
-  if (!create_surface()) {
+  const bool headless = window::is_headless();
+  if (!headless && !create_surface()) {
     return false;
   }
   {
@@ -849,7 +850,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         .featureLevel = wgpu::FeatureLevel::Compatibility,
         .powerPreference = wgpu::PowerPreference::HighPerformance,
         .backendType = backend,
-        .compatibleSurface = g_surface,
+        .compatibleSurface = headless ? nullptr : g_surface,
     };
     Log.info("Requesting adapter\n  Feature level: {}\n  Power preference: {}\n  Backend: {}\n  Compatible surface: {}",
              magic_enum::enum_name(options.featureLevel), magic_enum::enum_name(options.powerPreference),
@@ -1072,21 +1073,25 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   }
   g_queue = g_device.GetQueue();
 
-  const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
-  if (status != wgpu::Status::Success) {
-    Log.error("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
-    return false;
+  wgpu::TextureFormat surfaceFormat = wgpu::TextureFormat::BGRA8Unorm;
+  wgpu::PresentMode presentMode = wgpu::PresentMode::Fifo;
+  if (!headless) {
+    const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
+    if (status != wgpu::Status::Success) {
+      Log.error("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
+      return false;
+    }
+    if (g_surfaceCapabilities.formatCount == 0) {
+      Log.error("Surface has no formats");
+      return false;
+    }
+    if (g_surfaceCapabilities.presentModeCount == 0) {
+      Log.error("Surface has no present modes");
+      return false;
+    }
+    surfaceFormat = best_surface_format();
+    presentMode = best_present_mode(g_config.vsync);
   }
-  if (g_surfaceCapabilities.formatCount == 0) {
-    Log.error("Surface has no formats");
-    return false;
-  }
-  if (g_surfaceCapabilities.presentModeCount == 0) {
-    Log.error("Surface has no present modes");
-    return false;
-  }
-  auto surfaceFormat = best_surface_format();
-  auto presentMode = best_present_mode(g_config.vsync);
   Log.info("Using surface format {}, present mode {}", magic_enum::enum_name(surfaceFormat),
            magic_enum::enum_name(presentMode));
   const auto size = window::get_window_size();
@@ -1144,7 +1149,8 @@ void release_surface() noexcept {
 
 static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight,
                                       bool force) {
-  if (!g_surface || !g_device || width == 0 || height == 0 || nativeHeight == 0 || nativeWidth == 0) {
+  if ((!g_surface && !window::is_headless()) || !g_device || width == 0 || height == 0 || nativeHeight == 0 ||
+      nativeWidth == 0) {
     return;
   }
   const bool sizeChanged = g_graphicsConfig.surfaceConfiguration.width != nativeWidth ||
