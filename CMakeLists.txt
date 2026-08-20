@@ -12,6 +12,7 @@ option(AURORA_ENABLE_DVD "Enable DVD implementation backed by nod" OFF)  # TODO:
 option(AURORA_ENABLE_CARD "Enable CARD implementation based on kabufuda" ON)
 option(AURORA_ENABLE_RMLUI "Enable HTML/CSS Based UI Library for use in end-user UI development." OFF)
 option(AURORA_CACHE_USE_ZSTD "Compress WebGPU cache entries with zstd" ON)
+option(AURORA_BUILD_TESTS "Build Aurora's own test suite" ${PROJECT_IS_TOP_LEVEL})
 
 # Specifies a cache string and previous values to forcibly migrate from
 macro(_aurora_dependency_version name value doc)
@@ -98,7 +99,7 @@ if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_subdirectory(examples)
 endif ()
 
-if (NOT CMAKE_CROSSCOMPILING)
+if (AURORA_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
   enable_testing()
   add_subdirectory(tests)
 endif ()
