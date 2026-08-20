@@ -35,6 +35,7 @@ bool create_renderer();
 void destroy_window();
 void show_window();
 AuroraWindowSize get_window_size();
+double display_refresh_rate();
 const AuroraEvent* poll_events();
 SDL_Window* get_sdl_window();
 SDL_Renderer* get_sdl_renderer();

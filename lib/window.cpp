@@ -451,6 +451,27 @@ AuroraWindowSize get_window_size() {
   };
 }
 
+double display_refresh_rate() {
+  if (g_window == nullptr) {
+    return 0.0;
+  }
+  const SDL_DisplayID display = SDL_GetDisplayForWindow(g_window);
+  if (display == 0) {
+    Log.error("SDL_GetDisplayForWindow failed while querying refresh rate: {}", SDL_GetError());
+    return 0.0;
+  }
+  const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(display);
+  if (mode == nullptr) {
+    Log.error("SDL_GetCurrentDisplayMode failed while querying refresh rate: {}", SDL_GetError());
+    return 0.0;
+  }
+  if (mode->refresh_rate_numerator > 0 && mode->refresh_rate_denominator > 0) {
+    return static_cast<double>(mode->refresh_rate_numerator) /
+           static_cast<double>(mode->refresh_rate_denominator);
+  }
+  return static_cast<double>(mode->refresh_rate);
+}
+
 SDL_Window* get_sdl_window() { return g_window; }
 
 SDL_Renderer* get_sdl_renderer() { return g_renderer; }

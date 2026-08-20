@@ -302,22 +302,23 @@ bool begin_frame();
 void finish();
 void end_frame(EndFrameCallback callback);
 
-// Replay present (AURORA_REPLAY_PRESENT=1) — re-present the frame just recorded, unchanged. Step
-// 2 of the interpolated-60fps ladder and, at this step, a control experiment: the two presents of
-// a tick are byte-identical, so any difference between them is the EFB's own history. The full
+// Replay present (AURORA_REPLAY_PRESENT=1) — re-present the frame just recorded. The diagnostic
+// path emits two byte-identical frames; the host path may retain it for several interpolation
+// samples at the display rate. The full
 // contract, and what is deliberately NOT copied, is documented at capture_replay_snapshot in
 // common.cpp. Call order per tick:
 //   finish() -> capture_replay_snapshot() -> end_frame() -> begin_frame() ->
 //   install_replay_snapshot() -> end_frame()
 bool replay_present_enabled() noexcept;
+unsigned replay_presentation_count() noexcept;
 bool has_replay_snapshot() noexcept;
 // After finish(), before end_frame(): deep-copy the recording packet's passes and shadow its whole
 // uniform region into RAM. False (and logged) if no frame is recording.
 bool capture_replay_snapshot();
-// After begin_frame() on the SECOND packet of the tick: replace that packet's passes with the
-// snapshot's, re-push the uniform block at offset 0, and enqueue every pass over this packet's own
-// deque and slot. Consumes the snapshot. False (and logged) if there is none.
-bool install_replay_snapshot();
+// After begin_frame() on a replay packet: replace that packet's passes with the snapshot's, re-push
+// the uniform block at offset 0, and enqueue every pass over this packet's own deque and slot.
+// `consume=false` retains the immutable source for another alpha; the final replay consumes it.
+bool install_replay_snapshot(bool consume = true);
 // AURORA_INTERP_ALPHA: how far the FIRST of the tick's two presents is displaced back in time.
 // 0.5 is the natural value — halfway between the previous tick's pose and this one — and gives an
 // even 60 Hz cadence. Negative (the default, meaning unset) disables interpolation entirely while
@@ -325,7 +326,7 @@ bool install_replay_snapshot();
 float interp_alpha() noexcept;
 // Between capture_replay_snapshot() and end_frame(): rewrite the recorded frame's matrices toward
 // the previous tick's, reading the true values from the snapshot and writing only to staging.
-bool interpolate_recorded_frame(float alpha);
+bool interpolate_recorded_frame(float alpha, bool resampling = false);
 // Tell the next interpolate_recorded_frame that the GAME has declared this tick's camera
 // discontinuous, so it must present the tick exactly rather than a halfway pose the game never
 // simulated. The host supplies this because aurora cannot tell a cut from fast motion by magnitude
@@ -338,6 +339,7 @@ long snapped_tick_count() noexcept;
 // eventually be half-set. AURORA_REPLAY_PRESENT / AURORA_INTERP_ALPHA still work and still win, so
 // the diagnostic runs that need the two halves driven independently are unaffected.
 void force_interpolation(float alpha);
+void set_replay_presentation_count(unsigned count);
 
 // ---- CROSS-FRAME vs INTRA-FRAME EFB COPIES, decided from the frame itself -----------------------
 // An EFB copy's DESTINATION says nothing about whether its consumer is this frame or the next, and

@@ -73,6 +73,17 @@ struct Entry {
 // and the one-tick rule was approximating a spacing that was not there.
 std::unordered_map<uint64_t, std::vector<Entry>> g_ent;
 
+struct DrawSample {
+  Entry previous{};
+  Entry current{};
+  long gap = -1;
+  bool paired = false;
+  bool firstEverSighting = false;
+  int stableTexIndex = -1;
+};
+std::unordered_map<uint64_t, std::vector<DrawSample>> g_drawSamples;
+bool g_resampling = false;
+
 // How stale a sample may be before the older pose stops describing anywhere the object has recently
 // been. Past this a snap is safer than a sweep across whatever happened while nobody was looking.
 // The same bound the vertex path uses, deliberately: two paths disagreeing about how old is too old
@@ -257,6 +268,10 @@ float g_invViewCur[12];
 float g_invViewPrev[12];
 bool g_haveInvCur = false;
 bool g_haveInvPrev = false;
+float g_sampleViewCur[12];
+float g_sampleViewPrev[12];
+float g_sampleInvViewCur[12];
+bool g_sampleCameraValid = false;
 
 // ---- PER-TICK CAMERA MOTION --------------------------------------------------------------------
 // The camera's own step between ticks, which is the quantity the cut hypothesis is about. Kept as a
@@ -341,10 +356,45 @@ bool affine_inverse(const float* m, float* out) {
 }
 } // namespace
 
-void begin_tick() {
+void begin_tick(bool resampling) {
+  g_resampling = resampling;
   // The sample table is NOT cleared: it is the per-object history a gapped pair reads from. Only the
   // per-tick ordinal cursor resets.
   g_cursor.clear();
+  if (!resampling) {
+    g_drawSamples.clear();
+  }
+}
+
+bool apply_draw_sample(const DrawSample& sample, uint8_t* dst, uint32_t uniformSize,
+                       uint32_t mtxPosOffset, uint32_t mtxNrmOffset, float alpha,
+                       uint32_t pnMtxSlot) {
+  if (!sample.paired) {
+    return false;
+  }
+  const float a = 1.0f - (1.0f - alpha) / static_cast<float>(sample.gap);
+  const float b = 1.0f - a;
+  auto* outPos = reinterpret_cast<float*>(dst + mtxPosOffset);
+  auto* outNrm = reinterpret_cast<float*>(dst + mtxNrmOffset);
+  for (uint32_t i = 0; i < kMtxFloats; ++i) {
+    outPos[i] = sample.previous.pos[i] * b + sample.current.pos[i] * a;
+    outNrm[i] = sample.previous.nrm[i] * b + sample.current.nrm[i] * a;
+  }
+  if (sample.stableTexIndex >= 0 && pnMtxSlot < 10) {
+    const uint32_t off = mtxPosOffset +
+                         static_cast<uint32_t>(sample.stableTexIndex) * kOneMtxBytes;
+    if (off + kOneMtxBytes <= uniformSize) {
+      float lerpPn[12];
+      for (int e = 0; e < 12; ++e) {
+        lerpPn[e] = sample.previous.pos[pnMtxSlot * 12 + e] * b +
+                    sample.current.pos[pnMtxSlot * 12 + e] * a;
+      }
+      float out[12];
+      compose(sample.current.texA, lerpPn, out);
+      std::memcpy(dst + off, out, sizeof(out));
+    }
+  }
+  return true;
 }
 
 bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* dst,
@@ -392,12 +442,32 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
 
   const uint32_t ordinal = g_cursor[tag]++;
 
+  if (g_resampling) {
+    const auto it = g_drawSamples.find(tag);
+    if (it == g_drawSamples.end() || ordinal >= it->second.size()) {
+      return false;
+    }
+    const DrawSample& sample = it->second[ordinal];
+    if (outFirstEverSighting != nullptr) {
+      *outFirstEverSighting = sample.firstEverSighting;
+    }
+    return apply_draw_sample(sample, dst, uniformSize, mtxPosOffset, mtxNrmOffset, alpha,
+                             pnMtxSlot);
+  }
+
+  auto& samples = g_drawSamples[tag];
+  if (samples.size() <= ordinal) {
+    samples.resize(ordinal + 1);
+  }
+  DrawSample& sample = samples[ordinal];
+
   // HAS THIS (tag, ordinal) EVER BEEN DRAWN BEFORE IN THIS RUN? Recorded as a high-water mark per
   // tag, which costs one map entry per object rather than one per part. It is updated on every
   // call regardless of what happens below, so a draw that fails to pair for some other reason is
   // still marked as seen and cannot be reported as a birth on a later tick.
   uint32_t& everSeenParts = g_everSeenParts[tag];
   const bool firstEverSighting = ordinal >= everSeenParts;
+  sample.firstEverSighting = firstEverSighting;
   if (ordinal + 1 > everSeenParts) {
     everSeenParts = ordinal + 1;
   }
@@ -420,6 +490,9 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
   mine.objDelta = was.objDelta;
 
   const long gap = (was.stamp >= 0) ? (g_tickIndex - was.stamp) : -1;
+  sample.previous = was;
+  sample.current = mine;
+  sample.gap = gap;
   // BUCKET EVERY GAP, not only the refused ones. The first version incremented this inside the
   // refusal branch, so buckets 1-4 — exactly the recoverable range the histogram exists to size —
   // could never be reached, and the output read "no near-misses" when it meant "not counted".
@@ -475,6 +548,7 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     }
   }
   ++g_paired;
+  sample.paired = true;
   {
     const float dx = mine.pos[3] - was.pos[3];
     const float dy = mine.pos[7] - was.pos[7];
@@ -690,11 +764,13 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
             compose(mine.texA, lerpPn, out);
             std::memcpy(dst + off, out, sizeof(out));
             ++g_texStable;
+            sample.stableTexIndex = idx;
           }
         }
       }
     }
   }
+  sample.current = mine;
   return true;
 }
 
@@ -733,6 +809,7 @@ void audit_row(uint8_t pop, long* out, int outLen) {
 }
 
 void note_disposition(uint8_t pop, Disposition d) {
+  if (g_resampling) return;
   if (pop >= kMaxPop) {
     pop = 0;
   }
@@ -768,6 +845,7 @@ long g_orthoMtxDistinctSum = 0, g_orthoMtxDistinctTicks = 0, g_orthoMtxDistinctM
 
 void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
                          uint32_t mtxPosOffset, const uint8_t* verts, uint32_t vertBytes) {
+  if (g_resampling) return;
   const bool haveVerts = verts != nullptr && vertBytes > 0;
   if (pop >= kMaxPop) return;
   if (!haveVerts &&
@@ -978,6 +1056,15 @@ struct VertRec {
   uint64_t stamp = 0;
 };
 std::unordered_map<uint64_t, VertRec> g_vertPrev;
+struct VertSample {
+  std::vector<float> previous;
+  std::vector<float> current;
+  std::vector<uint8_t> extraOffsets;
+  long gap = -1;
+  size_t channels = 0;
+  bool patched = false;
+};
+std::unordered_map<uint64_t, VertSample> g_vertSamples;
 long g_vtxPatched = 0, g_vtxUnpaired = 0, g_vtxCountChanged = 0;
 long g_vtxExtraDraws = 0, g_vtxExtraValues = 0;
 // Count-change alignment: of the draws whose vertex count changed, how many had their shared
@@ -1012,6 +1099,38 @@ inline void put_be_s16(uint8_t* p, int16_t v) {
   const uint16_t u = static_cast<uint16_t>(v);
   p[0] = static_cast<uint8_t>(u >> 8);
   p[1] = static_cast<uint8_t>(u);
+}
+
+bool apply_vertex_sample(const VertSample& sample, uint32_t vtxCount, uint16_t stride,
+                         uint16_t posOffset, bool posS16XYZ, uint8_t posFrac, uint8_t* dst,
+                         float alpha) {
+  if (!sample.patched) {
+    return false;
+  }
+  const float ga = 1.0f - (1.0f - alpha) / static_cast<float>(sample.gap);
+  const float posScale = posS16XYZ ? 1.0f / static_cast<float>(1u << posFrac) : 1.0f;
+  for (uint32_t v = 0; v < vtxCount; ++v) {
+    uint8_t* q = dst + static_cast<size_t>(v) * stride + posOffset;
+    for (int c = 0; c < 3; ++c) {
+      const size_t channel = static_cast<size_t>(v) * sample.channels + c;
+      const float value = sample.previous[channel] +
+                          (sample.current[channel] - sample.previous[channel]) * ga;
+      if (posS16XYZ) {
+        const float encoded = std::round(value / posScale);
+        put_be_s16(q + c * 2,
+                   static_cast<int16_t>(std::clamp(encoded, -32768.0f, 32767.0f)));
+      } else {
+        put_be_f32(q + c * 4, value);
+      }
+    }
+    for (size_t i = 0; i < sample.extraOffsets.size(); ++i) {
+      const size_t channel = static_cast<size_t>(v) * sample.channels + 3 + i;
+      const float value = sample.previous[channel] +
+                          (sample.current[channel] - sample.previous[channel]) * ga;
+      put_be_f32(dst + static_cast<size_t>(v) * stride + sample.extraOffsets[i], value);
+    }
+  }
+  return true;
 }
 } // namespace
 
@@ -1051,6 +1170,13 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
     for (size_t i = 0; i < extraOffsets.size(); ++i) {
       cur[v * channels + 3 + i] = be_f32(src + (size_t)v * stride + extraOffsets[i]);
     }
+  }
+
+  if (g_resampling) {
+    const auto it = g_vertSamples.find(tag);
+    return it != g_vertSamples.end() &&
+           apply_vertex_sample(it->second, vtxCount, stride, posOffset, posS16XYZ, posFrac,
+                               dst, alpha);
   }
 
   // ── AN OBJECT THAT SKIPS TICKS MAY STILL INTERPOLATE, IF THE ALPHA IS SCALED ────────────────
@@ -1166,6 +1292,13 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
   rec.values.swap(cur);
   rec.extraMask = deformF32OffsetMask;
   rec.stamp = g_tickIndex;
+  VertSample& sample = g_vertSamples[tag];
+  sample.previous = cur;
+  sample.current = rec.values;
+  sample.extraOffsets = extraOffsets;
+  sample.gap = gap;
+  sample.channels = channels;
+  sample.patched = patched;
   return patched;
 }
 
@@ -1341,12 +1474,14 @@ bool patch_billboard(uint64_t tag, const uint8_t* src, uint8_t* dst, uint32_t un
     // rate. A particle whose samples exist but are not adjacent has drawn, stopped and drawn again,
     // and that is a question about the seam or about tag reuse. Counting them together makes a
     // birth rate and a defect indistinguishable.
-    if (b.stampPrev == 0) {
-      ++g_billboardBirth;
-    } else {
-      ++g_billboardGap;
+    if (!g_resampling) {
+      if (b.stampPrev == 0) {
+        ++g_billboardBirth;
+      } else {
+        ++g_billboardGap;
+      }
+      ++g_billboardUnpaired;
     }
-    ++g_billboardUnpaired;
     return false;
   }
   if (mtxPosOffset == 0 || mtxNrmOffset == 0 || mtxPosOffset + kMtxBytes > uniformSize ||
@@ -1382,7 +1517,7 @@ bool patch_billboard(uint64_t tag, const uint8_t* src, uint8_t* dst, uint32_t un
     outN[3] = outN[7] = outN[11] = 0.0f;
     std::memcpy(dstNrm + slot * 12, outN, sizeof(outN));
   }
-  ++g_billboardPatched;
+  if (!g_resampling) ++g_billboardPatched;
   return true;
 }
 
@@ -1393,6 +1528,17 @@ void set_view_matrix(const float m[12]) {
 
 bool begin_camera_delta(float alpha) {
   g_camDeltaValid = false;
+  if (g_resampling) {
+    if (!g_sampleCameraValid) {
+      return false;
+    }
+    for (int i = 0; i < 12; ++i) {
+      g_viewLerp[i] = g_sampleViewPrev[i] * (1.0f - alpha) + g_sampleViewCur[i] * alpha;
+    }
+    compose(g_viewLerp, g_sampleInvViewCur, g_camDelta);
+    g_camDeltaValid = true;
+    return true;
+  }
   ++g_tickIndex;
   // The inverses are computed here whether or not interpolation can proceed, because attribution
   // wants them independently of patching: a tick that cannot be interpolated is exactly the kind of
@@ -1468,6 +1614,7 @@ bool begin_camera_delta(float alpha) {
     g_eyeRingPos = (g_eyeRingPos + 1) % kEyeRing;
   }
   if (!g_haveViewCur || !g_haveViewPrev) {
+    g_sampleCameraValid = false;
     return false;   // first tick, or the emitter is not supplying a view: nothing to interpolate
   }
   float lerped[12];
@@ -1476,6 +1623,7 @@ bool begin_camera_delta(float alpha) {
     g_viewLerp[i] = lerped[i];
   }
   if (!g_haveInvCur) {
+    g_sampleCameraValid = false;
     static bool warned = false;
     if (!warned) {
       warned = true;
@@ -1486,6 +1634,10 @@ bool begin_camera_delta(float alpha) {
     return false;
   }
   compose(lerped, g_invViewCur, g_camDelta);
+  std::memcpy(g_sampleViewCur, g_viewCur, sizeof(g_sampleViewCur));
+  std::memcpy(g_sampleViewPrev, g_viewPrev, sizeof(g_sampleViewPrev));
+  std::memcpy(g_sampleInvViewCur, g_invViewCur, sizeof(g_sampleInvViewCur));
+  g_sampleCameraValid = true;
   g_camDeltaValid = true;
   return true;
 }
@@ -1548,12 +1700,12 @@ void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
     return;
   }
   if (!g_camDeltaValid || dst == nullptr || src == nullptr) {
-    ++g_camRefusedNoDelta;
+    if (!g_resampling) ++g_camRefusedNoDelta;
     return;
   }
   if (mtxPosOffset == 0 || mtxNrmOffset == 0 || mtxPosOffset + kMtxBytes > uniformSize ||
       mtxNrmOffset + kMtxBytes > uniformSize) {
-    ++g_camRefusedBadOffset;
+    if (!g_resampling) ++g_camRefusedBadOffset;
     return;
   }
   // EVERY READ FROM src, EVERY WRITE TO dst — the same rule patch_draw follows, and for the same
@@ -1578,7 +1730,7 @@ void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
     out[11] = srcNrm[slot * 12 + 11];
     std::memcpy(dstNrm + slot * 12, out, sizeof(out));
   }
-  ++g_cameraPatched;
+  if (!g_resampling) ++g_cameraPatched;
 
   // EYE-SPACE TEXTURE MATRICES. The position block above moved this draw's vertices to the
   // interpolated viewpoint. For a texgen sourced from GX_TG_POS the UV is computed from the RAW
@@ -1619,13 +1771,13 @@ void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
       }
       const uint32_t off = mtxPosOffset + static_cast<uint32_t>(idx) * kOneMtxBytes;
       if (off + kOneMtxBytes > uniformSize) {
-        ++g_texMtxRefusedBadOffset;
+        if (!g_resampling) ++g_texMtxRefusedBadOffset;
         continue;
       }
       float out[12];
       compose(reinterpret_cast<const float*>(src + off), g_camDelta, out);
       std::memcpy(dst + off, out, sizeof(out));
-      ++g_texMtxPatched;
+      if (!g_resampling) ++g_texMtxPatched;
     }
   }
 }
@@ -1635,8 +1787,13 @@ namespace {
 // numbers a real run reports.
 void reset_stats() {
   g_ent.clear();
+  g_drawSamples.clear();
   g_cursor.clear();
+  g_everSeenParts.clear();
   g_vertPrev.clear();
+  g_vertSamples.clear();
+  g_resampling = false;
+  g_sampleCameraValid = false;
   g_paired = g_unpaired = g_mismatched = 0;
   g_transDeltaSum = g_transDeltaMax = 0.0;
   g_transDeltaN = 0;
@@ -1966,6 +2123,45 @@ bool selftest() {
     }
   }
 
+  // ── ONE HISTORY COMMIT, MANY READ-ONLY PRESENTATION SAMPLES ────────────────────────────────
+  // Match-refresh mode may ask for four or five alphas from one SMS tick. The second sample must
+  // read the SAME previous/current pair and must not advance the tick or inflate the pairing
+  // counters. Exercise both answers: .25 and .75 must land at different positions while history
+  // and its denominator remain unchanged by the resample.
+  {
+    reset_stats();
+    constexpr uint64_t kTag = 0x52534d50u;
+    float view[12]; make_view_at(0, 0, 0, view);
+    begin_tick(); set_view_matrix(view); begin_camera_delta(0.25f);
+    write_draw_block(src.data(), kPos, kNrm, view, 0, 0, 0);
+    patch_draw(kTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.25f, 0, 0, 0);
+    end_tick();
+
+    begin_tick(); set_view_matrix(view); begin_camera_delta(0.25f);
+    write_draw_block(src.data(), kPos, kNrm, view, 40, 0, 0);
+    const bool quarter = patch_draw(kTag, 3, src.data(), dst.data(), kSize, kPos, kNrm,
+                                    0.25f, 0, 0, 0);
+    end_tick();
+    const float atQuarter = reinterpret_cast<const float*>(dst.data() + kPos)[3];
+    const long committedTick = g_tickIndex;
+    const long committedPairs = g_paired;
+
+    begin_tick(true); begin_camera_delta(0.75f);
+    const bool threeQuarter = patch_draw(kTag, 3, src.data(), dst.data(), kSize, kPos, kNrm,
+                                         0.75f, 0, 0, 0);
+    end_tick();
+    const float atThreeQuarter = reinterpret_cast<const float*>(dst.data() + kPos)[3];
+    if (!quarter || !threeQuarter || std::fabs(atQuarter - 10.0f) > 0.01f ||
+        std::fabs(atThreeQuarter - 30.0f) > 0.01f || g_tickIndex != committedTick ||
+        g_paired != committedPairs) {
+      ok = false;
+      Log.error("SELFTEST FAILED [read-only resampling]: paired={}/{} positions={}/{} tick={}/{} "
+                "pairs={}/{} (want true/true, 10/30, and unchanged history)",
+                quarter, threeQuarter, atQuarter, atThreeQuarter, committedTick, g_tickIndex,
+                committedPairs, g_paired);
+    }
+  }
+
   reset_stats();
   if (ok) {
     Log.info("interp selftest PASSED: camera/object attribution separates a 1000-unit camera move "
@@ -1976,7 +2172,9 @@ bool selftest() {
              "against both classes too: a never-seen tag reads birth, and a tag that drew, skipped "
              "a tick and returned reads NOT a birth — so the audit's birth column cannot be "
              "swallowing real gaps. The gap tolerance is bounded at both ends: a one-tick gap "
-             "PAIRS and a gap past the limit is REFUSED, both demonstrated rather than assumed.");
+             "PAIRS and a gap past the limit is REFUSED, both demonstrated rather than assumed. "
+             "Read-only resampling produces distinct .25/.75 poses from one committed pair without "
+             "advancing its tick or counters.");
   }
   return ok;
 }
@@ -1984,6 +2182,7 @@ bool selftest() {
 long tick_index() { return g_tickIndex; }
 
 void end_tick() {
+  if (g_resampling) return;
   if (g_haveViewCur) {
     std::memcpy(g_viewPrev, g_viewCur, sizeof(g_viewPrev));
     g_haveViewPrev = true;
