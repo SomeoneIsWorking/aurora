@@ -246,9 +246,13 @@ struct FramePacket {
   StagingHighWater copied;
   AuroraStats stats{};
   // This packet is a replay emission (a re-present of the previous packet's recorded content)
-  // rather than a frame the game drew. It must not publish stats, and it must not have recorded
-  // any geometry of its own — see install_replay_snapshot / end_frame.
+  // rather than a frame the game drew. It must not publish stats, and everything it records of its
+  // own (an overlay) must land above replayPrefix — see install_replay_snapshot / end_frame.
   bool replayEmission = false;
+  // Bytes of verts/indices/storage reserved for the emission this packet replays. Zero on a packet
+  // the game drew. Below these offsets the packet's own staging holds nothing meaningful: the data
+  // the copied draws read lives in the GLOBAL buffers, written by the first emission.
+  StagingHighWater replayPrefix;
 };
 
 static std::array<FramePacket, FrameSlotCount> g_framePackets;
@@ -550,12 +554,21 @@ static void enqueue_pass(FramePacket& frame, size_t frameSlot, uint32_t passInde
 //   * verts / indices / storage are NOT re-pushed. DrawData.vertRange is never read at encode
 //     time — vertex and storage data are reached through g_staticBindGroup, built once at init
 //     over the whole global buffers — and the global buffers still hold the first emission's
-//     bytes because nothing writes them in between. Pushing nothing also skips their staging
-//     copies automatically: needs_staging_copy gates on highWater > copied, and with nothing
-//     pushed both are 0. Do NOT "help" that along by pre-seeding frame.copied — a later push
-//     would then satisfy highWater <= copied, emit no copy at all, and silently draw the
-//     PREVIOUS frame's bytes. The zero-length assert in end_frame is the guard for the day this
-//     path stops being a pure copy.
+//     bytes because nothing writes them in between.
+//
+//     A replay emission is nevertheless allowed to RECORD GEOMETRY OF ITS OWN, because an overlay
+//     that must appear on every presented frame (the RmlUi settings menu draws through
+//     gfx::push_verts/push_indices) is drawn per EMISSION, not per tick — skipping it on the
+//     in-betweens would run the menu at half the present rate. What it may not do is write over the
+//     first emission's bytes, which is exactly what an unreserved packet would do: its staging
+//     starts at offset 0 and the staging copy lands at the same offsets in the global buffers.
+//     install_replay_snapshot therefore RESERVES the first emission's high-water mark in this
+//     packet's verts/indices/storage and seeds frame.copied to the same value, so a push lands
+//     above the game's bytes and the reserved prefix (which belongs to a different staging buffer
+//     and was never written here) is never copied down over them. The two seeds must move
+//     together: seeding `copied` alone would make a later push satisfy highWater <= copied, emit no
+//     copy at all and silently draw the PREVIOUS frame's bytes; reserving the buffer alone would
+//     copy this packet's garbage prefix over the real data.
 //
 //   * FrameOps are NOT copied. A FrameOp holds raw pointers into its own packet's renderPasses
 //     deque and is resolved through its frame SLOT; the original's pointers die the moment its
@@ -565,6 +578,14 @@ static void enqueue_pass(FramePacket& frame, size_t frameSlot, uint32_t passInde
 struct ReplaySnapshot {
   RenderPassList renderPasses;
   std::vector<uint8_t> uniforms;
+  // High-water marks of the emission this snapshot was taken from, rounded up to the staging copy's
+  // 4-byte granularity. A replay emission reserves these so anything it records lands ABOVE the
+  // bytes its copied draws still point at. Rounded UP because copy_staging_buffer_range aligns its
+  // start DOWN to 4: an unaligned seed would copy up to three of this packet's stale bytes over the
+  // tail of the first emission's data.
+  uint32_t verts = 0;
+  uint32_t indices = 0;
+  uint32_t storage = 0;
   bool valid = false;
 };
 static ReplaySnapshot g_replaySnapshot;
@@ -809,6 +830,9 @@ bool capture_replay_snapshot() {
   if (g_uniformShadowSize != 0) {
     memcpy(g_replaySnapshot.uniforms.data(), g_uniformShadow.data(), g_uniformShadowSize);
   }
+  g_replaySnapshot.verts = static_cast<uint32_t>(AURORA_ALIGN(frame.verts.size(), 4));
+  g_replaySnapshot.indices = static_cast<uint32_t>(AURORA_ALIGN(frame.indices.size(), 4));
+  g_replaySnapshot.storage = static_cast<uint32_t>(AURORA_ALIGN(frame.storage.size(), 4));
   g_replaySnapshot.valid = true;
   if (s_timeIt) {
     const auto tEnd = std::chrono::steady_clock::now();
@@ -990,6 +1014,15 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
     }
   }
 
+  // Can this packet's own staging be read at the range a recorded command names? On a frame the
+  // game drew, yes, up to its high-water mark. On a REPLAY emission the recorded ranges sit below
+  // replayPrefix, where this packet's staging holds another frame's leftovers rather than the
+  // vertices those commands draw (those live in the global buffer, written by the first emission) —
+  // reading them would silently interpolate garbage.
+  const auto verts_readable = [&frame](const Range& r) {
+    return r.size > 0 && r.offset >= frame.replayPrefix.verts && r.offset + r.size <= frame.verts.size();
+  };
+
   interp::begin_tick(resampling);
   // The camera delta is computed ONCE for the tick and applied to every draw that could not be
   // paired. Without it, unpaired draws render from the current viewpoint while paired ones sit at
@@ -1030,8 +1063,7 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
         // orthographic position matrix may be one matrix shared by every 2D draw in the frame, and
         // hashing that attributes one global change to every population separately — which is what
         // six unrelated sites all reading "387 of 388" turned out to be.
-        const bool haveVerts = d.posF32XYZ != 0 && d.vtxCount > 0 && d.vertRange.size > 0 &&
-                               d.vertRange.offset + d.vertRange.size <= frame.verts.size();
+        const bool haveVerts = d.posF32XYZ != 0 && d.vtxCount > 0 && verts_readable(d.vertRange);
         interp::note_ortho_geometry(d.pop, snap.data() + d.uniformRange.offset,
                                     d.uniformRange.size, d.mtxPosOffset,
                                     haveVerts ? frame.verts.data() + d.vertRange.offset : nullptr,
@@ -1074,8 +1106,7 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
       // patching in place would corrupt the tick's own frame — uniforms escape that because the
       // snapshot re-pushes them, vertices have no such path. The snapshot's copy of this command
       // keeps the original range, so the replay emission still draws the tick exactly.
-      if ((d.posF32XYZ != 0 || d.posS16XYZ != 0) && d.tag != 0 && d.vtxCount > 0 && d.vertRange.size > 0 &&
-          d.vertRange.offset + d.vertRange.size <= frame.verts.size()) {
+      if ((d.posF32XYZ != 0 || d.posS16XYZ != 0) && d.tag != 0 && d.vtxCount > 0 && verts_readable(d.vertRange)) {
         std::vector<uint8_t> tmp(d.vertRange.size);
         memcpy(tmp.data(), frame.verts.data() + d.vertRange.offset, d.vertRange.size);
         if (interp::patch_vertices(d.tag, d.vtxCount, d.vtxStride, d.posOffset, d.posS16XYZ != 0,
@@ -1140,6 +1171,20 @@ bool install_replay_snapshot(bool consume) {
   frame.uniforms.append(g_replaySnapshot.uniforms.data(), uniformSize);
   ASSERT(frame.uniforms.size() == uniformSize, "Replay uniform block landed at {} bytes, expected {}",
          frame.uniforms.size(), uniformSize);
+  // RESERVE the first emission's staging, so an overlay recorded into this packet appends above the
+  // game's bytes instead of over them, and seed `copied` to the same mark so the reserved prefix —
+  // this packet's own staging buffer, holding some other frame's leftovers — is never copied down
+  // into the global buffers the copied draws read from. See the block comment above ReplaySnapshot.
+  const auto reserve = [](ByteBuffer& buf, uint32_t& copied, uint32_t& prefix, uint32_t size) {
+    if (size != 0) {
+      (void)buf.append_uninitialized(size);
+    }
+    copied = size;
+    prefix = size;
+  };
+  reserve(frame.verts, frame.copied.verts, frame.replayPrefix.verts, g_replaySnapshot.verts);
+  reserve(frame.indices, frame.copied.indices, frame.replayPrefix.indices, g_replaySnapshot.indices);
+  reserve(frame.storage, frame.copied.storage, frame.replayPrefix.storage, g_replaySnapshot.storage);
   // CONSUME the snapshot. A tick whose capture failed must fall back to presenting once, never to
   // re-presenting a stale frame — a stale replay is invisible on a static scene and looks like a
   // one-frame stutter on a moving one.
@@ -2027,14 +2072,38 @@ void end_frame(EndFrameCallback callback) {
   }
   auto& frame = current_frame_packet();
   if (frame.replayEmission) {
-    // The replay path is a PURE COPY of the previous packet, and its copied draws point at
-    // vertex/index/storage ranges that only still mean anything because nothing wrote those global
-    // buffers in between. The moment this packet records geometry of its own, those two facts stop
-    // holding together and the frame renders one tick's vertices with another's indices — plausible
-    // garbage rather than an error. Fail at the first byte, not at the artifact.
-    ASSERT(frame.verts.size() == 0 && frame.indices.size() == 0 && frame.storage.size() == 0,
-           "Replay emission recorded geometry of its own: verts={} indices={} storage={} bytes", frame.verts.size(),
-           frame.indices.size(), frame.storage.size());
+    // The copied draws point at vertex/index/storage ranges that only still mean anything because
+    // nothing wrote those global buffers in between. An overlay recorded into this packet is fine
+    // — install_replay_snapshot reserved the first emission's high-water mark for exactly that —
+    // but a byte written BELOW that mark would land on top of the tick's own geometry and render
+    // one tick's vertices with another's indices: plausible garbage rather than an error. The
+    // staging cursors only ever move forward, so this catches a packet that reached end_frame
+    // without the reservation at all.
+    ASSERT(frame.verts.size() >= frame.replayPrefix.verts && frame.indices.size() >= frame.replayPrefix.indices &&
+               frame.storage.size() >= frame.replayPrefix.storage,
+           "Replay emission wrote below its reserved prefix: verts {}/{} indices {}/{} storage {}/{} bytes",
+           frame.verts.size(), frame.replayPrefix.verts, frame.indices.size(), frame.replayPrefix.indices,
+           frame.storage.size(), frame.replayPrefix.storage);
+    // Say it ONCE when an overlay actually rides on a replay emission. Without this the fix for
+    // "the RmlUi menu aborted the run" and a run where the menu simply never drew produce the same
+    // silence, and the reservation above would read as verified by a run that never exercised it.
+    if (frame.verts.size() > frame.replayPrefix.verts || frame.indices.size() > frame.replayPrefix.indices ||
+        frame.storage.size() > frame.replayPrefix.storage) {
+      static bool s_reported = false;
+      if (!s_reported) {
+        s_reported = true;
+        Log.info("replay emission carried its own geometry above the reserved prefix: verts +{} indices +{} storage "
+                 "+{} bytes (an overlay drawing on an in-between frame)",
+                 frame.verts.size() - frame.replayPrefix.verts, frame.indices.size() - frame.replayPrefix.indices,
+                 frame.storage.size() - frame.replayPrefix.storage);
+      }
+    }
+    ASSERT(frame.copied.verts >= frame.replayPrefix.verts && frame.copied.indices >= frame.replayPrefix.indices &&
+               frame.copied.storage >= frame.replayPrefix.storage,
+           "Replay emission is set to copy staging below its reserved prefix: verts {}/{} indices {}/{} storage "
+           "{}/{} bytes — that copy would overwrite the geometry this frame replays",
+           frame.copied.verts, frame.replayPrefix.verts, frame.copied.indices, frame.replayPrefix.indices,
+           frame.copied.storage, frame.replayPrefix.storage);
   }
   frame.stats.drawCallCount = g_drawCallCount;
   frame.stats.mergedDrawCallCount = g_mergedDrawCallCount;
