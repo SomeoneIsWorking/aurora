@@ -273,9 +273,6 @@ static Viewport g_cachedViewport;
 static ClipRect g_cachedScissor;
 
 using PresentClock = std::chrono::steady_clock;
-static constexpr auto PresentFpsWindow = std::chrono::seconds{1};
-static std::mutex g_presentStatsMutex;
-static std::deque<PresentClock::time_point> g_presentTimes;
 static std::atomic_bool g_processEventsQueued = false;
 static std::atomic_int64_t g_lastPresentNs = 0;
 static std::atomic_int64_t g_presentPeriodNs = 0;
@@ -304,12 +301,6 @@ static void update_ema(std::atomic_int64_t& value, int64_t sample) {
     if (value.compare_exchange_weak(current, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
       return;
     }
-  }
-}
-
-static void prune_present_times(PresentClock::time_point now) {
-  while (!g_presentTimes.empty() && g_presentTimes.front() + PresentFpsWindow < now) {
-    g_presentTimes.pop_front();
   }
 }
 
@@ -805,15 +796,7 @@ bool capture_replay_snapshot() {
     return false;
   }
   auto& frame = *g_recordingFrame;
-  // Sub-timers, because "the snapshot costs 13 ms" does not say WHICH half: the pass-list copy and
-  // the uniform copy have nothing in common and would be fixed differently.
-  static const bool s_timeIt = [] {
-    const char* e = std::getenv("AURORA_REPLAY_PROFILE");
-    return e != nullptr && e[0] != '\0' && e[0] != '0';
-  }();
-  const auto tStart = s_timeIt ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   g_replaySnapshot.renderPasses = frame.renderPasses;
-  const auto tPasses = s_timeIt ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   // Read from the RAM shadow, never from frame.uniforms — that is a view over write-mapped GPU
   // staging, which is write-combined, and reading ~2.85 MB of it back per tick is what made this
   // feature run the game in slow motion. push_uniform mirrors every write here at the same offset,
@@ -838,26 +821,6 @@ bool capture_replay_snapshot() {
   g_replaySnapshot.indices = static_cast<uint32_t>(AURORA_ALIGN(frame.indices.size(), 4));
   g_replaySnapshot.storage = static_cast<uint32_t>(AURORA_ALIGN(frame.storage.size(), 4));
   g_replaySnapshot.valid = true;
-  if (s_timeIt) {
-    const auto tEnd = std::chrono::steady_clock::now();
-    auto us = [](auto a, auto b) { return std::chrono::duration<double, std::micro>(b - a).count(); };
-    static double accPasses = 0, accUniforms = 0;
-    static long n = 0;
-    static size_t cmds = 0;
-    accPasses += us(tStart, tPasses);
-    accUniforms += us(tPasses, tEnd);
-    size_t c = 0;
-    for (const auto& p : g_replaySnapshot.renderPasses) {
-      c += p.commands.size();
-    }
-    cmds += c;
-    if (++n % 200 == 0) {
-      Log.info(
-          "replay snapshot avg over {} ticks: pass-list copy {:.0f} us ({} commands), uniform "
-          "copy {:.0f} us ({} B)",
-          n, accPasses / (double)n, cmds / n, accUniforms / (double)n, g_replaySnapshot.uniforms.size());
-    }
-  }
   return true;
 }
 
@@ -1701,10 +1664,6 @@ void initialize() {
   g_presentPeriodNs.store(0, std::memory_order_release);
   g_cpuFrameTimeNs.store(0, std::memory_order_release);
   g_cpuFrameStart = {};
-  {
-    std::lock_guard lock{g_presentStatsMutex};
-    g_presentTimes.clear();
-  }
   render_worker::initialize();
   // This appears to take a while and blocks the render thread for periods of time
   // render_worker::set_event_pump([] {
@@ -1849,10 +1808,6 @@ void shutdown() {
   g_presentPeriodNs.store(0, std::memory_order_release);
   g_cpuFrameTimeNs.store(0, std::memory_order_release);
   g_cpuFrameStart = {};
-  {
-    std::lock_guard lock{g_presentStatsMutex};
-    g_presentTimes.clear();
-  }
   shutdown_pipeline_cache();
   depth_peek::shutdown();
   tex_copy_conv::shutdown();
@@ -2481,24 +2436,6 @@ void after_present() noexcept {
     const double presentPeriodMs = static_cast<double>(g_presentPeriodNs.load(std::memory_order_acquire)) / 1'000'000.0;
     TracyPlot("aurora: presentPeriodMs", presentPeriodMs);
   }
-  std::lock_guard lock{g_presentStatsMutex};
-  g_presentTimes.push_back(now);
-  prune_present_times(now);
-}
-
-float calculate_fps() noexcept {
-  const auto now = PresentClock::now();
-  std::lock_guard lock{g_presentStatsMutex};
-  prune_present_times(now);
-  if (g_presentTimes.size() < 2) {
-    return 0.f;
-  }
-
-  const auto elapsed = std::chrono::duration<float>(g_presentTimes.back() - g_presentTimes.front()).count();
-  if (elapsed <= 0.f) {
-    return 0.f;
-  }
-  return static_cast<float>(g_presentTimes.size() - 1) / elapsed;
 }
 
 static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, const RenderPass& passInfo) {
@@ -2854,7 +2791,6 @@ void pop_debug_group() {
 }
 
 const AuroraStats* aurora_get_stats() { return &aurora::gfx::g_stats; }
-float aurora_get_fps() { return aurora::gfx::calculate_fps(); }
 
 namespace aurora {
 // Which mapped staging region a capacity belongs to. Used only by the overflow message in

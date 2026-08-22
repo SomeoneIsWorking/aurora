@@ -136,9 +136,7 @@ public:
     m_owned = true;
   }
 
-  void clear() {
-    m_length = 0;
-  }
+  void clear() { m_length = 0; }
 
   void reserve_extra(size_t size) { resize(m_length + size, true); }
 
@@ -178,13 +176,13 @@ private:
         // because that is the only thing a ByteBuffer knows about itself.
         extern const char* aurora_gfx_staging_region_name(size_t capacity); // common.cpp
         std::fprintf(stderr,
-            "[aurora FATAL gfx] mapped ByteBuffer overflow: the %s staging region has %zu bytes "
-            "of its %zu-byte capacity used and needs %zu more -> %zu total. Too small for this "
-            "scene, or a runaway upload — the two look identical here, so check whether the size "
-            "is stable across frames (too small) or climbing (runaway). "
-            "last draw: %s\n",
-            aurora_gfx_staging_region_name(m_capacity), m_length, m_capacity, size - m_length, size,
-            aurora_gfx_last_draw_desc());
+                     "[aurora FATAL gfx] mapped ByteBuffer overflow: the %s staging region has %zu bytes "
+                     "of its %zu-byte capacity used and needs %zu more -> %zu total. Too small for this "
+                     "scene, or a runaway upload — the two look identical here, so check whether the size "
+                     "is stable across frames (too small) or climbing (runaway). "
+                     "last draw: %s\n",
+                     aurora_gfx_staging_region_name(m_capacity), m_length, m_capacity, size - m_length, size,
+                     aurora_gfx_last_draw_desc());
         abort();
       }
       // Exponential expansion to avoid O(n^2) time complexity.
@@ -205,8 +203,8 @@ private:
 
 namespace aurora::gfx {
 inline constexpr bool UseTextureBuffer = true;
-inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
-inline constexpr uint64_t VertexBufferSize = 3145728;    // 3mb
+inline constexpr uint64_t UniformBufferSize = 25165824; // 24mb
+inline constexpr uint64_t VertexBufferSize = 3145728;   // 3mb
 // INDEX capacity is derived from VERTEX capacity, not picked independently.
 //
 // It was 1 MB against a 3 MB vertex buffer, and that ratio cannot be right for GX geometry: the
@@ -218,7 +216,7 @@ inline constexpr uint64_t VertexBufferSize = 3145728;    // 3mb
 //
 // 4 MB covers a completely full vertex buffer with headroom and stays proportionate if either is
 // resized later.
-inline constexpr uint64_t IndexBufferSize = 4194304;     // 4mb (see above; ~1.4x VertexBufferSize)
+inline constexpr uint64_t IndexBufferSize = 4194304; // 4mb (see above; ~1.4x VertexBufferSize)
 // Persistent geometry arena, appended AFTER the staging-mirrored storage region.
 //
 // The per-frame storage path re-uploads every indexed array every frame. Measured on Delfino:
@@ -233,7 +231,7 @@ inline constexpr uint64_t IndexBufferSize = 4194304;     // 4mb (see above; ~1.4
 // group binds the whole buffer with no dynamic offset and shaders index it by byte offset from a
 // uniform, so nothing about the binding changes.
 inline constexpr uint64_t PersistentStorageSize = 33554432; // 32mb
-inline constexpr uint64_t StorageBufferSize = 50331648;  // 48mb (was 8mb, a
+inline constexpr uint64_t StorageBufferSize = 50331648;     // 48mb (was 8mb, a
 // title-era size). Measured: a single Delfino Plaza pass (SB_SKIP_GHOST=1, ghost
 // pass OFF) overflows 8MB — gameplay map geometry genuinely needs more indexed-
 // array storage per frame than the title ever did. 32MB fits the single pass
@@ -247,7 +245,7 @@ inline constexpr uint64_t StorageBufferSize = 50331648;  // 48mb (was 8mb, a
 // it over. The ghost-pass wart REMAINS the real fix; this headroom just stops
 // capacity from gating unrelated ports. The overflow fatal now prints the last
 // 16 draw identities, so a future runaway is self-diagnosing.
-inline constexpr uint64_t TextureUploadSize = 25165824;  // 24mb
+inline constexpr uint64_t TextureUploadSize = 25165824; // 24mb
 
 extern AuroraStats g_stats;
 extern uint32_t g_drawCallCount;
@@ -350,14 +348,13 @@ void set_replay_presentation_count(unsigned count);
 //
 // The property that does decide it is ORDER: if every sample of a copy's result happens at or
 // before the pass that writes it, the samples were reading the PREVIOUS frame's contents.
-void note_copy_texture_sampled(const void* dest);   // a draw sampled the copy result for `dest`
-void note_copy_resolve_dest(const void* dest);      // the pass being resolved copies into `dest`
+void note_copy_texture_sampled(const void* dest); // a draw sampled the copy result for `dest`
+void note_copy_resolve_dest(const void* dest);    // the pass being resolved copies into `dest`
 uint32_t current_frame() noexcept;
 void render_pass(const wgpu::RenderPassEncoder& pass, uint32_t idx);
 void after_submit() noexcept;
 void gpu_synchronize();
 void after_present() noexcept;
-float calculate_fps() noexcept;
 void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
                   Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat = GX_TF_RGBA8);
 
@@ -431,8 +428,8 @@ Range push_storage(const uint8_t* data, size_t length);
 // Persistent geometry arena (see PersistentStorageSize above). Uploads only when contentHash
 // differs from what the arena already holds for `key`. A returned range of size 0 means the arena
 // is full — the caller MUST fall back to push_storage, never treat it as a valid binding.
-Range push_storage_persistent(const uint8_t* data, size_t length, ArrayUploadKey key,
-                              uint64_t contentHash, bool* outUploaded);
+Range push_storage_persistent(const uint8_t* data, size_t length, ArrayUploadKey key, uint64_t contentHash,
+                              bool* outUploaded);
 uint64_t persistent_storage_used();
 size_t persistent_storage_entries();
 void persistent_storage_reset();

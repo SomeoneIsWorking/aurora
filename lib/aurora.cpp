@@ -32,13 +32,11 @@
 #include "system_info.hpp"
 #include "tracy/Tracy.hpp"
 
-extern "C" double g_sbGxProf[7];
 // Legacy two-presentation pacing hook, retained for standalone diagnostic users.
 extern "C" __attribute__((weak)) void aurora_replay_midpoint();
 // General host hook fired before each retained-snapshot sample. The host uses it to advance only
 // presentation-side state; game simulation remains untouched.
-extern "C" __attribute__((weak)) void aurora_replay_sample(float alpha, unsigned index,
-                                                            unsigned count);
+extern "C" __attribute__((weak)) void aurora_replay_sample(float alpha, unsigned index, unsigned count);
 
 namespace aurora {
 static AuroraFrameSink g_frameSink = nullptr;
@@ -68,7 +66,6 @@ void set_present_aspect(uint32_t width, uint32_t height) {
   g_presentAspectH = height;
 }
 
-
 // ---- SB_RDOC: RenderDoc in-application capture trigger ----------------------
 // SB_RDOC=<present#> arms a single-frame RenderDoc capture: present 0 = the
 // first frame ever rendered (TriggerCapture fires at init), N>0 = the frame
@@ -96,8 +93,7 @@ void sb_rdoc_init() {
     return;
   }
   auto getApi = reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(mod, "RENDERDOC_GetAPI"));
-  if (getApi == nullptr ||
-      getApi(eRENDERDOC_API_Version_1_6_0, reinterpret_cast<void**>(&s_rdocApi)) != 1) {
+  if (getApi == nullptr || getApi(eRENDERDOC_API_Version_1_6_0, reinterpret_cast<void**>(&s_rdocApi)) != 1) {
     Log.error("[rdoc] RENDERDOC_GetAPI failed");
     s_rdocTarget = -1;
     return;
@@ -374,37 +370,11 @@ bool begin_frame() noexcept {
 void end_frame_impl(bool replayEmission) noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
-  // SB_PROFILE_GFX=N: split end_frame's CPU cost into drain (GX fifo ->
-  // wgpu draw records), finish (finalize render passes), and submit (encode
-  // + hand to render worker). Localizes where the ~frame-dominating cost is.
-  static const int s_profGfx = [] { const char* e = std::getenv("SB_PROFILE_GFX"); return e ? std::atoi(e) : 0; }();
-  static long s_pn = 0; static double s_pd = 0, s_pf = 0, s_ps = 0;
-  auto pnow = [] { return std::chrono::steady_clock::now(); };
-  auto t0 = s_profGfx ? pnow() : std::chrono::steady_clock::time_point{};
   if (!replayEmission) {
     gx::fifo::drain();
   }
-  auto t1 = s_profGfx ? pnow() : std::chrono::steady_clock::time_point{};
   if (!replayEmission) {
-    {
-      // finish() costs 12 us with the replay path off and ~13 ms with it on, while the snapshot it
-      // sits next to measures under 1 ms. Time it on its own rather than keep attributing the gap
-      // to whichever neighbour is being looked at.
-      static const bool s_timeFinish = [] {
-        const char* e = std::getenv("AURORA_REPLAY_PROFILE");
-        return e != nullptr && e[0] != '\0' && e[0] != '0';
-      }();
-      const auto fa = s_timeFinish ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-      gfx::finish();
-      if (s_timeFinish) {
-        static double acc = 0;
-        static long n = 0;
-        acc += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - fa).count();
-        if (++n % 200 == 0) {
-          Log.info("gfx::finish avg over {} ticks: {:.0f} us", n, acc / (double)n);
-        }
-      }
-    }
+    gfx::finish();
     if (gfx::replay_present_enabled()) {
       // Between finish() and end_frame(): finish() has sealed and enqueued the last pass, so every
       // pass in the packet is complete, and the staging buffer is still mapped.
@@ -416,13 +386,11 @@ void end_frame_impl(bool replayEmission) noexcept {
       // interpolation confusing the picture.
       if (gfx::interp_alpha() >= 0.0f) {
         const unsigned count = gfx::replay_presentation_count();
-        const float alpha = count == 2 ? gfx::interp_alpha()
-                                       : 1.0f / static_cast<float>(count);
+        const float alpha = count == 2 ? gfx::interp_alpha() : 1.0f / static_cast<float>(count);
         gfx::interpolate_recorded_frame(alpha);
       }
     }
   }
-  auto t2 = s_profGfx ? pnow() : std::chrono::steady_clock::time_point{};
   auto imguiDrawData = imgui::freeze();
 
   const auto& presentSource = webgpu::present_source();
@@ -469,8 +437,8 @@ void end_frame_impl(bool replayEmission) noexcept {
     struct SbDumpJob {
       wgpu::Buffer buffer;
       uint32_t width = 0, height = 0;
-      bool swapRB = false;  // surface is BGRA8 -> swap R/B to emit RGBA8
-      std::string path;     // empty => deliver to the frame sink instead of a file
+      bool swapRB = false; // surface is BGRA8 -> swap R/B to emit RGBA8
+      std::string path;    // empty => deliver to the frame sink instead of a file
       AuroraFrameSink sink = nullptr;
       void* sinkUser = nullptr;
     };
@@ -503,8 +471,7 @@ void end_frame_impl(bool replayEmission) noexcept {
       if (s_dumpPath && s_dumpPath[0]) {
         const char* wait = std::getenv("SB_DUMP_FRAME_AFTER");
         s_dumpFramesLeft = wait ? std::atoi(wait) : 60;
-        Log.info("SB_DUMP_FRAME armed: dumping after {} more frames to {}",
-                 s_dumpFramesLeft, s_dumpPath);
+        Log.info("SB_DUMP_FRAME armed: dumping after {} more frames to {}", s_dumpFramesLeft, s_dumpPath);
       } else {
         s_dumpFramesLeft = -1;
       }
@@ -524,74 +491,73 @@ void end_frame_impl(bool replayEmission) noexcept {
       auto job = jobRef;
       const uint32_t bpr = ((job->width * 4 + 255) / 256) * 256;
       const uint64_t totalBytes = static_cast<uint64_t>(bpr) * job->height;
-      job->buffer.MapAsync(
-          wgpu::MapMode::Read, 0, totalBytes, wgpu::CallbackMode::AllowSpontaneous,
-          [job](wgpu::MapAsyncStatus status, wgpu::StringView) {
-            if (status != wgpu::MapAsyncStatus::Success) {
-              Log.error("SB_DUMP_FRAME map failed status={} ({})", static_cast<int>(status), job->path);
-              return;
-            }
-            const uint32_t bpr = ((job->width * 4 + 255) / 256) * 256;
-            const auto* mapped = static_cast<const uint8_t*>(
-                job->buffer.GetConstMappedRange(0, static_cast<uint64_t>(bpr) * job->height));
-            if (!mapped) {
-              Log.error("SB_DUMP_FRAME: GetConstMappedRange returned null ({})", job->path);
-              return;
-            }
-            if (job->sink != nullptr) {
-              // Repack into tightly-packed RGBA8: the mapped rows are padded to a
-              // 256-byte stride, which a consumer expecting width*4 would misread.
-              const uint32_t rowBytes = static_cast<uint32_t>(job->width) * 4;
-              std::vector<uint8_t> frame(static_cast<size_t>(rowBytes) * job->height);
-              for (uint32_t y = 0; y < job->height; ++y) {
-                const uint8_t* src = mapped + static_cast<size_t>(y) * bpr;
-                uint8_t* dst = frame.data() + static_cast<size_t>(y) * rowBytes;
-                if (job->swapRB) {
-                  for (uint32_t p = 0; p < rowBytes; p += 4) {
-                    dst[p + 0] = src[p + 2];
-                    dst[p + 1] = src[p + 1];
-                    dst[p + 2] = src[p + 0];
-                    dst[p + 3] = src[p + 3];
-                  }
-                } else {
-                  std::memcpy(dst, src, rowBytes);
-                }
-              }
-              job->sink(frame.data(), job->width, job->height, job->sinkUser);
-              job->buffer.Unmap();
-              return;
-            }
-            FILE* f = std::fopen(job->path.c_str(), "wb");
-            if (!f) {
-              Log.error("SB_DUMP_FRAME: fopen failed {}", job->path);
-            } else {
-              const uint32_t rowBytes = static_cast<size_t>(job->width) * 4;
-              std::vector<uint8_t> row;  // scratch for optional R/B swap
-              if (job->swapRB)
-                row.resize(rowBytes);
-              for (uint32_t y = 0; y < job->height; ++y) {
-                const uint8_t* src = mapped + static_cast<size_t>(y) * bpr;
-                if (job->swapRB) {
-                  // BGRA8 -> RGBA8 (swap bytes 0<->2 of each pixel)
-                  for (uint32_t p = 0; p < rowBytes; p += 4) {
-                    row[p + 0] = src[p + 2];  // R <- B
-                    row[p + 1] = src[p + 1];  // G
-                    row[p + 2] = src[p + 0];  // B <- R
-                    row[p + 3] = src[p + 3];  // A
-                  }
-                  std::fwrite(row.data(), 1, rowBytes, f);
-                } else {
-                  std::fwrite(src, 1, rowBytes, f);
-                }
-              }
-              std::fclose(f);
-              Log.info("SB_DUMP_FRAME: wrote {}x{} RGBA8{} to {} ({} bytes)",
-                       job->width, job->height,
-                       job->swapRB ? " (swapped from BGRA8)" : "", job->path,
-                       static_cast<size_t>(job->width) * job->height * 4);
-            }
-            job->buffer.Unmap();
-          });
+      job->buffer.MapAsync(wgpu::MapMode::Read, 0, totalBytes, wgpu::CallbackMode::AllowSpontaneous,
+                           [job](wgpu::MapAsyncStatus status, wgpu::StringView) {
+                             if (status != wgpu::MapAsyncStatus::Success) {
+                               Log.error("SB_DUMP_FRAME map failed status={} ({})", static_cast<int>(status),
+                                         job->path);
+                               return;
+                             }
+                             const uint32_t bpr = ((job->width * 4 + 255) / 256) * 256;
+                             const auto* mapped = static_cast<const uint8_t*>(
+                                 job->buffer.GetConstMappedRange(0, static_cast<uint64_t>(bpr) * job->height));
+                             if (!mapped) {
+                               Log.error("SB_DUMP_FRAME: GetConstMappedRange returned null ({})", job->path);
+                               return;
+                             }
+                             if (job->sink != nullptr) {
+                               // Repack into tightly-packed RGBA8: the mapped rows are padded to a
+                               // 256-byte stride, which a consumer expecting width*4 would misread.
+                               const uint32_t rowBytes = static_cast<uint32_t>(job->width) * 4;
+                               std::vector<uint8_t> frame(static_cast<size_t>(rowBytes) * job->height);
+                               for (uint32_t y = 0; y < job->height; ++y) {
+                                 const uint8_t* src = mapped + static_cast<size_t>(y) * bpr;
+                                 uint8_t* dst = frame.data() + static_cast<size_t>(y) * rowBytes;
+                                 if (job->swapRB) {
+                                   for (uint32_t p = 0; p < rowBytes; p += 4) {
+                                     dst[p + 0] = src[p + 2];
+                                     dst[p + 1] = src[p + 1];
+                                     dst[p + 2] = src[p + 0];
+                                     dst[p + 3] = src[p + 3];
+                                   }
+                                 } else {
+                                   std::memcpy(dst, src, rowBytes);
+                                 }
+                               }
+                               job->sink(frame.data(), job->width, job->height, job->sinkUser);
+                               job->buffer.Unmap();
+                               return;
+                             }
+                             FILE* f = std::fopen(job->path.c_str(), "wb");
+                             if (!f) {
+                               Log.error("SB_DUMP_FRAME: fopen failed {}", job->path);
+                             } else {
+                               const uint32_t rowBytes = static_cast<size_t>(job->width) * 4;
+                               std::vector<uint8_t> row; // scratch for optional R/B swap
+                               if (job->swapRB)
+                                 row.resize(rowBytes);
+                               for (uint32_t y = 0; y < job->height; ++y) {
+                                 const uint8_t* src = mapped + static_cast<size_t>(y) * bpr;
+                                 if (job->swapRB) {
+                                   // BGRA8 -> RGBA8 (swap bytes 0<->2 of each pixel)
+                                   for (uint32_t p = 0; p < rowBytes; p += 4) {
+                                     row[p + 0] = src[p + 2]; // R <- B
+                                     row[p + 1] = src[p + 1]; // G
+                                     row[p + 2] = src[p + 0]; // B <- R
+                                     row[p + 3] = src[p + 3]; // A
+                                   }
+                                   std::fwrite(row.data(), 1, rowBytes, f);
+                                 } else {
+                                   std::fwrite(src, 1, rowBytes, f);
+                                 }
+                               }
+                               std::fclose(f);
+                               Log.info("SB_DUMP_FRAME: wrote {}x{} RGBA8{} to {} ({} bytes)", job->width, job->height,
+                                        job->swapRB ? " (swapped from BGRA8)" : "", job->path,
+                                        static_cast<size_t>(job->width) * job->height * 4);
+                             }
+                             job->buffer.Unmap();
+                           });
     }
     s_dumpAwaitingMap.clear();
     if (s_dumpFramesLeft > 0) {
@@ -604,8 +570,7 @@ void end_frame_impl(bool replayEmission) noexcept {
       // The present-source texture is in the host surface format; if that's
       // BGRA8, the mapped bytes are B,G,R,A and must be swapped to R,G,B,A to
       // honor the "RGBA" output contract.
-      job->swapRB = (webgpu::g_graphicsConfig.surfaceConfiguration.format ==
-                     wgpu::TextureFormat::BGRA8Unorm);
+      job->swapRB = (webgpu::g_graphicsConfig.surfaceConfiguration.format == wgpu::TextureFormat::BGRA8Unorm);
       job->path = s_dumpPath;
       if (s_dumpEvery > 0) {
         job->path += "." + std::to_string(s_dumpSeq++);
@@ -642,15 +607,15 @@ void end_frame_impl(bool replayEmission) noexcept {
       };
       const wgpu::Extent3D copySize{job->width, job->height, 1};
       encoder.CopyTextureToBuffer(&srcInfo, &dstInfo, &copySize);
-      Log.info("SB_DUMP_FRAME: queued dump ({}x{}, bytesPerRow={}) -> {}",
-               job->width, job->height, bytesPerRow, job->path);
+      Log.info("SB_DUMP_FRAME: queued dump ({}x{}, bytesPerRow={}) -> {}", job->width, job->height, bytesPerRow,
+               job->path);
       s_dumpAwaitingMap.push_back(std::move(job));
       // Re-arm for the next periodic capture (EVERY=1 -> a dump at every
       // present: the countdown consumes one present per unit), or disarm
       // for the one-shot.
       s_dumpFramesLeft = s_dumpEvery > 0 ? s_dumpEvery - 1 : -1;
       if (s_dumpCount > 0 && s_dumpSeq >= s_dumpCount) {
-        s_dumpFramesLeft = -1;   // series complete; disarm
+        s_dumpFramesLeft = -1; // series complete; disarm
         Log.info("SB_DUMP_FRAME: series complete after {} dumps (SB_DUMP_FRAME_COUNT)", s_dumpSeq);
       }
     }
@@ -660,10 +625,9 @@ void end_frame_impl(bool replayEmission) noexcept {
       auto job = std::make_shared<SbDumpJob>();
       job->width = src.size.width;
       job->height = src.size.height;
-      job->swapRB = (webgpu::g_graphicsConfig.surfaceConfiguration.format ==
-                     wgpu::TextureFormat::BGRA8Unorm);
+      job->swapRB = (webgpu::g_graphicsConfig.surfaceConfiguration.format == wgpu::TextureFormat::BGRA8Unorm);
       job->sink = g_frameSink;
-      job->sinkUser = g_frameSinkUser;   // path stays empty: routed to the sink
+      job->sinkUser = g_frameSinkUser; // path stays empty: routed to the sink
       const uint32_t bytesPerRow = ((job->width * 4 + 255) / 256) * 256;
       const wgpu::BufferDescriptor bd{
           .label = "frame sink readback",
@@ -672,7 +636,9 @@ void end_frame_impl(bool replayEmission) noexcept {
       };
       job->buffer = webgpu::g_device.CreateBuffer(&bd);
       const wgpu::TexelCopyTextureInfo srcInfo{
-          .texture = src.texture, .mipLevel = 0, .origin = {0, 0, 0},
+          .texture = src.texture,
+          .mipLevel = 0,
+          .origin = {0, 0, 0},
           .aspect = wgpu::TextureAspect::All,
       };
       const wgpu::TexelCopyBufferInfo dstInfo{
@@ -838,22 +804,6 @@ void end_frame_impl(bool replayEmission) noexcept {
     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
   });
 
-  if (s_profGfx) {
-    auto t3 = pnow();
-    auto us = [](auto a, auto b) { return std::chrono::duration<double, std::micro>(b - a).count(); };
-    s_pd += us(t0, t1); s_pf += us(t1, t2); s_ps += us(t2, t3);
-    if (++s_pn >= s_profGfx) {
-      double d = s_pn;
-      std::fprintf(stderr, "[profile-gfx] frames=%ld avg μs: drain=%.0f finish=%.0f submit/record=%.0f | draws=%u merged=%u createdPipelines=%u\n"
-                   "              per-draw-build μs/frame: arrayUpload=%.0f shaderinfo+cfg=%.0f bindgroups=%.0f pipeline_ref=%.0f build_uniform=%.0f push_cmd=%.0f resolve_tex=%.0f\n",
-                   s_pn, s_pd / d, s_pf / d, s_ps / d,
-                   gfx::g_stats.drawCallCount, gfx::g_stats.mergedDrawCallCount, gfx::g_stats.createdPipelines,
-                   g_sbGxProf[5] / d, g_sbGxProf[0] / d, g_sbGxProf[1] / d, g_sbGxProf[2] / d, g_sbGxProf[3] / d, g_sbGxProf[4] / d, g_sbGxProf[6] / d);
-      s_pn = 0; s_pd = s_pf = s_ps = 0;
-      for (auto& v : g_sbGxProf) v = 0;
-    }
-  }
-
 #endif
   // SB_RDOC frame delimiter — unconditional (headless included): every
   // end_frame counts as one "present" for the capture window.
@@ -885,8 +835,7 @@ void end_frame() noexcept {
     }
     const bool finalEmission = index + 1 == count;
     if (!gfx::install_replay_snapshot(finalEmission)) {
-      Log.fatal("Replay snapshot vanished before presentation sample {} of {}", index + 1,
-                count);
+      Log.fatal("Replay snapshot vanished before presentation sample {} of {}", index + 1, count);
     }
     if (!finalEmission && gfx::interp_alpha() >= 0.0f) {
       gfx::interpolate_recorded_frame(alpha, true);

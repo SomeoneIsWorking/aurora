@@ -9,9 +9,8 @@
 //   uint8_t* append_uninitialized(size_t)   -- reserve n bytes, advance length, return write ptr
 //   void append<T>(const T&)                -- append one object
 //
-// Cost note (SB_PROFILE_DRAWPRIM, Delfino): this ran at 64 ns per primitive across ~45k primitives
-// a frame, 12% of draw_prim. The cost was structural rather than arithmetic — every index went in
-// through its own capacity-checked append to move two bytes, so a quad (53% of this game's
+// The cost was structural rather than arithmetic — every index went in through its own
+// capacity-checked append to move two bytes, so a quad (53% of this game's
 // primitives) paid six of them to emit twelve. Each branch now sizes its output exactly, takes the
 // tail pointer ONCE, and writes straight through it: N capacity checks per primitive become 1.
 // The emitted indices are unchanged, in the same order — asserted byte-for-byte against the
@@ -38,10 +37,9 @@ inline void idx_put1(uint8_t*& out, uint16_t a) {
 // `prim` is the GXPrimitive opcode; taken as a plain integer so this header does not drag in the
 // GX headers. FatalFn is invoked for an unsupported primitive (fail fast — never emit nothing).
 template <typename Buffer, typename FatalFn>
-uint16_t prepare_idx_buffer_impl(Buffer& buf, uint32_t prim, uint16_t vtxStart, uint16_t vtxCount,
-                                 uint32_t kQuads, uint32_t kTriangles, uint32_t kTriangleFan,
-                                 uint32_t kTriangleStrip, uint32_t kLines, uint32_t kLineStrip,
-                                 uint32_t kPoints, FatalFn&& fatal) {
+uint16_t prepare_idx_buffer_impl(Buffer& buf, uint32_t prim, uint16_t vtxStart, uint16_t vtxCount, uint32_t kQuads,
+                                 uint32_t kTriangles, uint32_t kTriangleFan, uint32_t kTriangleStrip, uint32_t kLines,
+                                 uint32_t kLineStrip, uint32_t kPoints, FatalFn&& fatal) {
   uint16_t numIndices = 0;
   if (prim == kQuads) {
     // CEILING, not `vtxCount / 4`. The loop below steps by 4 and runs once more for a trailing
