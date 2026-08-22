@@ -2077,6 +2077,7 @@ uint64_t g_pendingDrawTag = 0;
 uint8_t g_pendingDrawPop = 0;
 uint8_t g_pendingDrawExact = 0;
 uint8_t g_pendingDrawIndexedDeform = 0;
+std::vector<uint64_t> g_pendingDrawIndexedKeys;
 // Coverage, so "tagging is on" can be distinguished from "tagging is silently doing nothing".
 long g_taggedDrawCount = 0;
 long g_untaggedDrawCount = 0;
@@ -4824,8 +4825,16 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
            "desc={} cnt={} type={} le={} stride={} bytes={}",
            static_cast<int>(posDesc), static_cast<int>(posFmt.cnt), static_cast<int>(posFmt.type), posArray.le,
            posArray.stride, posBytes);
+    if (!g_pendingDrawIndexedKeys.empty()) {
+      const uint32_t positionCount = posBytes / posArray.stride;
+      ASSERT(positionCount == g_pendingDrawIndexedKeys.size() * 4,
+             "GX_AURORA_DRAW_INDEXED_KEYS supplied {} quad keys for {} indexed positions; expected exactly four "
+             "positions per key",
+             g_pendingDrawIndexedKeys.size(), positionCount);
+    }
     indexedPosSample = gfx::indexed_interp::capture(g_pendingDrawTag, static_cast<const uint8_t*>(posArray.data),
-                                                    posBytes, static_cast<uint16_t>(posArray.stride), g_pendingDrawPop);
+                                                    posBytes, static_cast<uint16_t>(posArray.stride), g_pendingDrawPop,
+                                                    g_pendingDrawIndexedKeys);
     ASSERT(indexedPosSample != 0, "failed to capture marked indexed position array");
   }
   gfx::push_draw_command(DrawData{
@@ -4867,6 +4876,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // matches what the flag means.
   g_pendingDrawExact = 0;
   g_pendingDrawIndexedDeform = 0;
+  g_pendingDrawIndexedKeys.clear();
   if (g_pendingDrawTag != 0) {
     ++g_taggedDrawCount;
   } else {
@@ -5093,6 +5103,22 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     // elements and material passes that turns out to be. The emitter is responsible for tagging
     // again when it moves to the next object.
     g_pendingDrawTag = tag;
+  } else if (subCmd == GX_AURORA_DRAW_INDEXED_KEYS) {
+    CHECK(pos + 2 <= size, "GX_AURORA_DRAW_INDEXED_KEYS count read overrun");
+    const uint16_t count = read_u16(data + pos, bigEndian);
+    pos += 2;
+    CHECK(count != 0, "GX_AURORA_DRAW_INDEXED_KEYS requires at least one key");
+    CHECK(pos + static_cast<uint32_t>(count) * 8 <= size, "GX_AURORA_DRAW_INDEXED_KEYS payload read overrun");
+    CHECK(g_pendingDrawIndexedKeys.empty(),
+          "GX_AURORA_DRAW_INDEXED_KEYS replaced an unconsumed key list; every list must precede exactly one "
+          "indexed-deform draw");
+    g_pendingDrawIndexedKeys.reserve(count);
+    for (uint16_t i = 0; i < count; ++i) {
+      const uint64_t key = read_u64(data + pos, bigEndian);
+      pos += 8;
+      CHECK(key != 0, "GX_AURORA_DRAW_INDEXED_KEYS key {} is zero", i);
+      g_pendingDrawIndexedKeys.push_back(key);
+    }
   } else if (subCmd == GX_AURORA_DRAW_POP) {
     CHECK(pos + 1 <= size, "GX_AURORA_DRAW_POP read overrun");
     g_pendingDrawPop = data[pos];

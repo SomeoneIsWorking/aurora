@@ -56,10 +56,9 @@ void begin_tick(bool resampling = false);
 // object, or a vertex-count mismatch) is left untouched, and the caller MUST then give it the
 // camera-only treatment — otherwise it sits at the current viewpoint while the rest of the frame
 // does not, which is the same tearing failure as an untagged draw.
-bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* dst,
-                uint32_t uniformSize, uint32_t mtxPosOffset, uint32_t mtxNrmOffset, float alpha,
-                uint32_t texMtxCamMask, uint32_t pnMtxSlot, uint8_t pop,
-                bool* outFirstEverSighting = nullptr);
+bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
+                uint32_t mtxPosOffset, uint32_t mtxNrmOffset, float alpha, uint32_t texMtxCamMask, uint32_t pnMtxSlot,
+                uint8_t pop, bool* outFirstEverSighting = nullptr);
 
 // The view matrix in force for this tick, as the game built it (GC Mtx: 3 rows of 4 floats,
 // p' = M*p). Supplied by the emitter through GX_AURORA_VIEW_MTX, because aurora cannot recover it:
@@ -95,23 +94,26 @@ void set_view_matrix(const float m[12]);
 // SnappedOrtho and then, if it is patched, once more with its real outcome — so the columns sum to
 // the draw count and a population cannot fall between them unnoticed.
 enum class Disposition : uint8_t {
-  Pending = 0,      // perspective, not yet decided; becomes SnappedNoIdentity if nothing claims it
-  Paired,           // matrix lerped against the same object's previous tick — full interpolation
-  Billboard,        // position carried in vertices; its own displacement applied as a translation
-  CameraOnly,       // follows the camera but not its own motion. An UPPER BOUND on the defect:
-                    // for STATIC world geometry this is exactly correct, and no sound test to
-                    // separate the two has been built — see the note in interp.cpp
-  SnappedOrtho,     // 2D/HUD; correct, a screen-space element has no meaningful in-between
-  SnappedExact,     // declared screen-space-under-perspective by the emitter (GX_AURORA_DRAW_EXACT):
-                    // correct, and correct for a reason the ortho test cannot see
-  SnappedNoIdentity,// perspective with nothing to pair on — the honest remaining gap
-  CameraOnlyBirth,  // camera-only because this draw had NO PREVIOUS TICK TO PAIR WITH — the object,
-                    // or this part of it, is being seen for the first time in the run. Correct by
-                    // construction: an in-between frame between "did not exist" and "exists" has no
-                    // meaning. Kept apart from CameraOnly because every once-per-tick population
-                    // spends its first tick here, which pinned dozens of otherwise perfect rows at
-                    // "99.7% PARTIAL" forever — a verdict that can never read clean is not a
-                    // measurement.
+  Pending = 0,            // perspective, not yet decided; becomes SnappedNoIdentity if nothing claims it
+  Paired,                 // matrix lerped against the same object's previous tick — full interpolation
+  Billboard,              // position carried in vertices; its own displacement applied as a translation
+  CameraOnly,             // follows the camera but not its own motion. An UPPER BOUND on the defect:
+                          // for STATIC world geometry this is exactly correct, and no sound test to
+                          // separate the two has been built — see the note in interp.cpp
+  SnappedOrtho,           // 2D/HUD; correct, a screen-space element has no meaningful in-between
+  SnappedExact,           // declared screen-space-under-perspective by the emitter (GX_AURORA_DRAW_EXACT):
+                          // correct, and correct for a reason the ortho test cannot see
+  SnappedNoIdentity,      // perspective with nothing to pair on — the honest remaining gap
+  CameraOnlyBirth,        // camera-only because this draw had NO PREVIOUS TICK TO PAIR WITH — the object,
+                          // or this part of it, is being seen for the first time in the run. Correct by
+                          // construction: an in-between frame between "did not exist" and "exists" has no
+                          // meaning. Kept apart from CameraOnly because every once-per-tick population
+                          // spends its first tick here, which pinned dozens of otherwise perfect rows at
+                          // "99.7% PARTIAL" forever — a verdict that can never read clean is not a
+                          // measurement.
+  CameraOnlyReappearance, // camera-only because every surviving identity last drew too long ago
+                          // to define a continuous visible motion. Correct: interpolating across
+                          // an absence would smear a disappearance/reappearance transition.
   Count
 };
 void note_disposition(uint8_t pop, Disposition d);
@@ -144,8 +146,8 @@ void note_disposition(uint8_t pop, Disposition d);
 // most, so the matrices are per-element and the identical counts are simple saturation (each
 // differs on every tick but one). The distinct-matrix line stays in the report because that
 // reasoning has to be re-checkable in any scene, not just the one it was run in.
-void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
-                         uint32_t mtxPosOffset, const uint8_t* verts, uint32_t vertBytes);
+void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize, uint32_t mtxPosOffset,
+                         const uint8_t* verts, uint32_t vertBytes);
 
 // ── VERTEX INTERPOLATION, for geometry that DEFORMS ─────────────────────────────────────────────
 //
@@ -162,10 +164,9 @@ void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
 // COUNT changed (a mesh rebuilt at a different resolution has no correspondence, and smearing
 // between two unrelated shapes is worse than snapping), or when the layout is not the one shape it
 // understands.
-bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t posOffset,
-                    bool posS16XYZ, uint8_t posFrac, uint64_t deformF32OffsetMask,
-                    const uint8_t* src, uint8_t* dst,
-                    float alpha, uint8_t pop);
+bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t posOffset, bool posS16XYZ,
+                    uint8_t posFrac, uint64_t deformF32OffsetMask, const uint8_t* src, uint8_t* dst, float alpha,
+                    uint8_t pop);
 void report_vertex_interp();
 // Population names, registered by the host so the report reads as systems rather than numbers.
 void name_population(uint8_t pop, const char* name);
@@ -203,15 +204,15 @@ void set_tag_world_pos(uint64_t tag, float x, float y, float z);
 // interpolated displacement, as a translation, which is exact for geometry that translates without
 // deforming. Returns false when the tag has no usable prev/cur pair, in which case the caller falls
 // back to the camera delta alone exactly as before.
-bool patch_billboard(uint64_t tag, const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
-                     uint32_t mtxPosOffset, uint32_t mtxNrmOffset, float alpha);
+bool patch_billboard(uint64_t tag, const uint8_t* src, uint8_t* dst, uint32_t uniformSize, uint32_t mtxPosOffset,
+                     uint32_t mtxNrmOffset, float alpha);
 
 // texMtxCamMask: DrawData::texMtxCamMask — the texture matrices that live in EYE space and so must
 // receive the same delta as the position matrices, or 0. Without it, a position-sourced texgen
 // (SMS's water refraction) is drawn at the interpolated viewpoint while its UVs still map to the
 // tick's, so the reflection sits in the wrong place for as long as the camera is moving.
-void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
-                       uint32_t mtxPosOffset, uint32_t mtxNrmOffset, uint32_t texMtxCamMask);
+void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize, uint32_t mtxPosOffset,
+                       uint32_t mtxNrmOffset, uint32_t texMtxCamMask);
 
 // Compute this tick's camera delta from the supplied view matrices. Called once per tick, before
 // the per-draw patching. Returns false if there is no usable delta (no view supplied, or the view

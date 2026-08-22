@@ -48,13 +48,13 @@ struct Entry {
   long stamp = -1;
   float pos[kMtxFloats];
   float nrm[kMtxFloats];
-  uint32_t vtxCount;   // the consistency check — see below
+  uint32_t vtxCount; // the consistency check — see below
   // A position-sourced texture matrix with this draw's model-view divided back out — see the
   // texgen block in patch_draw. Kept across ticks because whether it is CONSTANT is the whole
   // discriminator between a camera projection (which must follow the interpolated pose) and an
   // object-locked mapping (which must not).
   float texA[12];
-  uint32_t texIdx = 0;      // which postex_mtx entry texA came from; 0 = none recorded
+  uint32_t texIdx = 0; // which postex_mtx entry texA came from; 0 = none recorded
   bool texValid = false;
   // How far this draw's object moved in the tick that produced this entry, camera removed. It is
   // the object's OWN scale for what "far" means — see the discontinuity test.
@@ -149,7 +149,7 @@ long g_objDeltaN = 0;
 // wrong and the rest are fine", and those have different causes. The histogram separates them, and
 // the worst-offender list carries the TAG, which names the guest shape and instance so the object
 // can actually be identified rather than merely counted.
-constexpr int kObjBuckets = 7;   // [0,0.1) [0.1,1) [1,10) [10,100) [100,1k) [1k,10k) [10k,inf)
+constexpr int kObjBuckets = 7; // [0,0.1) [0.1,1) [1,10) [10,100) [100,1k) [1k,10k) [10k,inf)
 long g_objHist[kObjBuckets] = {};
 // THE SAME HISTOGRAM, PER POPULATION. The global one says 21,866 paired draws moved 10-100 world
 // units in a 30th of a second and calls them mispairings; that sentence is a CLAIM about what
@@ -164,8 +164,13 @@ constexpr int kWorstDraws = 6;
 // that all six belonged to `shadow volume` took cross-referencing the global [1k,10k) count
 // against each population's, which happened to be unambiguous only because one population
 // had all of them.
-struct WorstDraw { double delta = -1.0; uint64_t tag = 0; uint32_t ordinal = 0; long tick = -1;
-                   int pop = 0; };
+struct WorstDraw {
+  double delta = -1.0;
+  uint64_t tag = 0;
+  long tick = -1;
+  uint32_t ordinal = 0;
+  int pop = 0;
+};
 WorstDraw g_worstDraw[kWorstDraws];
 // Counted separately because "attribution was not available" and "attribution says zero" must not
 // look alike: on the first tick, or any tick with no previous view, the camera cannot be removed.
@@ -186,9 +191,9 @@ double g_acceptedMax = 0.0;
 // can act on: a chain that gains a particle CHANGES VERTEX COUNT and must snap, which is a ceiling,
 // while a chain that skipped a tick is a seam problem. Same percentage, opposite conclusions.
 long g_vtxFirstSight = 0;
-long g_vtxGapHist[9] = {};   // index = gap in ticks, 8 = "8 or more"
-long g_vtxGapPatched = 0;   // interpolated across a skipped tick, alpha scaled by the spacing
-long g_vtxTooStale = 0;     // last sample older than the bound: snapped rather than swept
+long g_vtxGapHist[9] = {}; // index = gap in ticks, 8 = "8 or more"
+long g_vtxGapPatched = 0;  // interpolated across a skipped tick, alpha scaled by the spacing
+long g_vtxTooStale = 0;    // last sample older than the bound: snapped rather than swept
 long g_vtxPopPatched[256] = {};
 long g_vtxPopUnpaired[256] = {};
 long g_vtxPopCountChanged[256] = {};
@@ -213,8 +218,8 @@ float g_viewCur[12];
 float g_viewPrev[12];
 bool g_haveViewCur = false;
 bool g_haveViewPrev = false;
-float g_camDelta[12];      // V_lerp * V_cur^-1
-float g_viewLerp[12];      // V_lerp itself; needed to rotate a WORLD-space delta into eye space
+float g_camDelta[12]; // V_lerp * V_cur^-1
+float g_viewLerp[12]; // V_lerp itself; needed to rotate a WORLD-space delta into eye space
 
 // ── BILLBOARD POSITIONS ─────────────────────────────────────────────────────────────────────────
 //
@@ -279,7 +284,7 @@ bool g_sampleCameraValid = false;
 // mean taken over hundreds of ticks. If cuts are real the histogram is bimodal — a dense bulk of
 // ordinary camera motion and a handful of entries decades away. If it is unimodal, there were no
 // cuts in this run and the doubled-energy residual has some other cause.
-constexpr int kCamBuckets = 6;   // [0,1) [1,10) [10,100) [100,1k) [1k,10k) [10k,inf)
+constexpr int kCamBuckets = 6; // [0,1) [1,10) [10,100) [100,1k) [1k,10k) [10k,inf)
 long g_camHist[kCamBuckets] = {};
 double g_camEyeSum = 0.0;
 double g_camEyeMax = 0.0;
@@ -290,13 +295,20 @@ long g_tickIndex = 0;
 // The worst few ticks by camera step, kept with their tick index so a cut can be located in a run
 // rather than merely known to exist.
 constexpr int kWorstTicks = 5;
-struct WorstTick { long tick = -1; double eye = -1.0; double rotDeg = 0.0; };
+struct WorstTick {
+  long tick = -1;
+  double eye = -1.0;
+  double rotDeg = 0.0;
+};
 WorstTick g_worst[kWorstTicks];
 
 // A short history of eye positions, so a large step can be shown IN CONTEXT rather than as a bare
 // magnitude. See the use site for why the context is the whole point.
 constexpr int kEyeRing = 3;
-struct EyeSample { long tick = -1; float x = 0, y = 0, z = 0; };
+struct EyeSample {
+  long tick = -1;
+  float x = 0, y = 0, z = 0;
+};
 EyeSample g_eyeRing[kEyeRing];
 int g_eyeRingPos = 0;
 int g_eyeFollow = 0;
@@ -320,11 +332,10 @@ void note_worst_tick(long tick, double eye, double rotDeg) {
 void compose(const float* a, const float* b, float* out) {
   for (int r = 0; r < 3; ++r) {
     for (int c = 0; c < 3; ++c) {
-      out[r * 4 + c] = a[r * 4 + 0] * b[0 * 4 + c] + a[r * 4 + 1] * b[1 * 4 + c] +
-                       a[r * 4 + 2] * b[2 * 4 + c];
+      out[r * 4 + c] = a[r * 4 + 0] * b[0 * 4 + c] + a[r * 4 + 1] * b[1 * 4 + c] + a[r * 4 + 2] * b[2 * 4 + c];
     }
-    out[r * 4 + 3] = a[r * 4 + 0] * b[0 * 4 + 3] + a[r * 4 + 1] * b[1 * 4 + 3] +
-                     a[r * 4 + 2] * b[2 * 4 + 3] + a[r * 4 + 3];
+    out[r * 4 + 3] =
+        a[r * 4 + 0] * b[0 * 4 + 3] + a[r * 4 + 1] * b[1 * 4 + 3] + a[r * 4 + 2] * b[2 * 4 + 3] + a[r * 4 + 3];
   }
 }
 
@@ -342,9 +353,15 @@ bool affine_inverse(const float* m, float* out) {
   }
   const float inv = 1.0f / det;
   float r[9];
-  r[0] = A * inv;                    r[1] = -(b * i - c * h) * inv;  r[2] = (b * f - c * e) * inv;
-  r[3] = B * inv;                    r[4] = (a * i - c * g) * inv;   r[5] = -(a * f - c * d) * inv;
-  r[6] = C * inv;                    r[7] = -(a * h - b * g) * inv;  r[8] = (a * e - b * d) * inv;
+  r[0] = A * inv;
+  r[1] = -(b * i - c * h) * inv;
+  r[2] = (b * f - c * e) * inv;
+  r[3] = B * inv;
+  r[4] = (a * i - c * g) * inv;
+  r[5] = -(a * f - c * d) * inv;
+  r[6] = C * inv;
+  r[7] = -(a * h - b * g) * inv;
+  r[8] = (a * e - b * d) * inv;
   const float tx = m[3], ty = m[7], tz = m[11];
   for (int row = 0; row < 3; ++row) {
     out[row * 4 + 0] = r[row * 3 + 0];
@@ -366,9 +383,8 @@ void begin_tick(bool resampling) {
   }
 }
 
-bool apply_draw_sample(const DrawSample& sample, uint8_t* dst, uint32_t uniformSize,
-                       uint32_t mtxPosOffset, uint32_t mtxNrmOffset, float alpha,
-                       uint32_t pnMtxSlot) {
+bool apply_draw_sample(const DrawSample& sample, uint8_t* dst, uint32_t uniformSize, uint32_t mtxPosOffset,
+                       uint32_t mtxNrmOffset, float alpha, uint32_t pnMtxSlot) {
   if (!sample.paired) {
     return false;
   }
@@ -381,13 +397,11 @@ bool apply_draw_sample(const DrawSample& sample, uint8_t* dst, uint32_t uniformS
     outNrm[i] = sample.previous.nrm[i] * b + sample.current.nrm[i] * a;
   }
   if (sample.stableTexIndex >= 0 && pnMtxSlot < 10) {
-    const uint32_t off = mtxPosOffset +
-                         static_cast<uint32_t>(sample.stableTexIndex) * kOneMtxBytes;
+    const uint32_t off = mtxPosOffset + static_cast<uint32_t>(sample.stableTexIndex) * kOneMtxBytes;
     if (off + kOneMtxBytes <= uniformSize) {
       float lerpPn[12];
       for (int e = 0; e < 12; ++e) {
-        lerpPn[e] = sample.previous.pos[pnMtxSlot * 12 + e] * b +
-                    sample.current.pos[pnMtxSlot * 12 + e] * a;
+        lerpPn[e] = sample.previous.pos[pnMtxSlot * 12 + e] * b + sample.current.pos[pnMtxSlot * 12 + e] * a;
       }
       float out[12];
       compose(sample.current.texA, lerpPn, out);
@@ -397,10 +411,9 @@ bool apply_draw_sample(const DrawSample& sample, uint8_t* dst, uint32_t uniformS
   return true;
 }
 
-bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* dst,
-                uint32_t uniformSize, uint32_t mtxPosOffset, uint32_t mtxNrmOffset, float alpha,
-                uint32_t texMtxCamMask, uint32_t pnMtxSlot, uint8_t pop,
-                bool* outFirstEverSighting) {
+bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
+                uint32_t mtxPosOffset, uint32_t mtxNrmOffset, float alpha, uint32_t texMtxCamMask, uint32_t pnMtxSlot,
+                uint8_t pop, bool* outFirstEverSighting) {
   // Default it on EVERY path, including the early refusals below. A draw with no tag at all, or one
   // refused for a bad matrix offset, is not a birth — it is a draw this path cannot identify, and
   // letting a stale `true` leak out of a previous call would file it as correct-by-construction.
@@ -420,9 +433,10 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     static bool warned = false;
     if (!warned) {
       warned = true;
-      Log.error("matrix offset is 0, which cannot be a real uniform-block matrix offset — the "
-                "block header always precedes it. build_uniform is not recording it. Interpolation "
-                "is OFF rather than corrupting every draw.");
+      Log.error(
+          "matrix offset is 0, which cannot be a real uniform-block matrix offset — the "
+          "block header always precedes it. build_uniform is not recording it. Interpolation "
+          "is OFF rather than corrupting every draw.");
     }
     return false;
   }
@@ -432,10 +446,11 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     static bool warned = false;
     if (!warned) {
       warned = true;
-      Log.error("matrix offsets do not fit the uniform block: pos {} nrm {} span {} but block is {} "
-                "bytes. Refusing to patch; every draw will snap. This means the recorded offset and "
-                "the recorded block disagree, which is a layout bug, not a tuning problem.",
-                mtxPosOffset, mtxNrmOffset, kMtxBytes, uniformSize);
+      Log.error(
+          "matrix offsets do not fit the uniform block: pos {} nrm {} span {} but block is {} "
+          "bytes. Refusing to patch; every draw will snap. This means the recorded offset and "
+          "the recorded block disagree, which is a layout bug, not a tuning problem.",
+          mtxPosOffset, mtxNrmOffset, kMtxBytes, uniformSize);
     }
     return false;
   }
@@ -451,8 +466,7 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     if (outFirstEverSighting != nullptr) {
       *outFirstEverSighting = sample.firstEverSighting;
     }
-    return apply_draw_sample(sample, dst, uniformSize, mtxPosOffset, mtxNrmOffset, alpha,
-                             pnMtxSlot);
+    return apply_draw_sample(sample, dst, uniformSize, mtxPosOffset, mtxNrmOffset, alpha, pnMtxSlot);
   }
 
   auto& samples = g_drawSamples[tag];
@@ -496,11 +510,14 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
   // BUCKET EVERY GAP, not only the refused ones. The first version incremented this inside the
   // refusal branch, so buckets 1-4 — exactly the recoverable range the histogram exists to size —
   // could never be reached, and the output read "no near-misses" when it meant "not counted".
-  if (gap >= 1) ++g_mtxGapHist[gap < 9 ? (size_t)gap : 9];
+  if (gap >= 1)
+    ++g_mtxGapHist[gap < 9 ? (size_t)gap : 9];
   if (gap < 1 || gap > kMaxGapMtx) {
-    ++g_unpaired;   // never drawn before, or its last sample is too old to describe it.
-    if (!firstEverSighting) ++g_popGap[pop];
-    if (gap > kMaxGapMtx) ++g_gapTooStale;
+    ++g_unpaired; // never drawn before, or its last sample is too old to describe it.
+    if (!firstEverSighting)
+      ++g_popGap[pop];
+    if (gap > kMaxGapMtx)
+      ++g_gapTooStale;
     // A BIRTH IS NOT A DEFECT, and it is the only kind of miss that can never be fixed by better
     // pairing: there is no previous pose to interpolate from. Reported separately so a population
     // that behaves perfectly does not sit at "99.7% PARTIAL" for the run's whole length because of
@@ -516,7 +533,10 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
   // against this tick's camera would attribute the camera's whole motion to the object.
   const float* invViewWas = nullptr;
   for (const InvViewSample& v : g_invHist) {
-    if (v.stamp == was.stamp) { invViewWas = v.m; break; }
+    if (v.stamp == was.stamp) {
+      invViewWas = v.m;
+      break;
+    }
   }
   if (gap > 1 && invViewWas == nullptr) {
     ++g_unpaired;
@@ -524,7 +544,8 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     ++g_gapRefusedNoCamera;
     return false;
   }
-  if (gap > 1) ++g_gapPaired;
+  if (gap > 1)
+    ++g_gapPaired;
 
   // THE CHECK THAT KEEPS THE ORDINAL HONEST. Pairing within a tag assumes the object replays the
   // same display list each tick. If it did not, the vertex counts differ, and interpolating between
@@ -544,7 +565,8 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
       ++g_pairedFresh;
     } else {
       ++g_pairedStale;
-      if (age > g_pairedStaleMaxAge) g_pairedStaleMaxAge = age;
+      if (age > g_pairedStaleMaxAge)
+        g_pairedStaleMaxAge = age;
     }
   }
   ++g_paired;
@@ -555,7 +577,9 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     const float dz = mine.pos[11] - was.pos[11];
     const double d = std::sqrt((double)(dx * dx + dy * dy + dz * dz));
     g_transDeltaSum += d;
-    if (d > g_transDeltaMax) { g_transDeltaMax = d; }
+    if (d > g_transDeltaMax) {
+      g_transDeltaMax = d;
+    }
     ++g_transDeltaN;
   }
   // ATTRIBUTION: the same delta with the camera divided out. pnMtx is V*M, so M = V^-1*(V*M), and
@@ -572,7 +596,9 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     const double oz = objCur[11] - objPrev[11];
     const double od = std::sqrt(ox * ox + oy * oy + oz * oz);
     g_objDeltaSum += od;
-    if (od > g_objDeltaMax) { g_objDeltaMax = od; }
+    if (od > g_objDeltaMax) {
+      g_objDeltaMax = od;
+    }
     ++g_objDeltaN;
     // ── THE DISCONTINUITY SNAP ──────────────────────────────────────────────────────────────────
     //
@@ -619,10 +645,9 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     // SCALED BY THE SPACING. `od` is the distance over `gap` ticks, so comparing it against a
     // per-tick allowance would refuse every gapped pair as a teleport purely for having waited.
     constexpr double kContinuityRatio = 4.0;
-    const double allowed = ((was.objDelta > 0.0)
-                                ? std::max(kDiscontinuity, kContinuityRatio * was.objDelta)
-                                : kDiscontinuity) *
-                           (double)gap;
+    const double allowed =
+        ((was.objDelta > 0.0) ? std::max(kDiscontinuity, kContinuityRatio * was.objDelta) : kDiscontinuity) *
+        (double)gap;
     mine.objDelta = od;
     if (od >= allowed) {
       // The first few refusals, with both world positions. A count and a magnitude cannot tell a
@@ -635,25 +660,31 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
       if (g_refusedShown < 20 && g_tickIndex != g_refusedLastTick) {
         g_refusedLastTick = g_tickIndex;
         ++g_refusedShown;
-        Log.info("    refusal #{}: shape {:#010x} instance {:#010x} ordinal {} tick {} — world "
-                 "{:.1f},{:.1f},{:.1f} -> {:.1f},{:.1f},{:.1f}  (delta {:.1f})",
-                 g_refusedShown, (uint32_t)(tag >> 32), (uint32_t)(tag & 0xffffffffu), ordinal,
-                 g_tickIndex, objPrev[3], objPrev[7], objPrev[11], objCur[3], objCur[7], objCur[11],
-                 od);
+        Log.info(
+            "    refusal #{}: shape {:#010x} instance {:#010x} ordinal {} tick {} — world "
+            "{:.1f},{:.1f},{:.1f} -> {:.1f},{:.1f},{:.1f}  (delta {:.1f})",
+            g_refusedShown, (uint32_t)(tag >> 32), (uint32_t)(tag & 0xffffffffu), ordinal, g_tickIndex, objPrev[3],
+            objPrev[7], objPrev[11], objCur[3], objCur[7], objCur[11], od);
       }
       ++g_snappedDiscontinuity;
       ++g_popRefused[pop];
-      if (od > g_snappedDiscontinuityMax) { g_snappedDiscontinuityMax = od; }
+      if (od > g_snappedDiscontinuityMax) {
+        g_snappedDiscontinuityMax = od;
+      }
       {
         int rb = 0;
-        for (double edge = 0.1; rb < kObjBuckets - 1 && od >= edge; edge *= 10.0) { ++rb; }
+        for (double edge = 0.1; rb < kObjBuckets - 1 && od >= edge; edge *= 10.0) {
+          ++rb;
+        }
         ++g_objHistRefused[rb];
         ++g_refusedPop[pop];
         ++g_refusedShape[(uint32_t)(tag >> 32)];
       }
-      return false;   // the caller falls back to the camera delta alone, which is correct here
+      return false; // the caller falls back to the camera delta alone, which is correct here
     }
-    if (od > g_acceptedMax) { g_acceptedMax = od; }
+    if (od > g_acceptedMax) {
+      g_acceptedMax = od;
+    }
     {
       int bucket = 0;
       for (double edge = 0.1; bucket < kObjBuckets - 1 && od >= edge; edge *= 10.0) {
@@ -670,7 +701,7 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
         }
       }
       if (slot >= 0) {
-        g_worstDraw[slot] = WorstDraw{od, tag, ordinal, g_tickIndex, pop};
+        g_worstDraw[slot] = WorstDraw{od, tag, g_tickIndex, ordinal, pop};
       }
     }
   } else {
@@ -728,7 +759,10 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
     }
     int idx = -1;
     for (int k = 10; k < 32; ++k) {
-      if ((bits & (1u << k)) != 0) { idx = k; break; }
+      if ((bits & (1u << k)) != 0) {
+        idx = k;
+        break;
+      }
     }
     const uint32_t off = mtxPosOffset + static_cast<uint32_t>(idx) * kOneMtxBytes;
     if (idx >= 0 && off + kOneMtxBytes <= uniformSize) {
@@ -749,9 +783,13 @@ bool patch_draw(uint64_t tag, uint32_t vtxCount, const uint8_t* src, uint8_t* ds
           float diff = 0.0f;
           for (int e = 0; e < 12; ++e) {
             const float m0 = std::fabs(mine.texA[e]);
-            if (m0 > scale) { scale = m0; }
+            if (m0 > scale) {
+              scale = m0;
+            }
             const float d = std::fabs(mine.texA[e] - was.texA[e]);
-            if (d > diff) { diff = d; }
+            if (d > diff) {
+              diff = d;
+            }
           }
           if (diff / scale > 1e-3f) {
             ++g_texUnstable; // object-locked, or A genuinely animating: leave it alone
@@ -790,7 +828,7 @@ std::string g_popName[kMaxPop];
 } // namespace
 
 void name_population(uint8_t pop, const char* name) {
-  if (pop < kMaxPop && name != nullptr) {
+  if (name != nullptr) {
     g_popName[pop] = name;
   }
 }
@@ -804,15 +842,13 @@ void audit_row(uint8_t pop, long* out, int outLen) {
     return;
   }
   for (int d = 0; d < outLen; ++d) {
-    out[d] = (pop < kMaxPop && d < (int)Disposition::Count) ? g_audit[pop][d] : 0;
+    out[d] = d < (int)Disposition::Count ? g_audit[pop][d] : 0;
   }
 }
 
 void note_disposition(uint8_t pop, Disposition d) {
-  if (g_resampling) return;
-  if (pop >= kMaxPop) {
-    pop = 0;
-  }
+  if (g_resampling)
+    return;
   if (d != Disposition::Pending) {
     // This draw was claimed, so retire the Pending note taken a moment ago.
     if (g_audit[pop][(int)Disposition::Pending] > 0) {
@@ -825,15 +861,15 @@ void note_disposition(uint8_t pop, Disposition d) {
 // ── IS THE SCREEN-SPACE GEOMETRY ACTUALLY STILL? ────────────────────────────────────────────────
 namespace {
 struct OrthoTick {
-  uint64_t sum = 0;     // commutative over the tick's draws
+  uint64_t sum = 0; // commutative over the tick's draws
   long count = 0;
-  long stamp = -1;      // tick this belongs to
+  long stamp = -1; // tick this belongs to
 };
 OrthoTick g_orthoCur[kMaxPop], g_orthoPrev[kMaxPop];
-long g_orthoTicks[kMaxPop] = {};      // ticks with a previous tick to compare against
-long g_orthoChanged[kMaxPop] = {};    // of those, how many differed
-long g_orthoFromVerts[kMaxPop] = {};  // draws hashed from their own vertices
-long g_orthoFromMtx[kMaxPop] = {};    // draws hashed from the position matrix (a weaker claim)
+long g_orthoTicks[kMaxPop] = {};     // ticks with a previous tick to compare against
+long g_orthoChanged[kMaxPop] = {};   // of those, how many differed
+long g_orthoFromVerts[kMaxPop] = {}; // draws hashed from their own vertices
+long g_orthoFromMtx[kMaxPop] = {};   // draws hashed from the position matrix (a weaker claim)
 // IS THE ORTHO POSITION MATRIX SHARED? If every 2D draw in a tick carries the same one, then hashing
 // it measures a single global value and reports it once per population — which is what six unrelated
 // sites all reading "387 of 388" looked like. Inferring that from identical counts is a hypothesis;
@@ -843,13 +879,12 @@ long g_orthoMtxTickStamp = -1;
 long g_orthoMtxDistinctSum = 0, g_orthoMtxDistinctTicks = 0, g_orthoMtxDistinctMax = 0;
 } // namespace
 
-void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
-                         uint32_t mtxPosOffset, const uint8_t* verts, uint32_t vertBytes) {
-  if (g_resampling) return;
+void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize, uint32_t mtxPosOffset,
+                         const uint8_t* verts, uint32_t vertBytes) {
+  if (g_resampling)
+    return;
   const bool haveVerts = verts != nullptr && vertBytes > 0;
-  if (pop >= kMaxPop) return;
-  if (!haveVerts &&
-      (src == nullptr || mtxPosOffset == 0 || mtxPosOffset + kMtxBytes > uniformSize)) {
+  if (!haveVerts && (src == nullptr || mtxPosOffset == 0 || mtxPosOffset + kMtxBytes > uniformSize)) {
     return;
   }
   OrthoTick& cur = g_orthoCur[pop];
@@ -861,7 +896,8 @@ void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
       const OrthoTick& was = g_orthoPrev[pop];
       if (was.stamp >= 0) {
         ++g_orthoTicks[pop];
-        if (was.sum != cur.sum || was.count != cur.count) ++g_orthoChanged[pop];
+        if (was.sum != cur.sum || was.count != cur.count)
+          ++g_orthoChanged[pop];
       }
       g_orthoPrev[pop] = cur;
     }
@@ -871,16 +907,19 @@ void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
   uint64_t h = 1469598103934665603ull;
   if (haveVerts) {
     ++g_orthoFromVerts[pop];
-    for (uint32_t i = 0; i < vertBytes; ++i) h = (h ^ verts[i]) * 1099511628211ull;
+    for (uint32_t i = 0; i < vertBytes; ++i)
+      h = (h ^ verts[i]) * 1099511628211ull;
   } else {
     ++g_orthoFromMtx[pop];
-    for (uint32_t i = 0; i < kMtxBytes; ++i) h = (h ^ src[mtxPosOffset + i]) * 1099511628211ull;
+    for (uint32_t i = 0; i < kMtxBytes; ++i)
+      h = (h ^ src[mtxPosOffset + i]) * 1099511628211ull;
     if (g_orthoMtxTickStamp != g_tickIndex) {
       if (g_orthoMtxTickStamp >= 0) {
         const long n = (long)g_orthoMtxSeenThisTick.size();
         g_orthoMtxDistinctSum += n;
         ++g_orthoMtxDistinctTicks;
-        if (n > g_orthoMtxDistinctMax) g_orthoMtxDistinctMax = n;
+        if (n > g_orthoMtxDistinctMax)
+          g_orthoMtxDistinctMax = n;
       }
       g_orthoMtxSeenThisTick.clear();
       g_orthoMtxTickStamp = g_tickIndex;
@@ -896,37 +935,41 @@ void note_ortho_geometry(uint8_t pop, const uint8_t* src, uint32_t uniformSize,
 
 void report_ortho_motion() {
   long anyMeasured = 0;
-  for (int p = 0; p < kMaxPop; ++p) anyMeasured += g_orthoTicks[p];
+  for (int p = 0; p < kMaxPop; ++p)
+    anyMeasured += g_orthoTicks[p];
   if (anyMeasured == 0) {
-    Log.info("screen-space motion: NOTHING was measured — no orthographic draw was seen on two "
-             "ticks this run. This says nothing about whether 2D snapping is correct.");
+    Log.info(
+        "screen-space motion: NOTHING was measured — no orthographic draw was seen on two "
+        "ticks this run. This says nothing about whether 2D snapping is correct.");
     return;
   }
   if (g_orthoMtxDistinctTicks > 0) {
-    Log.info("screen-space motion, FIRST the instrument's own limit: across {} tick(s) the "
-             "matrix-hashed 2D draws carried {:.2f} DISTINCT position matrices per tick on average "
-             "(most in any tick: {}). {}",
-             g_orthoMtxDistinctTicks,
-             (double)g_orthoMtxDistinctSum / (double)g_orthoMtxDistinctTicks, g_orthoMtxDistinctMax,
-             (double)g_orthoMtxDistinctSum / (double)g_orthoMtxDistinctTicks < 2.0
-                 ? "That is ONE SHARED MATRIX, so every row below hashed from the matrix is "
-                   "reporting the same global value under a different name — those rows say "
-                   "nothing about their own population's geometry. Only rows hashed from their own "
-                   "vertices are per-population measurements."
-                 : "Enough distinct matrices that the per-population rows below are measuring "
-                   "different things, which is what makes them comparable at all.");
+    Log.info(
+        "screen-space motion, FIRST the instrument's own limit: across {} tick(s) the "
+        "matrix-hashed 2D draws carried {:.2f} DISTINCT position matrices per tick on average "
+        "(most in any tick: {}). {}",
+        g_orthoMtxDistinctTicks, (double)g_orthoMtxDistinctSum / (double)g_orthoMtxDistinctTicks, g_orthoMtxDistinctMax,
+        (double)g_orthoMtxDistinctSum / (double)g_orthoMtxDistinctTicks < 2.0
+            ? "That is ONE SHARED MATRIX, so every row below hashed from the matrix is "
+              "reporting the same global value under a different name — those rows say "
+              "nothing about their own population's geometry. Only rows hashed from their own "
+              "vertices are per-population measurements."
+            : "Enough distinct matrices that the per-population rows below are measuring "
+              "different things, which is what makes them comparable at all.");
   }
-  Log.info("screen-space motion — whether `snap:2D` is PROVABLY correct or merely unexamined. A "
-           "static element has no in-between and snapping it is right. This measures a commutative "
-           "hash of every ortho draw's position matrix, per population, per tick, and it can only "
-           "answer one of the two questions: a population that never differs is provably still, so "
-           "snapping it is certainly right. A population that DIFFERS has not been shown to judder "
-           "— the difference may be smooth motion, which does have an in-between this path does "
-           "not produce, or a discrete content change (a different glyph, a meter reading, a "
-           "different number of elements), which does not. Separating those needs a per-element "
-           "identity that 2D draws do not carry.");
+  Log.info(
+      "screen-space motion — whether `snap:2D` is PROVABLY correct or merely unexamined. A "
+      "static element has no in-between and snapping it is right. This measures a commutative "
+      "hash of every ortho draw's position matrix, per population, per tick, and it can only "
+      "answer one of the two questions: a population that never differs is provably still, so "
+      "snapping it is certainly right. A population that DIFFERS has not been shown to judder "
+      "— the difference may be smooth motion, which does have an in-between this path does "
+      "not produce, or a discrete content change (a different glyph, a meter reading, a "
+      "different number of elements), which does not. Separating those needs a per-element "
+      "identity that 2D draws do not carry.");
   for (int p = 0; p < kMaxPop; ++p) {
-    if (g_orthoTicks[p] == 0) continue;
+    if (g_orthoTicks[p] == 0)
+      continue;
     const double pct = 100.0 * (double)g_orthoChanged[p] / (double)g_orthoTicks[p];
     const char* source = (g_orthoFromVerts[p] > 0 && g_orthoFromMtx[p] == 0) ? "own vertices"
                          : (g_orthoFromMtx[p] > 0 && g_orthoFromVerts[p] == 0)
@@ -935,23 +978,19 @@ void report_ortho_motion() {
                                "row reading 0% is 'the placement did not move', not 'nothing "
                                "changed'"
                              : "a mix of own vertices and the position matrix";
-    Log.info("  {:<22} {:>7} of {:>7} tick(s) differed from the previous one ({:.1f}%), hashed from "
-             "{} — {}",
-             g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p))
-                                  : g_popName[p],
-             g_orthoChanged[p], g_orthoTicks[p], pct, source,
-             g_orthoChanged[p] == 0
-                 ? "PROVABLY STILL, so snapping it is exactly right"
-                 : "NOT still — could be smooth motion or a discrete content change, and this "
-                   "measure cannot tell them apart, so `snap:2D` here is a description of what "
-                   "happens rather than a verdict that nothing was lost");
+    Log.info(
+        "  {:<22} {:>7} of {:>7} tick(s) differed from the previous one ({:.1f}%), hashed from "
+        "{} — {}",
+        g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p)) : g_popName[p], g_orthoChanged[p],
+        g_orthoTicks[p], pct, source,
+        g_orthoChanged[p] == 0 ? "PROVABLY STILL, so snapping it is exactly right"
+                               : "NOT still — could be smooth motion or a discrete content change, and this "
+                                 "measure cannot tell them apart, so `snap:2D` here is a description of what "
+                                 "happens rather than a verdict that nothing was lost");
   }
 }
 
 void report_audit() {
-  static const char* kName[(int)Disposition::Count] = {
-      "unclaimed", "PAIRED",     "billboard",  "camera-only",
-      "snap:2D",   "snap:EXACT", "snap:NO-ID", "birth"};
   long total = 0;
   for (int p = 0; p < kMaxPop; ++p) {
     for (int d = 0; d < (int)Disposition::Count; ++d) {
@@ -959,17 +998,19 @@ void report_audit() {
     }
   }
   if (total == 0) {
-    Log.warn("interpolation audit: NO DRAWS WERE FILED AT ALL. This says nothing about coverage — "
-             "nothing was classified. Check the run is rendering with interpolation on.");
+    Log.warn(
+        "interpolation audit: NO DRAWS WERE FILED AT ALL. This says nothing about coverage — "
+        "nothing was classified. Check the run is rendering with interpolation on.");
     return;
   }
-  Log.info("INTERPOLATION AUDIT — every draw, by the system that emitted it and the fate it got. "
-           "PAIRED and billboard interpolate; snap:2D is CORRECT (a screen-space element has no "
-           "in-between); birth is CORRECT too (nothing existed to interpolate from); camera-only "
-           "and snap:NO-ID are the defects — geometry that follows the camera but not its own "
-           "motion, or nothing at all.");
-  Log.info("  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11} {:>11} {:>8}  {}", "population", "PAIRED",
-           "billboard", "camera-only", "snap:2D", "snap:EXACT", "snap:NO-ID", "birth", "verdict");
+  Log.info(
+      "INTERPOLATION AUDIT — every draw, by the system that emitted it and the fate it got. "
+      "PAIRED and billboard interpolate; snap:2D is CORRECT (a screen-space element has no "
+      "in-between); birth and reappear are CORRECT too (no adjacent visible pose existed); "
+      "camera-only and snap:NO-ID are the defects — geometry that follows the camera but not "
+      "its own motion, or nothing at all.");
+  Log.info("  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11} {:>11} {:>8} {:>9}  {}", "population", "PAIRED", "billboard",
+           "camera-only", "snap:2D", "snap:EXACT", "snap:NO-ID", "birth", "reappear", "verdict");
   // Ordered by size, and CAPPED — the population space is now the whole u8 range because the host
   // allocates ids to emitter sites it discovers at runtime, so a run can legitimately fill dozens of
   // rows. The cap is on the SMALL rows, never the large ones, and what it drops is stated with its
@@ -995,8 +1036,7 @@ void report_audit() {
   for (size_t i = 0; i < rows.size() && i < kMaxRows; ++i) {
     const int p = rows[i].first;
     // Anything still Pending was never claimed by any patch: perspective, no identity.
-    const long noId = g_audit[p][(int)Disposition::SnappedNoIdentity] +
-                      g_audit[p][(int)Disposition::Pending];
+    const long noId = g_audit[p][(int)Disposition::SnappedNoIdentity] + g_audit[p][(int)Disposition::Pending];
     const long good = g_audit[p][(int)Disposition::Paired] + g_audit[p][(int)Disposition::Billboard];
     // CameraOnlyStatic is CORRECT, not a shortfall: geometry that did not move needs the camera
     // delta and nothing else. Counting it as a defect is what made "97.3% PARTIAL" understate the
@@ -1007,6 +1047,7 @@ void report_audit() {
     // permanently imperfect — every once-per-tick emitter used to sit at exactly 99.7% for the
     // whole run because of its own first tick. Counting it as a success would be the opposite lie.
     const long birth = g_audit[p][(int)Disposition::CameraOnlyBirth];
+    const long reappearance = g_audit[p][(int)Disposition::CameraOnlyReappearance];
     // A 2D population with no interpolated draws is CORRECT, not a failure — a screen-space
     // element has no meaningful in-between. Saying "interpolates (0.0% move)" of it, as the first
     // version did, is the report contradicting itself in one line.
@@ -1014,9 +1055,9 @@ void report_audit() {
         // All births and nothing else: the population drew once and never again, so there was
         // never a pair to make. Saying "2D" of it would be a claim about a projection nobody
         // measured.
-        (bad == 0 && good == 0 && birth > 0 && g_audit[p][(int)Disposition::SnappedOrtho] == 0 &&
+        (bad == 0 && good == 0 && (birth > 0 || reappearance > 0) && g_audit[p][(int)Disposition::SnappedOrtho] == 0 &&
          g_audit[p][(int)Disposition::SnappedExact] == 0)
-            ? "CORRECT (drew once — a first sighting has nothing to pair with)"
+            ? "CORRECT (no adjacent visible pose existed to pair with)"
         : (bad == 0 && good == 0 && g_audit[p][(int)Disposition::SnappedExact] > 0 &&
            g_audit[p][(int)Disposition::SnappedOrtho] == 0)
             ? "CORRECT (screen-space: must NOT move)"
@@ -1024,34 +1065,37 @@ void report_audit() {
         : bad == 0                ? "interpolates"
         : good == 0               ? "SNAPS ENTIRELY"
                                   : "PARTIAL";
-    Log.info("  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11} {:>11} {:>8}  {} ({:.1f}% interpolate, "
-             "excluding {} first-ever sighting(s) which had nothing to pair with; camera-only is "
-             "an UPPER BOUND on the defect, not a measurement — see interp.cpp)",
-             g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p))
-                                  : g_popName[p],
-             g_audit[p][(int)Disposition::Paired], g_audit[p][(int)Disposition::Billboard],
-             g_audit[p][(int)Disposition::CameraOnly], g_audit[p][(int)Disposition::SnappedOrtho],
-             g_audit[p][(int)Disposition::SnappedExact], noId, birth, verdict,
-             // Denominator is what OUGHT to move: 2D and provably-static draws are excluded,
-             // because a percentage that counts them as failures cannot reach 100 even when the
-             // path is perfect.
-             (good + bad) > 0 ? 100.0 * (double)good / (double)(good + bad) : 100.0, birth);
+    Log.info(
+        "  {:<22} {:>10} {:>11} {:>12} {:>10} {:>11} {:>11} {:>8} {:>9}  {} ({:.1f}% interpolate, "
+        "excluding {} first-ever sighting(s) and {} reappearance(s), neither of which had an adjacent "
+        "visible pose; camera-only is "
+        "an UPPER BOUND on the defect, not a measurement — see interp.cpp)",
+        g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p)) : g_popName[p],
+        g_audit[p][(int)Disposition::Paired], g_audit[p][(int)Disposition::Billboard],
+        g_audit[p][(int)Disposition::CameraOnly], g_audit[p][(int)Disposition::SnappedOrtho],
+        g_audit[p][(int)Disposition::SnappedExact], noId, birth, reappearance, verdict,
+        // Denominator is what OUGHT to move: 2D and provably-static draws are excluded,
+        // because a percentage that counts them as failures cannot reach 100 even when the
+        // path is perfect.
+        (good + bad) > 0 ? 100.0 * (double)good / (double)(good + bad) : 100.0, birth, reappearance);
   }
   if (omittedRows > 0) {
-    Log.info("  ... and {} further population(s) accounting for {} draw(s), not shown here. Every "
-             "one of them IS recorded — the graphics registry file holds the full list "
-             "(tools/gfx/graphics_db.py list).",
-             omittedRows, omittedDraws);
+    Log.info(
+        "  ... and {} further population(s) accounting for {} draw(s), not shown here. Every "
+        "one of them IS recorded — the graphics registry file holds the full list "
+        "(tools/gfx/graphics_db.py list).",
+        omittedRows, omittedDraws);
   }
-  Log.info("  A population labelled (unlabelled) is one no seam claims — those are the draws whose "
-           "emitter is still unknown, and they are the honest edge of this audit rather than a "
-           "clean bill of health.");
+  Log.info(
+      "  A population labelled (unlabelled) is one no seam claims — those are the draws whose "
+      "emitter is still unknown, and they are the honest edge of this audit rather than a "
+      "clean bill of health.");
 }
 
 // ── VERTEX INTERPOLATION ────────────────────────────────────────────────────────────────────────
 namespace {
 struct VertRec {
-  std::vector<float> values;   // vtxCount * (XYZ + direct-f32 extras), host order
+  std::vector<float> values; // vtxCount * (XYZ + direct-f32 extras), host order
   uint64_t extraMask = 0;
   uint64_t stamp = 0;
 };
@@ -1092,18 +1136,15 @@ inline void put_be_f32(uint8_t* p, float f) {
   p[2] = (uint8_t)(w >> 8);
   p[3] = (uint8_t)w;
 }
-inline int16_t be_s16(const uint8_t* p) {
-  return static_cast<int16_t>((uint16_t)p[0] << 8 | p[1]);
-}
+inline int16_t be_s16(const uint8_t* p) { return static_cast<int16_t>((uint16_t)p[0] << 8 | p[1]); }
 inline void put_be_s16(uint8_t* p, int16_t v) {
   const uint16_t u = static_cast<uint16_t>(v);
   p[0] = static_cast<uint8_t>(u >> 8);
   p[1] = static_cast<uint8_t>(u);
 }
 
-bool apply_vertex_sample(const VertSample& sample, uint32_t vtxCount, uint16_t stride,
-                         uint16_t posOffset, bool posS16XYZ, uint8_t posFrac, uint8_t* dst,
-                         float alpha) {
+bool apply_vertex_sample(const VertSample& sample, uint32_t vtxCount, uint16_t stride, uint16_t posOffset,
+                         bool posS16XYZ, uint8_t posFrac, uint8_t* dst, float alpha) {
   if (!sample.patched) {
     return false;
   }
@@ -1113,20 +1154,17 @@ bool apply_vertex_sample(const VertSample& sample, uint32_t vtxCount, uint16_t s
     uint8_t* q = dst + static_cast<size_t>(v) * stride + posOffset;
     for (int c = 0; c < 3; ++c) {
       const size_t channel = static_cast<size_t>(v) * sample.channels + c;
-      const float value = sample.previous[channel] +
-                          (sample.current[channel] - sample.previous[channel]) * ga;
+      const float value = sample.previous[channel] + (sample.current[channel] - sample.previous[channel]) * ga;
       if (posS16XYZ) {
         const float encoded = std::round(value / posScale);
-        put_be_s16(q + c * 2,
-                   static_cast<int16_t>(std::clamp(encoded, -32768.0f, 32767.0f)));
+        put_be_s16(q + c * 2, static_cast<int16_t>(std::clamp(encoded, -32768.0f, 32767.0f)));
       } else {
         put_be_f32(q + c * 4, value);
       }
     }
     for (size_t i = 0; i < sample.extraOffsets.size(); ++i) {
       const size_t channel = static_cast<size_t>(v) * sample.channels + 3 + i;
-      const float value = sample.previous[channel] +
-                          (sample.current[channel] - sample.previous[channel]) * ga;
+      const float value = sample.previous[channel] + (sample.current[channel] - sample.previous[channel]) * ga;
       put_be_f32(dst + static_cast<size_t>(v) * stride + sample.extraOffsets[i], value);
     }
   }
@@ -1134,10 +1172,9 @@ bool apply_vertex_sample(const VertSample& sample, uint32_t vtxCount, uint16_t s
 }
 } // namespace
 
-bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t posOffset,
-                    bool posS16XYZ, uint8_t posFrac, uint64_t deformF32OffsetMask,
-                    const uint8_t* src, uint8_t* dst,
-                    float alpha, uint8_t pop) {
+bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t posOffset, bool posS16XYZ,
+                    uint8_t posFrac, uint64_t deformF32OffsetMask, const uint8_t* src, uint8_t* dst, float alpha,
+                    uint8_t pop) {
   if (tag == 0 || src == nullptr || dst == nullptr || vtxCount == 0 || stride == 0) {
     return false;
   }
@@ -1147,7 +1184,8 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
   // the wrong four bytes while still producing plausible numbers.
   std::vector<uint8_t> extraOffsets;
   for (uint32_t off = 0; off < 64; ++off) {
-    if ((deformF32OffsetMask >> off) & 1u) extraOffsets.push_back(static_cast<uint8_t>(off));
+    if ((deformF32OffsetMask >> off) & 1u)
+      extraOffsets.push_back(static_cast<uint8_t>(off));
   }
   const size_t channels = 3 + extraOffsets.size();
   const size_t need = (size_t)vtxCount * channels;
@@ -1175,8 +1213,7 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
   if (g_resampling) {
     const auto it = g_vertSamples.find(tag);
     return it != g_vertSamples.end() &&
-           apply_vertex_sample(it->second, vtxCount, stride, posOffset, posS16XYZ, posFrac,
-                               dst, alpha);
+           apply_vertex_sample(it->second, vtxCount, stride, posOffset, posS16XYZ, posFrac, dst, alpha);
   }
 
   // ── AN OBJECT THAT SKIPS TICKS MAY STILL INTERPOLATE, IF THE ALPHA IS SCALED ────────────────
@@ -1232,12 +1269,16 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
       ++g_vtxPopExtraDraws[pop];
       g_vtxPopExtraValues[pop] += static_cast<long>(vtxCount * extraOffsets.size());
     }
-    if (gap > 1) { ++g_vtxGapPatched; }
+    if (gap > 1) {
+      ++g_vtxGapPatched;
+    }
     patched = true;
   } else if (!consecutive) {
     ++g_vtxUnpaired;
     ++g_vtxPopUnpaired[pop];
-    if (gap > kMaxGap) { ++g_vtxTooStale; }
+    if (gap > kMaxGap) {
+      ++g_vtxTooStale;
+    }
     // The GAP ITSELF, bucketed. Raising a bound because a recovery was disappointing is guessing;
     // this says whether the misses are near-misses at all. `rec.stamp == 0` is the first sighting
     // of a tag and is filed separately — it is not a gap, it is an object that has never drawn.
@@ -1270,8 +1311,8 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
         for (int c = 0; c < 3; ++c) {
           const double dp = (double)cur[v * channels + c] - (double)rec.values[v * prevChannels + c];
           pre += dp < 0 ? -dp : dp;
-          const double ds = (double)cur[(vtxCount - m + v) * channels + c] -
-                            (double)rec.values[(prevN - m + v) * prevChannels + c];
+          const double ds =
+              (double)cur[(vtxCount - m + v) * channels + c] - (double)rec.values[(prevN - m + v) * prevChannels + c];
           suf += ds < 0 ? -ds : ds;
         }
       }
@@ -1305,28 +1346,32 @@ bool patch_vertices(uint64_t tag, uint32_t vtxCount, uint16_t stride, uint16_t p
 void report_vertex_interp() {
   const long total = g_vtxPatched + g_vtxUnpaired + g_vtxCountChanged;
   if (total == 0) {
-    Log.warn("vertex interpolation: NO deforming draw was ever offered to it. That is not 'nothing "
-             "deforms' — it means no draw reached the seam, so this says nothing about coverage.");
+    Log.warn(
+        "vertex interpolation: NO deforming draw was ever offered to it. That is not 'nothing "
+        "deforms' — it means no draw reached the seam, so this says nothing about coverage.");
     return;
   }
-  Log.info("vertex interpolation: {} of {} draw(s) had their POSITIONS lerped ({:.1f}%); {} also "
-           "lerped {} direct-f32 attribute value(s) beyond XYZ (normals/texture coordinates); {} had no "
-           "consecutive previous tick (new object, or one that skipped a tick — correctly snaps); "
-           "{} changed VERTEX COUNT and were snapped deliberately rather than smeared between two "
-           "unrelated meshes.",
-           g_vtxPatched, total, 100.0 * (double)g_vtxPatched / (double)total, g_vtxExtraDraws,
-           g_vtxExtraValues, g_vtxUnpaired, g_vtxCountChanged);
-  Log.info("  of those, {} were interpolated ACROSS a skipped tick with alpha scaled by the spacing "
-           "(an object that does not draw every tick still has two real samples); {} were refused "
-           "for a last sample older than 4 ticks, where the older pose no longer describes anywhere "
-           "the object has recently been.",
-           g_vtxGapPatched, g_vtxTooStale);
-  Log.info("  why the rest missed: {} were a tag's FIRST sighting (never drawn before — no pair can "
-           "exist); gaps for the others, in ticks: 0 {} | 1 {} | 2 {} | 3 {} | 4 {} | 5 {} | 6 {} | "
-           "7 {} | 8+ {}. A gap of 0 means the same tag drew TWICE in one tick, which is a tagging "
-           "collision rather than a spacing problem.",
-           g_vtxFirstSight, g_vtxGapHist[0], g_vtxGapHist[1], g_vtxGapHist[2], g_vtxGapHist[3],
-           g_vtxGapHist[4], g_vtxGapHist[5], g_vtxGapHist[6], g_vtxGapHist[7], g_vtxGapHist[8]);
+  Log.info(
+      "vertex interpolation: {} of {} draw(s) had their POSITIONS lerped ({:.1f}%); {} also "
+      "lerped {} direct-f32 attribute value(s) beyond XYZ (normals/texture coordinates); {} had no "
+      "consecutive previous tick (new object, or one that skipped a tick — correctly snaps); "
+      "{} changed VERTEX COUNT and were snapped deliberately rather than smeared between two "
+      "unrelated meshes.",
+      g_vtxPatched, total, 100.0 * (double)g_vtxPatched / (double)total, g_vtxExtraDraws, g_vtxExtraValues,
+      g_vtxUnpaired, g_vtxCountChanged);
+  Log.info(
+      "  of those, {} were interpolated ACROSS a skipped tick with alpha scaled by the spacing "
+      "(an object that does not draw every tick still has two real samples); {} were refused "
+      "for a last sample older than 4 ticks, where the older pose no longer describes anywhere "
+      "the object has recently been.",
+      g_vtxGapPatched, g_vtxTooStale);
+  Log.info(
+      "  why the rest missed: {} were a tag's FIRST sighting (never drawn before — no pair can "
+      "exist); gaps for the others, in ticks: 0 {} | 1 {} | 2 {} | 3 {} | 4 {} | 5 {} | 6 {} | "
+      "7 {} | 8+ {}. A gap of 0 means the same tag drew TWICE in one tick, which is a tagging "
+      "collision rather than a spacing problem.",
+      g_vtxFirstSight, g_vtxGapHist[0], g_vtxGapHist[1], g_vtxGapHist[2], g_vtxGapHist[3], g_vtxGapHist[4],
+      g_vtxGapHist[5], g_vtxGapHist[6], g_vtxGapHist[7], g_vtxGapHist[8]);
   // HOW OLD THE SAMPLE EACH PAIRING USED ACTUALLY WAS. A pairing counts as a success whatever the
   // spacing, so this is the only place a wrong-spacing pairing can show up at all.
   {
@@ -1334,38 +1379,39 @@ void report_vertex_interp() {
     if (total == 0) {
       Log.info("  pairing freshness: NOTHING paired, so nothing was measured here.");
     } else {
-      Log.info("  pairing freshness: {} of {} pairing(s) used the PREVIOUS tick's sample ({:.2f}%); "
-               "{} used an older one, up to {} tick(s) old. `alpha` places the in-between frame "
-               "assuming a one-tick spacing, so every stale pairing moves its object by the wrong "
-               "fraction of a step — and it is counted as a success everywhere else.{}",
-               g_pairedFresh, total, 100.0 * (double)g_pairedFresh / (double)total, g_pairedStale,
-               g_pairedStaleMaxAge,
-               g_pairedStale == 0
-                   ? "  Zero here means the tables never hand back a stale sample, which is what "
-                     "begin_tick()'s clear of g_cur is supposed to guarantee. It is corroborated "
-                     "rather than merely asserted: the self-test's gap case draws a tag, skips a "
-                     "tick and draws again, and the table REFUSES that pairing instead of "
-                     "returning the older sample."
-                   : "  A NONZERO count means the swap is handing back samples it should not.");
+      Log.info(
+          "  pairing freshness: {} of {} pairing(s) used the PREVIOUS tick's sample ({:.2f}%); "
+          "{} used an older one, up to {} tick(s) old. `alpha` places the in-between frame "
+          "assuming a one-tick spacing, so every stale pairing moves its object by the wrong "
+          "fraction of a step — and it is counted as a success everywhere else.{}",
+          g_pairedFresh, total, 100.0 * (double)g_pairedFresh / (double)total, g_pairedStale, g_pairedStaleMaxAge,
+          g_pairedStale == 0 ? "  Zero here means the tables never hand back a stale sample, which is what "
+                               "begin_tick()'s clear of g_cur is supposed to guarantee. It is corroborated "
+                               "rather than merely asserted: the self-test's gap case draws a tag, skips a "
+                               "tick and draws again, and the table REFUSES that pairing instead of "
+                               "returning the older sample."
+                             : "  A NONZERO count means the swap is handing back samples it should not.");
     }
   }
   // WHAT THE GAP TOLERANCE ACTUALLY DID. Three numbers, because "0 recovered" has three different
   // causes and the fix for each is different: the gaps are longer than the bound, the camera for the
   // older sample was not retained, or there were no gaps to recover in the first place.
-  Log.info("  gap tolerance (bound {} tick(s)): {} pairing(s) made across a skipped tick, {} "
-           "refused for a sample older than the bound, {} refused because the camera from that "
-           "sample's tick was no longer retained.{}",
-           kMaxGapMtx, g_gapPaired, g_gapTooStale, g_gapRefusedNoCamera,
-           (g_gapPaired == 0 && g_gapTooStale == 0 && g_gapRefusedNoCamera == 0)
-               ? "  All three zero means no draw ever skipped a tick and came back — the tolerance "
-                 "was never exercised, so this run says nothing about whether it works."
-               : "");
-  Log.info("  gap LENGTHS, in ticks: 1 {} | 2 {} | 3 {} | 4 {} | 5 {} | 6 {} | 7 {} | 8 {} | 9+ {}. "
-           "This is what decides whether raising the bound would help: near-misses clustered at 2-4 "
-           "are recoverable, a tail at 9+ is an object that was CULLED and came back, and sweeping "
-           "that one across wherever it went while off-screen is exactly what snapping prevents.",
-           g_mtxGapHist[1], g_mtxGapHist[2], g_mtxGapHist[3], g_mtxGapHist[4], g_mtxGapHist[5],
-           g_mtxGapHist[6], g_mtxGapHist[7], g_mtxGapHist[8], g_mtxGapHist[9]);
+  Log.info(
+      "  gap tolerance (bound {} tick(s)): {} pairing(s) made across a skipped tick, {} "
+      "refused for a sample older than the bound, {} refused because the camera from that "
+      "sample's tick was no longer retained.{}",
+      kMaxGapMtx, g_gapPaired, g_gapTooStale, g_gapRefusedNoCamera,
+      (g_gapPaired == 0 && g_gapTooStale == 0 && g_gapRefusedNoCamera == 0)
+          ? "  All three zero means no draw ever skipped a tick and came back — the tolerance "
+            "was never exercised, so this run says nothing about whether it works."
+          : "");
+  Log.info(
+      "  gap LENGTHS, in ticks: 1 {} | 2 {} | 3 {} | 4 {} | 5 {} | 6 {} | 7 {} | 8 {} | 9+ {}. "
+      "This is what decides whether raising the bound would help: near-misses clustered at 2-4 "
+      "are recoverable, a tail at 9+ is an object that was CULLED and came back, and sweeping "
+      "that one across wherever it went while off-screen is exactly what snapping prevents.",
+      g_mtxGapHist[1], g_mtxGapHist[2], g_mtxGapHist[3], g_mtxGapHist[4], g_mtxGapHist[5], g_mtxGapHist[6],
+      g_mtxGapHist[7], g_mtxGapHist[8], g_mtxGapHist[9]);
   // WHY EACH POPULATION'S MATRIX RESIDUAL EXISTS. Printed only for populations that HAVE one, and
   // with all three causes even when two are zero: "12 gaps" alone leaves the reader to assume the
   // other two were zero rather than unmeasured.
@@ -1373,20 +1419,22 @@ void report_vertex_interp() {
     bool any = false;
     for (int p = 0; p < kMaxPop; ++p) {
       const long total = g_popGap[p] + g_popMismatch[p] + g_popRefused[p];
-      if (total == 0) continue;
+      if (total == 0)
+        continue;
       any = true;
-      Log.info("  matrix residual: {:<22} {} draw(s) did not pair — {} skipped a tick and came "
-               "back (the object was there before, so this is a gap the pairing table lost), {} "
-               "changed display-list length (no vertex correspondence; snapping is correct), {} "
-               "refused as discontinuous (a step change, deliberately not smeared).",
-               g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p))
-                                    : g_popName[p],
-               total, g_popGap[p], g_popMismatch[p], g_popRefused[p]);
+      Log.info(
+          "  matrix residual: {:<22} {} draw(s) did not pair — {} skipped a tick and came "
+          "back (the object was there before, so this is a gap the pairing table lost), {} "
+          "changed display-list length (no vertex correspondence; snapping is correct), {} "
+          "refused as discontinuous (a step change, deliberately not smeared).",
+          g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p)) : g_popName[p], total,
+          g_popGap[p], g_popMismatch[p], g_popRefused[p]);
     }
     if (!any) {
-      Log.info("  matrix residual: NONE — every tagged draw in every population either paired or "
-               "was a first sighting. That is the line to watch: it reading nothing is a result, "
-               "not a missing report.");
+      Log.info(
+          "  matrix residual: NONE — every tagged draw in every population either paired or "
+          "was a first sighting. That is the line to watch: it reading nothing is a result, "
+          "not a missing report.");
     }
   }
   // WHERE THE SHARED SEGMENT SITS on a count change. This does not change behaviour — a count
@@ -1394,18 +1442,20 @@ void report_vertex_interp() {
   if (g_vtxCountChanged > 0) {
     const long aligned = g_vtxAlignPrefix + g_vtxAlignSuffix;
     if (aligned == 0) {
-      Log.info("  count-change alignment: {} draw(s) changed vertex count but NONE could be "
-               "scored (no shared vertices at all). Nothing can be said about which end grows.",
-               g_vtxCountChanged);
+      Log.info(
+          "  count-change alignment: {} draw(s) changed vertex count but NONE could be "
+          "scored (no shared vertices at all). Nothing can be said about which end grows.",
+          g_vtxCountChanged);
     } else {
       const double win = g_vtxAlignWinSum / (double)aligned;
       const double lose = g_vtxAlignLoseSum / (double)aligned;
-      Log.info("  count-change alignment: of {} scored draw(s), {} matched better as a PREFIX (the "
-               "shared vertices are at the front, growth at the back) and {} as a SUFFIX. Mean "
-               "per-coordinate distance {:.3f} for the winning alignment against {:.3f} for the "
-               "losing one — a ratio near 1 means NEITHER end really corresponds and lerping the "
-               "shared segment would smear two unrelated shapes, whatever the win rate says.",
-               aligned, g_vtxAlignPrefix, g_vtxAlignSuffix, win, lose);
+      Log.info(
+          "  count-change alignment: of {} scored draw(s), {} matched better as a PREFIX (the "
+          "shared vertices are at the front, growth at the back) and {} as a SUFFIX. Mean "
+          "per-coordinate distance {:.3f} for the winning alignment against {:.3f} for the "
+          "losing one — a ratio near 1 means NEITHER end really corresponds and lerping the "
+          "shared segment would smear two unrelated shapes, whatever the win rate says.",
+          aligned, g_vtxAlignPrefix, g_vtxAlignSuffix, win, lose);
     }
   }
   // BY POPULATION, because the two failure modes mean opposite things and the total cannot separate
@@ -1415,15 +1465,14 @@ void report_vertex_interp() {
   // whether that is legitimate (it left the scene) or a tagging gap is worth knowing per system.
   for (int p = 0; p < kMaxPop; ++p) {
     const long t = g_vtxPopPatched[p] + g_vtxPopUnpaired[p] + g_vtxPopCountChanged[p];
-    if (t == 0) continue;
-    Log.info("  vertex path: {:<28} {} of {} lerped ({:.1f}%) — extras: {} draw(s), {} value(s); "
-             "{} not consecutive, {} changed vertex count",
-             g_popName[p].empty() ? (p == 0 ? std::string("(unlabelled)")
-                                            : "pop " + std::to_string(p))
-                                  : g_popName[p],
-             g_vtxPopPatched[p], t, 100.0 * (double)g_vtxPopPatched[p] / (double)t,
-             g_vtxPopExtraDraws[p], g_vtxPopExtraValues[p], g_vtxPopUnpaired[p],
-             g_vtxPopCountChanged[p]);
+    if (t == 0)
+      continue;
+    Log.info(
+        "  vertex path: {:<28} {} of {} lerped ({:.1f}%) — extras: {} draw(s), {} value(s); "
+        "{} not consecutive, {} changed vertex count",
+        g_popName[p].empty() ? (p == 0 ? std::string("(unlabelled)") : "pop " + std::to_string(p)) : g_popName[p],
+        g_vtxPopPatched[p], t, 100.0 * (double)g_vtxPopPatched[p] / (double)t, g_vtxPopExtraDraws[p],
+        g_vtxPopExtraValues[p], g_vtxPopUnpaired[p], g_vtxPopCountChanged[p]);
   }
 }
 
@@ -1447,8 +1496,8 @@ void set_tag_world_pos(uint64_t tag, float x, float y, float z) {
   b.cur[2] = z;
 }
 
-bool patch_billboard(uint64_t tag, const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
-                     uint32_t mtxPosOffset, uint32_t mtxNrmOffset, float alpha) {
+bool patch_billboard(uint64_t tag, const uint8_t* src, uint8_t* dst, uint32_t uniformSize, uint32_t mtxPosOffset,
+                     uint32_t mtxNrmOffset, float alpha) {
   if (tag == 0 || !g_camDeltaValid || src == nullptr || dst == nullptr) {
     return false;
   }
@@ -1492,13 +1541,11 @@ bool patch_billboard(uint64_t tag, const uint8_t* src, uint8_t* dst, uint32_t un
   // CURRENT world position from the interpolated viewpoint; what is wanted is its INTERPOLATED world
   // position from that viewpoint. The difference is a world-space displacement, rotated into eye
   // space by the interpolated view.
-  const float k = alpha - 1.0f;   // -(1 - alpha)
-  const float dw[3] = {k * (b.cur[0] - b.prev[0]), k * (b.cur[1] - b.prev[1]),
-                       k * (b.cur[2] - b.prev[2])};
+  const float k = alpha - 1.0f; // -(1 - alpha)
+  const float dw[3] = {k * (b.cur[0] - b.prev[0]), k * (b.cur[1] - b.prev[1]), k * (b.cur[2] - b.prev[2])};
   float de[3];
   for (int r = 0; r < 3; ++r) {
-    de[r] = g_viewLerp[r * 4 + 0] * dw[0] + g_viewLerp[r * 4 + 1] * dw[1] +
-            g_viewLerp[r * 4 + 2] * dw[2];
+    de[r] = g_viewLerp[r * 4 + 0] * dw[0] + g_viewLerp[r * 4 + 1] * dw[1] + g_viewLerp[r * 4 + 2] * dw[2];
   }
   const auto* srcPos = reinterpret_cast<const float*>(src + mtxPosOffset);
   const auto* srcNrm = reinterpret_cast<const float*>(src + mtxNrmOffset);
@@ -1517,7 +1564,8 @@ bool patch_billboard(uint64_t tag, const uint8_t* src, uint8_t* dst, uint32_t un
     outN[3] = outN[7] = outN[11] = 0.0f;
     std::memcpy(dstNrm + slot * 12, outN, sizeof(outN));
   }
-  if (!g_resampling) ++g_billboardPatched;
+  if (!g_resampling)
+    ++g_billboardPatched;
   return true;
 }
 
@@ -1568,13 +1616,21 @@ bool begin_camera_delta(float alpha) {
       }
     }
     double c = (tr - 1.0) * 0.5;
-    if (c > 1.0) { c = 1.0; }
-    if (c < -1.0) { c = -1.0; }
+    if (c > 1.0) {
+      c = 1.0;
+    }
+    if (c < -1.0) {
+      c = -1.0;
+    }
     const double rotDeg = std::acos(c) * (180.0 / 3.14159265358979323846);
     g_camEyeSum += eye;
-    if (eye > g_camEyeMax) { g_camEyeMax = eye; }
+    if (eye > g_camEyeMax) {
+      g_camEyeMax = eye;
+    }
     g_camRotSumDeg += rotDeg;
-    if (rotDeg > g_camRotMaxDeg) { g_camRotMaxDeg = rotDeg; }
+    if (rotDeg > g_camRotMaxDeg) {
+      g_camRotMaxDeg = rotDeg;
+    }
     ++g_camN;
     int bucket = 0;
     for (double edge = 1.0; bucket < kCamBuckets - 1 && eye >= edge; edge *= 10.0) {
@@ -1592,30 +1648,30 @@ bool begin_camera_delta(float alpha) {
     // The 1000 only decides what gets PRINTED; nothing branches on it.
     if (eye > 1000.0 && g_eyeCasesPrinted < 4) {
       ++g_eyeCasesPrinted;
-      Log.info("large camera step at tick {} ({:.1f} units) — preceding eye positions:", g_tickIndex,
-               eye);
+      Log.info("large camera step at tick {} ({:.1f} units) — preceding eye positions:", g_tickIndex, eye);
       for (int i = 0; i < kEyeRing; ++i) {
         const EyeSample& s = g_eyeRing[(g_eyeRingPos + i) % kEyeRing];
         if (s.tick >= 0) {
           Log.info("    tick {}: eye ({:.1f}, {:.1f}, {:.1f})", s.tick, s.x, s.y, s.z);
         }
       }
-      Log.info("    tick {}: eye ({:.1f}, {:.1f}, {:.1f})  <-- the step", g_tickIndex,
-               g_invViewCur[3], g_invViewCur[7], g_invViewCur[11]);
-      g_eyeFollow = 3;   // and the ticks after it, which is what distinguishes the two shapes
+      Log.info("    tick {}: eye ({:.1f}, {:.1f}, {:.1f})  <-- the step", g_tickIndex, g_invViewCur[3], g_invViewCur[7],
+               g_invViewCur[11]);
+      g_eyeFollow = 3; // and the ticks after it, which is what distinguishes the two shapes
     } else if (g_eyeFollow > 0) {
       --g_eyeFollow;
-      Log.info("    tick {}: eye ({:.1f}, {:.1f}, {:.1f})  <-- after (returns => camera aliasing, "
-               "stays => real cut)",
-               g_tickIndex, g_invViewCur[3], g_invViewCur[7], g_invViewCur[11]);
+      Log.info(
+          "    tick {}: eye ({:.1f}, {:.1f}, {:.1f})  <-- after (returns => camera aliasing, "
+          "stays => real cut)",
+          g_tickIndex, g_invViewCur[3], g_invViewCur[7], g_invViewCur[11]);
     }
-    g_eyeRing[g_eyeRingPos] = EyeSample{g_tickIndex, (float)g_invViewCur[3], (float)g_invViewCur[7],
-                                        (float)g_invViewCur[11]};
+    g_eyeRing[g_eyeRingPos] =
+        EyeSample{g_tickIndex, (float)g_invViewCur[3], (float)g_invViewCur[7], (float)g_invViewCur[11]};
     g_eyeRingPos = (g_eyeRingPos + 1) % kEyeRing;
   }
   if (!g_haveViewCur || !g_haveViewPrev) {
     g_sampleCameraValid = false;
-    return false;   // first tick, or the emitter is not supplying a view: nothing to interpolate
+    return false; // first tick, or the emitter is not supplying a view: nothing to interpolate
   }
   float lerped[12];
   for (int i = 0; i < 12; ++i) {
@@ -1627,9 +1683,10 @@ bool begin_camera_delta(float alpha) {
     static bool warned = false;
     if (!warned) {
       warned = true;
-      Log.error("this tick's view matrix is singular, so V_lerp*V_cur^-1 does not exist. Camera "
-                "interpolation is OFF for unpaired draws, which means they will render from the "
-                "current viewpoint while paired ones do not — expect the frame to tear.");
+      Log.error(
+          "this tick's view matrix is singular, so V_lerp*V_cur^-1 does not exist. Camera "
+          "interpolation is OFF for unpaired draws, which means they will render from the "
+          "current viewpoint while paired ones do not — expect the frame to tear.");
     }
     return false;
   }
@@ -1694,18 +1751,20 @@ bool camera_patch_enabled() {
 // to the pairing itself. Not done; camera-only is reported whole and read as an UPPER BOUND on the
 // defect rather than a measurement of it.
 
-void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
-                       uint32_t mtxPosOffset, uint32_t mtxNrmOffset, uint32_t texMtxCamMask) {
+void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize, uint32_t mtxPosOffset,
+                       uint32_t mtxNrmOffset, uint32_t texMtxCamMask) {
   if (!camera_patch_enabled()) {
     return;
   }
   if (!g_camDeltaValid || dst == nullptr || src == nullptr) {
-    if (!g_resampling) ++g_camRefusedNoDelta;
+    if (!g_resampling)
+      ++g_camRefusedNoDelta;
     return;
   }
   if (mtxPosOffset == 0 || mtxNrmOffset == 0 || mtxPosOffset + kMtxBytes > uniformSize ||
       mtxNrmOffset + kMtxBytes > uniformSize) {
-    if (!g_resampling) ++g_camRefusedBadOffset;
+    if (!g_resampling)
+      ++g_camRefusedBadOffset;
     return;
   }
   // EVERY READ FROM src, EVERY WRITE TO dst — the same rule patch_draw follows, and for the same
@@ -1730,7 +1789,8 @@ void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
     out[11] = srcNrm[slot * 12 + 11];
     std::memcpy(dstNrm + slot * 12, out, sizeof(out));
   }
-  if (!g_resampling) ++g_cameraPatched;
+  if (!g_resampling)
+    ++g_cameraPatched;
 
   // EYE-SPACE TEXTURE MATRICES. The position block above moved this draw's vertices to the
   // interpolated viewpoint. For a texgen sourced from GX_TG_POS the UV is computed from the RAW
@@ -1763,7 +1823,10 @@ void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
     bool identity = true;
     for (int e = 0; e < 12; ++e) {
       const float d = pn[e] - kI[e];
-      if (d < -1e-4f || d > 1e-4f) { identity = false; break; }
+      if (d < -1e-4f || d > 1e-4f) {
+        identity = false;
+        break;
+      }
     }
     for (int idx = 0; identity && idx < 32; ++idx) {
       if ((texMtxCamMask & (1u << idx)) == 0) {
@@ -1771,13 +1834,15 @@ void patch_camera_only(const uint8_t* src, uint8_t* dst, uint32_t uniformSize,
       }
       const uint32_t off = mtxPosOffset + static_cast<uint32_t>(idx) * kOneMtxBytes;
       if (off + kOneMtxBytes > uniformSize) {
-        if (!g_resampling) ++g_texMtxRefusedBadOffset;
+        if (!g_resampling)
+          ++g_texMtxRefusedBadOffset;
         continue;
       }
       float out[12];
       compose(reinterpret_cast<const float*>(src + off), g_camDelta, out);
       std::memcpy(dst + off, out, sizeof(out));
-      if (!g_resampling) ++g_texMtxPatched;
+      if (!g_resampling)
+        ++g_texMtxPatched;
     }
   }
 }
@@ -1801,20 +1866,33 @@ void reset_stats() {
   g_objDeltaN = g_objDeltaUnavailable = 0;
   g_snappedDiscontinuity = 0;
   g_snappedDiscontinuityMax = g_acceptedMax = 0.0;
-  for (int i = 0; i < kObjBuckets; ++i) { g_objHist[i] = 0; g_objHistRefused[i] = 0; }
-  for (int p = 0; p < 256; ++p) { g_refusedPop[p] = 0; }
+  for (int i = 0; i < kObjBuckets; ++i) {
+    g_objHist[i] = 0;
+    g_objHistRefused[i] = 0;
+  }
+  for (int p = 0; p < 256; ++p) {
+    g_refusedPop[p] = 0;
+  }
   g_refusedShape.clear();
   g_refusedShown = 0;
   g_refusedLastTick = -1;
   for (int p = 0; p < kMaxPop; ++p) {
-    for (int i = 0; i < kObjBuckets; ++i) { g_objHistPop[p][i] = 0; }
+    for (int i = 0; i < kObjBuckets; ++i) {
+      g_objHistPop[p][i] = 0;
+    }
   }
-  for (int i = 0; i < kWorstDraws; ++i) { g_worstDraw[i] = WorstDraw{}; }
-  for (int i = 0; i < kCamBuckets; ++i) { g_camHist[i] = 0; }
+  for (int i = 0; i < kWorstDraws; ++i) {
+    g_worstDraw[i] = WorstDraw{};
+  }
+  for (int i = 0; i < kCamBuckets; ++i) {
+    g_camHist[i] = 0;
+  }
   g_camEyeSum = g_camEyeMax = g_camRotSumDeg = g_camRotMaxDeg = 0.0;
   g_camN = 0;
   g_tickIndex = 0;
-  for (int i = 0; i < kWorstTicks; ++i) { g_worst[i] = WorstTick{}; }
+  for (int i = 0; i < kWorstTicks; ++i) {
+    g_worst[i] = WorstTick{};
+  }
   g_haveViewCur = g_haveViewPrev = g_haveInvCur = g_haveInvPrev = false;
   g_camDeltaValid = false;
   g_cameraPatched = 0;
@@ -1826,7 +1904,8 @@ void reset_stats() {
   g_vtxFirstSight = g_vtxGapPatched = g_vtxTooStale = 0;
   g_vtxAlignPrefix = g_vtxAlignSuffix = 0;
   g_vtxAlignWinSum = g_vtxAlignLoseSum = 0.0;
-  for (long& n : g_vtxGapHist) n = 0;
+  for (long& n : g_vtxGapHist)
+    n = 0;
   for (int p = 0; p < 256; ++p) {
     g_vtxPopPatched[p] = g_vtxPopUnpaired[p] = g_vtxPopCountChanged[p] = 0;
     g_vtxPopExtraDraws[p] = g_vtxPopExtraValues[p] = 0;
@@ -1841,8 +1920,7 @@ void make_view_at(float x, float y, float z, float* out) {
 
 // Write V*M for an object at world position (ox,oy,oz) into slot 0 of a uniform block, both the
 // pos and nrm spans. M is a pure translation, so V*M = [I | obj - eye].
-void write_draw_block(uint8_t* buf, uint32_t posOff, uint32_t nrmOff, const float* view, float ox,
-                      float oy, float oz) {
+void write_draw_block(uint8_t* buf, uint32_t posOff, uint32_t nrmOff, const float* view, float ox, float oy, float oz) {
   float a[12] = {1, 0, 0, view[3] + ox, 0, 1, 0, view[7] + oy, 0, 0, 1, view[11] + oz};
   std::memcpy(buf + posOff, a, sizeof(a));
   std::memcpy(buf + nrmOff, a, sizeof(a));
@@ -1860,9 +1938,9 @@ bool selftest() {
   // entirely would pass B and fail A.
   struct Case {
     const char* name;
-    float eye0[3], eye1[3];   // camera world position, tick 0 -> tick 1
-    float obj0[3], obj1[3];   // object world position, tick 0 -> tick 1
-    bool wantPaired;          // false = the discontinuity gate is expected to REFUSE this one
+    float eye0[3], eye1[3]; // camera world position, tick 0 -> tick 1
+    float obj0[3], obj1[3]; // object world position, tick 0 -> tick 1
+    bool wantPaired;        // false = the discontinuity gate is expected to REFUSE this one
     double wantTotal, wantObj;
   };
   // THE OBJECT CASE MOVES 50 UNITS, NOT 1000, AND THAT IS THE POINT OF THE THIRD CASE.
@@ -1912,8 +1990,7 @@ bool selftest() {
     const double gotObj = g_objDeltaN ? g_objDeltaSum / (double)g_objDeltaN : -1.0;
     bool pass;
     if (c.wantPaired) {
-      pass = paired && std::fabs(gotTotal - c.wantTotal) < 0.01 &&
-             std::fabs(gotObj - c.wantObj) < 0.01;
+      pass = paired && std::fabs(gotTotal - c.wantTotal) < 0.01 && std::fabs(gotObj - c.wantObj) < 0.01;
     } else {
       // Refused for the RIGHT REASON: not paired, and the discontinuity counter is the thing that
       // moved. A draw refused by the vertex-count gate or by a missing previous tick would also
@@ -1923,15 +2000,17 @@ bool selftest() {
     if (!pass) {
       ok = false;
       if (c.wantPaired) {
-        Log.error("SELFTEST FAILED [{}]: paired={} total delta {:.3f} (want {:.3f}) object delta "
-                  "{:.3f} (want {:.3f}). The camera/object attribution does not discriminate, so any "
-                  "conclusion drawn from those two numbers is unfounded.",
-                  c.name, paired, gotTotal, c.wantTotal, gotObj, c.wantObj);
+        Log.error(
+            "SELFTEST FAILED [{}]: paired={} total delta {:.3f} (want {:.3f}) object delta "
+            "{:.3f} (want {:.3f}). The camera/object attribution does not discriminate, so any "
+            "conclusion drawn from those two numbers is unfounded.",
+            c.name, paired, gotTotal, c.wantTotal, gotObj, c.wantObj);
       } else {
-        Log.error("SELFTEST FAILED [{}]: paired={} (want false), discontinuity refusals {} (want 1). "
-                  "The gate that is supposed to refuse a teleport did not fire on one, so its "
-                  "\"0 refused\" in the audit means nothing.",
-                  c.name, paired, g_snappedDiscontinuity);
+        Log.error(
+            "SELFTEST FAILED [{}]: paired={} (want false), discontinuity refusals {} (want 1). "
+            "The gate that is supposed to refuse a teleport did not fire on one, so its "
+            "\"0 refused\" in the audit means nothing.",
+            c.name, paired, g_snappedDiscontinuity);
       }
     }
   }
@@ -1972,8 +2051,7 @@ bool selftest() {
     begin_camera_delta(0.5f);
     write_draw_block(src.data(), kPos, kNrm, v, 0, 0, 0);
     const bool pairedSecond =
-        patch_draw(kNewTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0,
-                   &birthSecond);
+        patch_draw(kNewTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0, &birthSecond);
     end_tick();
 
     // kGapTag returns after ONE skipped tick. It must now PAIR — that is the gap tolerance — and it
@@ -1986,31 +2064,33 @@ bool selftest() {
     begin_camera_delta(0.5f);
     write_draw_block(src.data(), kPos, kNrm, v, 0, 0, 0);
     const bool pairedReturn =
-        patch_draw(kGapTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0,
-                   &birthReturn);
+        patch_draw(kGapTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0, &birthReturn);
     end_tick();
 
     if (pairedFirst || !birthNew) {
       ok = false;
-      Log.error("SELFTEST FAILED [birth flag]: a tag never seen before reported paired={} birth={} "
-                "(want false/true). Every first sighting would be filed as a DEFECT, and every "
-                "once-per-tick population would read PARTIAL forever.",
-                pairedFirst, birthNew);
+      Log.error(
+          "SELFTEST FAILED [birth flag]: a tag never seen before reported paired={} birth={} "
+          "(want false/true). Every first sighting would be filed as a DEFECT, and every "
+          "once-per-tick population would read PARTIAL forever.",
+          pairedFirst, birthNew);
     }
     if (!pairedSecond || birthSecond) {
       ok = false;
-      Log.error("SELFTEST FAILED [birth flag]: the same tag one tick later reported paired={} "
-                "birth={} (want true/false). A flag that stays set would exclude real draws from "
-                "the audit denominator.",
-                pairedSecond, birthSecond);
+      Log.error(
+          "SELFTEST FAILED [birth flag]: the same tag one tick later reported paired={} "
+          "birth={} (want true/false). A flag that stays set would exclude real draws from "
+          "the audit denominator.",
+          pairedSecond, birthSecond);
     }
     if (!pairedReturn || birthReturn) {
       ok = false;
-      Log.error("SELFTEST FAILED [gap tolerance]: a tag that drew, skipped ONE tick and came back "
-                "reported paired={} birth={} (want true/false). Either the gap tolerance is not "
-                "reaching a two-tick-old sample, or an unpaired draw is being called a birth — the "
-                "second would make the audit's 100% rows a tautology.",
-                pairedReturn, birthReturn);
+      Log.error(
+          "SELFTEST FAILED [gap tolerance]: a tag that drew, skipped ONE tick and came back "
+          "reported paired={} birth={} (want true/false). Either the gap tolerance is not "
+          "reaching a two-tick-old sample, or an unpaired draw is being called a birth — the "
+          "second would make the audit's 100% rows a tautology.",
+          pairedReturn, birthReturn);
     }
 
     // AND THE OTHER SIDE OF THE BOUND. A tolerance with no upper limit is not a tolerance, and a
@@ -2035,15 +2115,15 @@ bool selftest() {
     begin_camera_delta(0.5f);
     write_draw_block(src.data(), kPos, kNrm, v, 0, 0, 0);
     const bool pairedStale =
-        patch_draw(kStaleTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0,
-                   &birthStale);
+        patch_draw(kStaleTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.5f, 0, 0, 0, &birthStale);
     end_tick();
     if (pairedStale || birthStale) {
       ok = false;
-      Log.error("SELFTEST FAILED [gap bound]: a sample {} tick(s) old reported paired={} birth={} "
-                "(want false/false). A tolerance with no upper bound sweeps an object across "
-                "wherever it went while nobody was looking.",
-                kMaxGapMtx + 2, pairedStale, birthStale);
+      Log.error(
+          "SELFTEST FAILED [gap bound]: a sample {} tick(s) old reported paired={} birth={} "
+          "(want false/false). A tolerance with no upper bound sweeps an object across "
+          "wherever it went while nobody was looking.",
+          kMaxGapMtx + 2, pairedStale, birthStale);
     }
   }
 
@@ -2058,8 +2138,8 @@ bool selftest() {
     reset_stats();
     constexpr uint64_t kS16Tag = 0x51616u;
     uint8_t prev[6] = {}, cur[6] = {}, out[6] = {};
-    const int16_t previous[3] = {-8, 8, 20};  // {-4, 4, 10} with frac=1
-    const int16_t current[3] = {8, -8, 28};   // {4, -4, 14} with frac=1
+    const int16_t previous[3] = {-8, 8, 20}; // {-4, 4, 10} with frac=1
+    const int16_t current[3] = {8, -8, 28};  // {4, -4, 14} with frac=1
     for (int c = 0; c < 3; ++c) {
       put_be_s16(prev + c * 2, previous[c]);
       put_be_s16(cur + c * 2, current[c]);
@@ -2080,10 +2160,11 @@ bool selftest() {
     const bool exact = be_s16(out) == 0 && be_s16(out + 2) == 0 && be_s16(out + 4) == 24;
     if (first || !second || !exact || std::memcmp(cur, out, sizeof(cur)) == 0) {
       ok = false;
-      Log.error("SELFTEST FAILED [s16 vertex interpolation]: first={} second={} result=({}, {}, {}) "
-                "(want false/true and 0,0,24). Direct signed-16 positions are either not paired, "
-                "not decoded with their VAT fraction, or not encoded back as GC big-endian values.",
-                first, second, be_s16(out), be_s16(out + 2), be_s16(out + 4));
+      Log.error(
+          "SELFTEST FAILED [s16 vertex interpolation]: first={} second={} result=({}, {}, {}) "
+          "(want false/true and 0,0,24). Direct signed-16 positions are either not paired, "
+          "not decoded with their VAT fraction, or not encoded back as GC big-endian values.",
+          first, second, be_s16(out), be_s16(out + 2), be_s16(out + 4));
     }
   }
 
@@ -2097,29 +2178,37 @@ bool selftest() {
     constexpr uint16_t kStride = 21;
     constexpr uint64_t kMask = (uint64_t{1} << 13) | (uint64_t{1} << 17);
     uint8_t prev[kStride] = {}, cur[kStride] = {}, out[kStride] = {};
-    put_be_f32(prev + 0, 0.f); put_be_f32(prev + 4, 2.f); put_be_f32(prev + 8, 4.f);
-    put_be_f32(prev + 13, 10.f); put_be_f32(prev + 17, 20.f);
-    put_be_f32(cur + 0, 2.f); put_be_f32(cur + 4, 4.f); put_be_f32(cur + 8, 6.f);
-    put_be_f32(cur + 13, 14.f); put_be_f32(cur + 17, 28.f);
-    float v[12]; make_view_at(0, 0, 0, v);
-    begin_tick(); set_view_matrix(v); begin_camera_delta(0.5f);
-    const bool first = patch_vertices(kTag, 1, kStride, 0, false, 0, kMask,
-                                      prev, out, 0.5f, 6);
+    put_be_f32(prev + 0, 0.f);
+    put_be_f32(prev + 4, 2.f);
+    put_be_f32(prev + 8, 4.f);
+    put_be_f32(prev + 13, 10.f);
+    put_be_f32(prev + 17, 20.f);
+    put_be_f32(cur + 0, 2.f);
+    put_be_f32(cur + 4, 4.f);
+    put_be_f32(cur + 8, 6.f);
+    put_be_f32(cur + 13, 14.f);
+    put_be_f32(cur + 17, 28.f);
+    float v[12];
+    make_view_at(0, 0, 0, v);
+    begin_tick();
+    set_view_matrix(v);
+    begin_camera_delta(0.5f);
+    const bool first = patch_vertices(kTag, 1, kStride, 0, false, 0, kMask, prev, out, 0.5f, 6);
     end_tick();
     std::memcpy(out, cur, sizeof(out));
-    begin_tick(); set_view_matrix(v); begin_camera_delta(0.5f);
-    const bool second = patch_vertices(kTag, 1, kStride, 0, false, 0, kMask,
-                                       cur, out, 0.5f, 6);
+    begin_tick();
+    set_view_matrix(v);
+    begin_camera_delta(0.5f);
+    const bool second = patch_vertices(kTag, 1, kStride, 0, false, 0, kMask, cur, out, 0.5f, 6);
     end_tick();
-    const bool exact = be_f32(out + 0) == 1.f && be_f32(out + 4) == 3.f &&
-                       be_f32(out + 8) == 5.f && be_f32(out + 13) == 12.f &&
-                       be_f32(out + 17) == 24.f;
+    const bool exact = be_f32(out + 0) == 1.f && be_f32(out + 4) == 3.f && be_f32(out + 8) == 5.f &&
+                       be_f32(out + 13) == 12.f && be_f32(out + 17) == 24.f;
     if (first || !second || !exact) {
       ok = false;
-      Log.error("SELFTEST FAILED [deforming f32 attributes]: first={} second={} "
-                "XYZ=({},{},{}) ST=({},{}) (want false/true, 1,3,5 and 12,24)",
-                first, second, be_f32(out), be_f32(out + 4), be_f32(out + 8),
-                be_f32(out + 13), be_f32(out + 17));
+      Log.error(
+          "SELFTEST FAILED [deforming f32 attributes]: first={} second={} "
+          "XYZ=({},{},{}) ST=({},{}) (want false/true, 1,3,5 and 12,24)",
+          first, second, be_f32(out), be_f32(out + 4), be_f32(out + 8), be_f32(out + 13), be_f32(out + 17));
     }
   }
 
@@ -2131,50 +2220,54 @@ bool selftest() {
   {
     reset_stats();
     constexpr uint64_t kTag = 0x52534d50u;
-    float view[12]; make_view_at(0, 0, 0, view);
-    begin_tick(); set_view_matrix(view); begin_camera_delta(0.25f);
+    float view[12];
+    make_view_at(0, 0, 0, view);
+    begin_tick();
+    set_view_matrix(view);
+    begin_camera_delta(0.25f);
     write_draw_block(src.data(), kPos, kNrm, view, 0, 0, 0);
     patch_draw(kTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.25f, 0, 0, 0);
     end_tick();
 
-    begin_tick(); set_view_matrix(view); begin_camera_delta(0.25f);
+    begin_tick();
+    set_view_matrix(view);
+    begin_camera_delta(0.25f);
     write_draw_block(src.data(), kPos, kNrm, view, 40, 0, 0);
-    const bool quarter = patch_draw(kTag, 3, src.data(), dst.data(), kSize, kPos, kNrm,
-                                    0.25f, 0, 0, 0);
+    const bool quarter = patch_draw(kTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.25f, 0, 0, 0);
     end_tick();
     const float atQuarter = reinterpret_cast<const float*>(dst.data() + kPos)[3];
     const long committedTick = g_tickIndex;
     const long committedPairs = g_paired;
 
-    begin_tick(true); begin_camera_delta(0.75f);
-    const bool threeQuarter = patch_draw(kTag, 3, src.data(), dst.data(), kSize, kPos, kNrm,
-                                         0.75f, 0, 0, 0);
+    begin_tick(true);
+    begin_camera_delta(0.75f);
+    const bool threeQuarter = patch_draw(kTag, 3, src.data(), dst.data(), kSize, kPos, kNrm, 0.75f, 0, 0, 0);
     end_tick();
     const float atThreeQuarter = reinterpret_cast<const float*>(dst.data() + kPos)[3];
     if (!quarter || !threeQuarter || std::fabs(atQuarter - 10.0f) > 0.01f ||
-        std::fabs(atThreeQuarter - 30.0f) > 0.01f || g_tickIndex != committedTick ||
-        g_paired != committedPairs) {
+        std::fabs(atThreeQuarter - 30.0f) > 0.01f || g_tickIndex != committedTick || g_paired != committedPairs) {
       ok = false;
-      Log.error("SELFTEST FAILED [read-only resampling]: paired={}/{} positions={}/{} tick={}/{} "
-                "pairs={}/{} (want true/true, 10/30, and unchanged history)",
-                quarter, threeQuarter, atQuarter, atThreeQuarter, committedTick, g_tickIndex,
-                committedPairs, g_paired);
+      Log.error(
+          "SELFTEST FAILED [read-only resampling]: paired={}/{} positions={}/{} tick={}/{} "
+          "pairs={}/{} (want true/true, 10/30, and unchanged history)",
+          quarter, threeQuarter, atQuarter, atThreeQuarter, committedTick, g_tickIndex, committedPairs, g_paired);
     }
   }
 
   reset_stats();
   if (ok) {
-    Log.info("interp selftest PASSED: camera/object attribution separates a 1000-unit camera move "
-             "(object delta 0) from a 50-unit object move (object delta 50) — it has been run "
-             "against both classes, not just the one it is expected to find — and the discontinuity "
-             "gate demonstrably FIRES on a 1000-unit teleport, so its refusal count is a real "
-             "measurement rather than a switch nobody has seen move. The birth flag was run "
-             "against both classes too: a never-seen tag reads birth, and a tag that drew, skipped "
-             "a tick and returned reads NOT a birth — so the audit's birth column cannot be "
-             "swallowing real gaps. The gap tolerance is bounded at both ends: a one-tick gap "
-             "PAIRS and a gap past the limit is REFUSED, both demonstrated rather than assumed. "
-             "Read-only resampling produces distinct .25/.75 poses from one committed pair without "
-             "advancing its tick or counters.");
+    Log.info(
+        "interp selftest PASSED: camera/object attribution separates a 1000-unit camera move "
+        "(object delta 0) from a 50-unit object move (object delta 50) — it has been run "
+        "against both classes, not just the one it is expected to find — and the discontinuity "
+        "gate demonstrably FIRES on a 1000-unit teleport, so its refusal count is a real "
+        "measurement rather than a switch nobody has seen move. The birth flag was run "
+        "against both classes too: a never-seen tag reads birth, and a tag that drew, skipped "
+        "a tick and returned reads NOT a birth — so the audit's birth column cannot be "
+        "swallowing real gaps. The gap tolerance is bounded at both ends: a one-tick gap "
+        "PAIRS and a gap past the limit is REFUSED, both demonstrated rather than assumed. "
+        "Read-only resampling produces distinct .25/.75 poses from one committed pair without "
+        "advancing its tick or counters.");
   }
   return ok;
 }
@@ -2182,7 +2275,8 @@ bool selftest() {
 long tick_index() { return g_tickIndex; }
 
 void end_tick() {
-  if (g_resampling) return;
+  if (g_resampling)
+    return;
   if (g_haveViewCur) {
     std::memcpy(g_viewPrev, g_viewCur, sizeof(g_viewPrev));
     g_haveViewPrev = true;
@@ -2194,55 +2288,60 @@ void report() {
   // Refuse rather than divide by nothing: "0% paired" from an empty run and "0% paired" from a
   // broken pairing are the same number, and only one of them is a defect.
   if (total == 0) {
-    Log.warn("interpolation pairing: NO TAGGED DRAWS AT ALL. This says nothing about pairing — "
-             "there was nothing to pair. Check that draw tags are being emitted.");
+    Log.warn(
+        "interpolation pairing: NO TAGGED DRAWS AT ALL. This says nothing about pairing — "
+        "there was nothing to pair. Check that draw tags are being emitted.");
     return;
   }
-  Log.info("interpolation pairing: {} of {} tagged draws paired with the previous tick ({:.1f}%); "
-           "{} unpaired (new or newly-split object — snaps, correct); {} MISMATCHED vertex counts "
-           "(snapped deliberately rather than smeared between two unrelated poses — a nonzero "
-           "count here means some object does not replay a stable display list)",
-           g_paired, total, 100.0 * (double)g_paired / (double)total, g_unpaired, g_mismatched);
+  Log.info(
+      "interpolation pairing: {} of {} tagged draws paired with the previous tick ({:.1f}%); "
+      "{} unpaired (new or newly-split object — snaps, correct); {} MISMATCHED vertex counts "
+      "(snapped deliberately rather than smeared between two unrelated poses — a nonzero "
+      "count here means some object does not replay a stable display list)",
+      g_paired, total, 100.0 * (double)g_paired / (double)total, g_unpaired, g_mismatched);
   // BILLBOARDS. Printed with BOTH numbers because "0 patched" has two opposite causes: no billboard
   // was tagged at all, or every tagged one failed to find a consecutive-tick partner.
-  Log.info("billboard interpolation: {} draw(s) had their own displacement applied as a translation, "
-           "{} were tagged but had no usable prev/cur pair (new particle, or one that skipped a "
-           "tick — those correctly fall back to the camera delta alone).{}",
-           g_billboardPatched, g_billboardUnpaired,
-           g_billboardPatched == 0
-               ? "  <-- NONE PATCHED. Either nothing recorded a world position for a tagged draw, or "
-                 "the tags never reached the draw. A particle-heavy scene reporting 0 here means the "
-                 "seam is not connected, NOT that particles do not move."
-               : "");
+  Log.info(
+      "billboard interpolation: {} draw(s) had their own displacement applied as a translation, "
+      "{} were tagged but had no usable prev/cur pair (new particle, or one that skipped a "
+      "tick — those correctly fall back to the camera delta alone).{}",
+      g_billboardPatched, g_billboardUnpaired,
+      g_billboardPatched == 0 ? "  <-- NONE PATCHED. Either nothing recorded a world position for a tagged draw, or "
+                                "the tags never reached the draw. A particle-heavy scene reporting 0 here means the "
+                                "seam is not connected, NOT that particles do not move."
+                              : "");
   if (g_billboardUnpaired != 0) {
-    Log.info("  of those unpaired: {} were a particle's FIRST sighting (a birth — no pair can exist, "
-             "and in a system that spawns continuously this is the spawn rate, not a defect) and {} "
-             "had samples that were not adjacent (drew, stopped, drew again — that one is a question "
-             "about the seam or about tag reuse).",
-             g_billboardBirth, g_billboardGap);
+    Log.info(
+        "  of those unpaired: {} were a particle's FIRST sighting (a birth — no pair can exist, "
+        "and in a system that spawns continuously this is the spawn rate, not a defect) and {} "
+        "had samples that were not adjacent (drew, stopped, drew again — that one is a question "
+        "about the seam or about tag reuse).",
+        g_billboardBirth, g_billboardGap);
   }
-  Log.info("paired-draw translation delta between ticks: mean {:.3f} max {:.3f} world units over {} "
-           "samples. A real object moves a fraction of a unit per 1/30 s — a mean in the hundreds "
-           "means pairing is returning some OTHER transform, which the smoothness metric cannot "
-           "see because a large consistent displacement still reads as even motion.",
-           g_transDeltaN ? g_transDeltaSum / (double)g_transDeltaN : 0.0, g_transDeltaMax,
-           g_transDeltaN);
+  Log.info(
+      "paired-draw translation delta between ticks: mean {:.3f} max {:.3f} world units over {} "
+      "samples. A real object moves a fraction of a unit per 1/30 s — a mean in the hundreds "
+      "means pairing is returning some OTHER transform, which the smoothness metric cannot "
+      "see because a large consistent displacement still reads as even motion.",
+      g_transDeltaN ? g_transDeltaSum / (double)g_transDeltaN : 0.0, g_transDeltaMax, g_transDeltaN);
   // ATTRIBUTION. The line above bundles object motion and camera motion, because pnMtx is
   // model x view. This one divides the camera out, and the PAIR of numbers is what identifies the
   // defect: a large total with a SMALL object delta is the camera moving the whole world (and a
   // large max there is a camera CUT, which must snap rather than lerp); a large object delta is a
   // pairing defect, some other object's transform coming back from the table.
   if (g_objDeltaN == 0) {
-    Log.warn("paired-draw delta ATTRIBUTION unavailable for all {} samples — no invertible view for "
-             "one of the two ticks, so the camera could not be divided out. The total-delta line "
-             "above therefore says NOTHING about whether the motion was the object or the camera.",
-             g_objDeltaUnavailable);
+    Log.warn(
+        "paired-draw delta ATTRIBUTION unavailable for all {} samples — no invertible view for "
+        "one of the two ticks, so the camera could not be divided out. The total-delta line "
+        "above therefore says NOTHING about whether the motion was the object or the camera.",
+        g_objDeltaUnavailable);
   } else {
-    Log.info("paired-draw delta with the CAMERA REMOVED (object's own world motion): mean {:.3f} max "
-             "{:.3f} over {} samples ({} samples had no invertible view and are excluded). Compare "
-             "with the total above: total >> object means the camera moved the world; object large "
-             "means pairing returned another object's transform.",
-             g_objDeltaSum / (double)g_objDeltaN, g_objDeltaMax, g_objDeltaN, g_objDeltaUnavailable);
+    Log.info(
+        "paired-draw delta with the CAMERA REMOVED (object's own world motion): mean {:.3f} max "
+        "{:.3f} over {} samples ({} samples had no invertible view and are excluded). Compare "
+        "with the total above: total >> object means the camera moved the world; object large "
+        "means pairing returned another object's transform.",
+        g_objDeltaSum / (double)g_objDeltaN, g_objDeltaMax, g_objDeltaN, g_objDeltaUnavailable);
     // WHAT THIS LINE USED TO SAY WAS WRONG, and it is worth the space to say so where the number is
     // printed. It read "anything from [10,100) up is a pose no object reaches in 1/30 s, so those
     // counts are the mispairings" — a threshold nobody had measured, condemning 84,507 draws on a
@@ -2252,47 +2351,50 @@ void report() {
     //
     // The boundary the data actually supports is 100, and it is supported by a GAP rather than by a
     // preference: the same run has 84,507 draws below it and 182 at or above, three decades away.
-    Log.info("  object-motion distribution (world units/tick): [0,0.1) {} | [0.1,1) {} | [1,10) {} | "
-             "[10,100) {} | [100,1k) {} | [1k,10k) {} | [10k,inf) {}. The first FOUR buckets are "
-             "ordinary motion — a running Mario measures up to 58 units/tick. Only [100,inf) is "
-             "beyond anything the game's own objects were observed to do, and those are the "
-             "mispairings (or genuine teleports, which must snap either way).",
-             g_objHist[0], g_objHist[1], g_objHist[2], g_objHist[3], g_objHist[4], g_objHist[5],
-             g_objHist[6]);
+    Log.info(
+        "  object-motion distribution (world units/tick): [0,0.1) {} | [0.1,1) {} | [1,10) {} | "
+        "[10,100) {} | [100,1k) {} | [1k,10k) {} | [10k,inf) {}. The first FOUR buckets are "
+        "ordinary motion — a running Mario measures up to 58 units/tick. Only [100,inf) is "
+        "beyond anything the game's own objects were observed to do, and those are the "
+        "mispairings (or genuine teleports, which must snap either way).",
+        g_objHist[0], g_objHist[1], g_objHist[2], g_objHist[3], g_objHist[4], g_objHist[5], g_objHist[6]);
     // WHO IS IN THE TAIL. Printed for every population with any draw at 10 units/tick or more,
     // because "6.8% of paired draws moved impossibly far" and "Mario and the particles moved fast"
     // are the same number until it is attributed.
-    Log.info("  discontinuity snap: {} paired draw(s) refused as DISCONTINUOUS — each moved further "
-             "in one tick than 4x what that same object moved in the tick before, with a floor of "
-             "{:.0f} units for an object with no history yet (largest refused {:.1f}); largest "
-             "delta ACCEPTED was {:.1f}, which is now allowed to exceed the floor because a fast "
-             "object earns its own speed. A count that climbs with scene SPEED rather than with "
-             "scene chaos would mean the ratio is too tight.",
-             g_snappedDiscontinuity, kDiscontinuity, g_snappedDiscontinuityMax, g_acceptedMax);
+    Log.info(
+        "  discontinuity snap: {} paired draw(s) refused as DISCONTINUOUS — each moved further "
+        "in one tick than 4x what that same object moved in the tick before, with a floor of "
+        "{:.0f} units for an object with no history yet (largest refused {:.1f}); largest "
+        "delta ACCEPTED was {:.1f}, which is now allowed to exceed the floor because a fast "
+        "object earns its own speed. A count that climbs with scene SPEED rather than with "
+        "scene chaos would mean the ratio is too tight.",
+        g_snappedDiscontinuity, kDiscontinuity, g_snappedDiscontinuityMax, g_acceptedMax);
     if (g_snappedDiscontinuity != 0) {
       // The refused deltas, on the SAME buckets. The accepted histogram above cannot show these —
       // a refusal returns before bucketing, so it reads [100,inf) 0 however many were cut — and the
       // shape here is what says whether the bound is right. Contiguous with the accepted bulk means
       // it is severing real motion; a cluster decades out means it is catching mispairs.
-      Log.info("    refused-delta distribution (same buckets): [0,0.1) {} | [0.1,1) {} | [1,10) {} | "
-               "[10,100) {} | [100,1k) {} | [1k,10k) {} | [10k,inf) {}",
-               g_objHistRefused[0], g_objHistRefused[1], g_objHistRefused[2], g_objHistRefused[3],
-               g_objHistRefused[4], g_objHistRefused[5], g_objHistRefused[6]);
+      Log.info(
+          "    refused-delta distribution (same buckets): [0,0.1) {} | [0.1,1) {} | [1,10) {} | "
+          "[10,100) {} | [100,1k) {} | [1k,10k) {} | [10k,inf) {}",
+          g_objHistRefused[0], g_objHistRefused[1], g_objHistRefused[2], g_objHistRefused[3], g_objHistRefused[4],
+          g_objHistRefused[5], g_objHistRefused[6]);
       {
         std::vector<std::pair<uint32_t, long>> v(g_refusedShape.begin(), g_refusedShape.end());
         std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
         const size_t n = v.size() < 6 ? v.size() : 6;
         for (size_t i = 0; i < n; ++i) {
-          Log.info("    refused most often: shape {:#010x} — {} draw(s) of {} total, over {} "
-                   "distinct shape(s)",
-                   v[i].first, v[i].second, g_snappedDiscontinuity, g_refusedShape.size());
+          Log.info(
+              "    refused most often: shape {:#010x} — {} draw(s) of {} total, over {} "
+              "distinct shape(s)",
+              v[i].first, v[i].second, g_snappedDiscontinuity, g_refusedShape.size());
         }
       }
       for (int p = 0; p < kMaxPop; ++p) {
-        if (g_refusedPop[p] == 0) continue;
+        if (g_refusedPop[p] == 0)
+          continue;
         Log.info("    refused by population: {:<28} {} draw(s)",
-                 g_popName[p].empty() ? (p == 0 ? std::string("(unlabelled)")
-                                               : "pop " + std::to_string(p))
+                 g_popName[p].empty() ? (p == 0 ? std::string("(unlabelled)") : "pop " + std::to_string(p))
                                       : g_popName[p],
                  g_refusedPop[p]);
       }
@@ -2301,33 +2403,33 @@ void report() {
       long tail = 0, total = 0;
       for (int b = 0; b < kObjBuckets; ++b) {
         total += g_objHistPop[p][b];
-        if (b >= 3) { tail += g_objHistPop[p][b]; }
+        if (b >= 3) {
+          tail += g_objHistPop[p][b];
+        }
       }
       if (tail == 0) {
         continue;
       }
-      Log.info("    motion tail by population: {:<24} {} of {} paired draw(s) at >=10 units/tick "
-               "({:.1f}%) — buckets [10,100) {} | [100,1k) {} | [1k,10k) {} | [10k,inf) {}. The "
-               "first of those is ordinary motion; the rest are the suspect ones.",
-               g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p))
-                                    : g_popName[p],
-               tail, total, total ? 100.0 * (double)tail / (double)total : 0.0,
-               g_objHistPop[p][3], g_objHistPop[p][4], g_objHistPop[p][5], g_objHistPop[p][6]);
+      Log.info(
+          "    motion tail by population: {:<24} {} of {} paired draw(s) at >=10 units/tick "
+          "({:.1f}%) — buckets [10,100) {} | [100,1k) {} | [1k,10k) {} | [10k,inf) {}. The "
+          "first of those is ordinary motion; the rest are the suspect ones.",
+          g_popName[p].empty() ? (p == 0 ? "(unlabelled)" : "pop " + std::to_string(p)) : g_popName[p], tail, total,
+          total ? 100.0 * (double)tail / (double)total : 0.0, g_objHistPop[p][3], g_objHistPop[p][4],
+          g_objHistPop[p][5], g_objHistPop[p][6]);
     }
     for (int i = 0; i < kWorstDraws; ++i) {
       if (g_worstDraw[i].tick >= 0) {
         // The tag is (guest J3DShape << 32 | instance draw-matrix pointer), so both halves are
         // printable guest addresses — the object is identifiable, not just countable.
         const int wp = g_worstDraw[i].pop;
-        Log.info("  worst draw: {:.3f} units, [{}] shape {:#010x} instance {:#010x} ordinal {} on "
-                 "tick {}",
-                 g_worstDraw[i].delta,
-                 g_popName[wp].empty() ? (wp == 0 ? std::string("unlabelled")
-                                                  : "pop " + std::to_string(wp))
-                                       : g_popName[wp],
-                 (uint32_t)(g_worstDraw[i].tag >> 32),
-                 (uint32_t)(g_worstDraw[i].tag & 0xffffffffu), g_worstDraw[i].ordinal,
-                 g_worstDraw[i].tick);
+        Log.info(
+            "  worst draw: {:.3f} units, [{}] shape {:#010x} instance {:#010x} ordinal {} on "
+            "tick {}",
+            g_worstDraw[i].delta,
+            g_popName[wp].empty() ? (wp == 0 ? std::string("unlabelled") : "pop " + std::to_string(wp)) : g_popName[wp],
+            (uint32_t)(g_worstDraw[i].tag >> 32), (uint32_t)(g_worstDraw[i].tag & 0xffffffffu), g_worstDraw[i].ordinal,
+            g_worstDraw[i].tick);
       }
     }
   }
@@ -2335,38 +2437,42 @@ void report() {
   // one; the histogram can, and it can also show the OTHER answer — a unimodal distribution means
   // this run contained no cuts at all, and any residual blamed on them is misattributed.
   if (g_camN == 0) {
-    Log.warn("camera step: NO TICK had two invertible views, so camera motion was never measured. "
-             "This is not 'the camera did not move' — it is 'this instrument saw nothing'.");
+    Log.warn(
+        "camera step: NO TICK had two invertible views, so camera motion was never measured. "
+        "This is not 'the camera did not move' — it is 'this instrument saw nothing'.");
   } else {
-    Log.info("camera step per tick over {} ticks: eye translation mean {:.3f} max {:.3f} world "
-             "units; rotation mean {:.3f} max {:.3f} deg",
-             g_camN, g_camEyeSum / (double)g_camN, g_camEyeMax, g_camRotSumDeg / (double)g_camN,
-             g_camRotMaxDeg);
-    Log.info("  eye-step distribution (world units/tick): [0,1) {} | [1,10) {} | [10,100) {} | "
-             "[100,1k) {} | [1k,10k) {} | [10k,inf) {}. BIMODAL — a dense bulk plus a few entries "
-             "decades away — is a camera CUT, a tick with no meaningful in-between that must snap. "
-             "UNIMODAL means this run contained no cuts and they cannot explain any residual.",
-             g_camHist[0], g_camHist[1], g_camHist[2], g_camHist[3], g_camHist[4], g_camHist[5]);
+    Log.info(
+        "camera step per tick over {} ticks: eye translation mean {:.3f} max {:.3f} world "
+        "units; rotation mean {:.3f} max {:.3f} deg",
+        g_camN, g_camEyeSum / (double)g_camN, g_camEyeMax, g_camRotSumDeg / (double)g_camN, g_camRotMaxDeg);
+    Log.info(
+        "  eye-step distribution (world units/tick): [0,1) {} | [1,10) {} | [10,100) {} | "
+        "[100,1k) {} | [1k,10k) {} | [10k,inf) {}. BIMODAL — a dense bulk plus a few entries "
+        "decades away — is a camera CUT, a tick with no meaningful in-between that must snap. "
+        "UNIMODAL means this run contained no cuts and they cannot explain any residual.",
+        g_camHist[0], g_camHist[1], g_camHist[2], g_camHist[3], g_camHist[4], g_camHist[5]);
     for (int i = 0; i < kWorstTicks; ++i) {
       if (g_worst[i].tick >= 0) {
-        Log.info("  worst tick #{}: eye step {:.3f} units, rotation {:.3f} deg", g_worst[i].tick,
-                 g_worst[i].eye, g_worst[i].rotDeg);
+        Log.info("  worst tick #{}: eye step {:.3f} units, rotation {:.3f} deg", g_worst[i].tick, g_worst[i].eye,
+                 g_worst[i].rotDeg);
       }
     }
   }
   // The camera line is separate because its failure is separate: pairing can be perfect while the
   // frame still tears, if unpaired draws are left at the current viewpoint.
   if (!g_haveViewCur) {
-    Log.warn("camera interpolation: NO VIEW MATRIX SUPPLIED. Every unpaired draw keeps the CURRENT "
-             "viewpoint while paired draws move to the in-between one, so the frame renders from "
-             "two viewpoints at once. This is the failure that makes partial coverage worse than "
-             "none — emit GX_AURORA_VIEW_MTX.");
+    Log.warn(
+        "camera interpolation: NO VIEW MATRIX SUPPLIED. Every unpaired draw keeps the CURRENT "
+        "viewpoint while paired draws move to the in-between one, so the frame renders from "
+        "two viewpoints at once. This is the failure that makes partial coverage worse than "
+        "none — emit GX_AURORA_VIEW_MTX.");
   } else {
-    Log.info("camera interpolation: {} draw uniforms carried the camera delta; REFUSED {} for no "
-             "usable camera delta and {} for an unusable matrix offset. A refused draw keeps the "
-             "CURRENT viewpoint while the rest of the frame moves to the in-between one, so a large "
-             "refusal count is the frame being drawn from two viewpoints at once.",
-             g_cameraPatched, g_camRefusedNoDelta, g_camRefusedBadOffset);
+    Log.info(
+        "camera interpolation: {} draw uniforms carried the camera delta; REFUSED {} for no "
+        "usable camera delta and {} for an unusable matrix offset. A refused draw keeps the "
+        "CURRENT viewpoint while the rest of the frame moves to the in-between one, so a large "
+        "refusal count is the frame being drawn from two viewpoints at once.",
+        g_cameraPatched, g_camRefusedNoDelta, g_camRefusedBadOffset);
   }
 
   // The eye-space texgen line, printed with its full denominator chain so that every zero in it
@@ -2376,23 +2482,23 @@ void report() {
   // how many draws used the construct, how the record-time gate disposed of them, and how the
   // cross-tick stability test then split the survivors into camera projections and object-locked
   // mappings.
-  Log.info("position-sourced texgens: {} draw(s) used one; {} rejected at record time (per-vertex "
-           "matrix index, or no matrix). Of the rest, the paired path measured {} STABLE (the "
-           "texture matrix tracks this draw's model-view, so it was re-composed with the "
-           "interpolated pose) and {} UNSTABLE (object-locked or animating, left alone); {} had no "
-           "previous tick to compare against, {} a singular model-view, {} carried more than one "
-           "such matrix and only the first was handled. Unpaired eye-space draws: {} texture "
-           "matrix write(s) carried the camera delta, {} refused for a bad offset.{}",
-           aurora::gx::fifo::g_texgenPosSourced, aurora::gx::fifo::g_texgenRejectIndexed,
-           g_texStable, g_texUnstable, g_texNoPrev, g_texSingular, g_texMultiSlot, g_texMtxPatched,
-           g_texMtxRefusedBadOffset,
-           aurora::gx::fifo::g_texgenPosSourced == 0
-               ? "   <-- NO DRAW IN THIS RUN USED ONE. That is not 'the fix works': it means this "
-                 "scene never exercised the construct, so this run says NOTHING about it."
-           : (g_texStable == 0 && g_texUnstable == 0 && g_texMtxPatched == 0)
-               ? "   <-- candidates existed but NOTHING reached the stability test, so the mask is "
-                 "not arriving at the patching code. Check DrawData::texMtxCamMask is passed on."
-               : "");
+  Log.info(
+      "position-sourced texgens: {} draw(s) used one; {} rejected at record time (per-vertex "
+      "matrix index, or no matrix). Of the rest, the paired path measured {} STABLE (the "
+      "texture matrix tracks this draw's model-view, so it was re-composed with the "
+      "interpolated pose) and {} UNSTABLE (object-locked or animating, left alone); {} had no "
+      "previous tick to compare against, {} a singular model-view, {} carried more than one "
+      "such matrix and only the first was handled. Unpaired eye-space draws: {} texture "
+      "matrix write(s) carried the camera delta, {} refused for a bad offset.{}",
+      aurora::gx::fifo::g_texgenPosSourced, aurora::gx::fifo::g_texgenRejectIndexed, g_texStable, g_texUnstable,
+      g_texNoPrev, g_texSingular, g_texMultiSlot, g_texMtxPatched, g_texMtxRefusedBadOffset,
+      aurora::gx::fifo::g_texgenPosSourced == 0
+          ? "   <-- NO DRAW IN THIS RUN USED ONE. That is not 'the fix works': it means this "
+            "scene never exercised the construct, so this run says NOTHING about it."
+      : (g_texStable == 0 && g_texUnstable == 0 && g_texMtxPatched == 0)
+          ? "   <-- candidates existed but NOTHING reached the stability test, so the mask is "
+            "not arriving at the patching code. Check DrawData::texMtxCamMask is passed on."
+          : "");
 }
 
 } // namespace aurora::gfx::interp
