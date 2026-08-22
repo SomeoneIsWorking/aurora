@@ -1,6 +1,7 @@
 #ifndef DOLPHIN_GXAURORA_H
 #define DOLPHIN_GXAURORA_H
 
+#include <dolphin/gx/GXAuroraControl.h>
 #include <dolphin/types.h>
 
 #if __cplusplus
@@ -152,7 +153,6 @@ extern "C" {
 #define GX_AURORA_DRAW_INDEXED 0x0041
 
 #define GX2_SET_POLYGON_OFFSET 0x1000
-
 
 /*
  * Debug marker stuff

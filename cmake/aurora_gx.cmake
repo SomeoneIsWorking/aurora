@@ -2,6 +2,7 @@ add_library(aurora_gx STATIC
         lib/gfx/clear.cpp
         lib/gfx/common.cpp
         lib/gfx/depth_peek.cpp
+        lib/gfx/indexed_interp.cpp
         lib/gfx/interp.cpp
         lib/gfx/pipeline_cache.cpp
         lib/gfx/render_worker.cpp

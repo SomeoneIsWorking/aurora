@@ -484,7 +484,7 @@ struct AttrConfig {
   u8 stride = 0;         // Array stride
   u8 frac = 0;
   bool le = true;
-  bool nbt3 = false;     // GX_NRM_NBT3
+  bool nbt3 = false; // GX_NRM_NBT3
 };
 struct ShaderConfig {
   u8 fogType = GX_FOG_NONE;
@@ -543,6 +543,7 @@ GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
 // consumed at the draw-record site immediately after; the layout shifts with lineMode, so it cannot
 // be recomputed later from a DrawData alone.
 extern u32 g_lastUniformMtxOffset;
+extern u32 g_lastUniformArrayOffset;
 
 u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;
 u8 comp_cnt_count(GXAttr attr, GXCompCnt cnt) noexcept;
@@ -552,6 +553,7 @@ namespace fifo {
 // the next tag; 0 = untagged. Reset once per frame in gfx::end_frame — see the comment there.
 extern uint64_t g_pendingDrawTag;
 extern uint8_t g_pendingDrawPop;
+extern uint8_t g_pendingDrawIndexedDeform;
 // Coverage counters, so an emitter that has silently stopped tagging is visible as a number rather
 // than as a mysteriously non-interpolating scene.
 extern long g_taggedDrawCount;
