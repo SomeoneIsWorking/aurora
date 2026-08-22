@@ -2,6 +2,7 @@
 
 #include <unordered_map>
 #include "interp.hpp"
+#include "indexed_interp.hpp"
 
 #include "clear.hpp"
 #include "depth_peek.hpp"
@@ -368,8 +369,8 @@ static void pace_frame_start() {
   TracyPlot("aurora: frameStartPaceWaitMs", initialWaitMs);
   while (nowNs < targetStartNs) {
     const int64_t remainingNs = targetStartNs - nowNs;
-    const auto sleepDuration = remainingNs > 1'000'000 ? std::chrono::milliseconds{1}
-                                                       : std::chrono::nanoseconds{remainingNs};
+    const auto sleepDuration =
+        remainingNs > 1'000'000 ? std::chrono::milliseconds{1} : std::chrono::nanoseconds{remainingNs};
     wait_for_gpu_progress(sleepDuration);
     nowNs = timestamp_ns(PresentClock::now());
   }
@@ -454,8 +455,8 @@ static void sb_log_pass_boundary(const char* kind) {
   if (g_currentRenderPass != UINT32_MAX && g_currentRenderPass < current_render_passes().size()) {
     const auto& p = current_render_passes()[g_currentRenderPass];
     std::fprintf(stderr, "[pass] n=%ld end '%s' cmds=%zu clearC=%d clearD=%d clr=(%.2f,%.2f,%.2f) -> new %s\n", n,
-                 p.label.c_str(), p.commands.size(), p.clearColor ? 1 : 0, p.clearDepth ? 1 : 0,
-                 p.clearColorValue.x(), p.clearColorValue.y(), p.clearColorValue.z(), kind);
+                 p.label.c_str(), p.commands.size(), p.clearColor ? 1 : 0, p.clearDepth ? 1 : 0, p.clearColorValue.x(),
+                 p.clearColorValue.y(), p.clearColorValue.z(), kind);
   } else {
     std::fprintf(stderr, "[pass] n=%ld begin frame -> new %s\n", n, kind);
   }
@@ -623,13 +624,9 @@ void force_interpolation(float alpha) {
   g_alphaForced = g_replayForced ? alpha : -1.0f;
 }
 
-void set_replay_presentation_count(unsigned count) {
-  g_replayPresentationCount = std::clamp(count, 1u, 64u);
-}
+void set_replay_presentation_count(unsigned count) { g_replayPresentationCount = std::clamp(count, 1u, 64u); }
 
-bool replay_present_enabled() noexcept {
-  return replay_env_enabled() || g_replayForced;
-}
+bool replay_present_enabled() noexcept { return replay_env_enabled() || g_replayForced; }
 
 unsigned replay_presentation_count() noexcept {
   return replay_env_enabled() ? 2u : (g_replayForced ? g_replayPresentationCount : 1u);
@@ -650,10 +647,11 @@ float interp_alpha() noexcept {
     }
     const float v = std::strtof(e, nullptr);
     if (v < 0.0f || v > 1.0f) {
-      Log.error("AURORA_INTERP_ALPHA={} is outside [0,1]; interpolation stays OFF. An alpha outside "
-                "that range extrapolates rather than interpolates, which is a different feature "
-                "with different failure modes, not a tuning value.",
-                e);
+      Log.error(
+          "AURORA_INTERP_ALPHA={} is outside [0,1]; interpolation stays OFF. An alpha outside "
+          "that range extrapolates rather than interpolates, which is a different feature "
+          "with different failure modes, not a tuning value.",
+          e);
       return -1.0f;
     }
     return v;
@@ -718,7 +716,7 @@ bool is_cross_frame_feedback(const void* dest, uint32_t copyPass) {
   }
   const auto it = g_copySampledAtPass.find(dest);
   if (it == g_copySampledAtPass.end()) {
-    return false;   // never sampled this frame: nothing here proves it is feedback
+    return false; // never sampled this frame: nothing here proves it is feedback
   }
   // <=, NOT <. The resolve does not sit at some unknown point inside the pass — resolve_pass()
   // attaches it to the CURRENT pass and ends it, so every draw recorded in that pass happened
@@ -747,39 +745,44 @@ bool copy_classifier_selftest() {
   const void* kSame = reinterpret_cast<const void*>(0x3000);
   const void* kUnsampled = reinterpret_cast<const void*>(0x4000);
   g_copySampledAtPass.clear();
-  g_copySampledAtPass[kFeedback] = 1;   // sampled in pass 1, written in pass 3 -> feedback
-  g_copySampledAtPass[kIntra] = 4;      // sampled in pass 4, written in pass 2 -> intra-frame
-  g_copySampledAtPass[kSame] = 2;       // sampled in the same pass that writes it -> intra-frame
-  struct Case { const char* name; const void* dest; uint32_t pass; bool want; };
+  g_copySampledAtPass[kFeedback] = 1; // sampled in pass 1, written in pass 3 -> feedback
+  g_copySampledAtPass[kIntra] = 4;    // sampled in pass 4, written in pass 2 -> intra-frame
+  g_copySampledAtPass[kSame] = 2;     // sampled in the same pass that writes it -> intra-frame
+  struct Case {
+    const char* name;
+    const void* dest;
+    uint32_t pass;
+    bool want;
+  };
   const Case cases[] = {
       {"sampled BEFORE the copy (previous frame's contents)", kFeedback, 3, true},
       {"sampled AFTER the copy (this frame's consumer)", kIntra, 2, false},
       // Same-pass IS feedback: resolve_pass ends the pass, so a draw recorded in it precedes the
       // copy. This case previously expected `false` with the rationale "order unknown", which was
       // the classifier's own limitation written down as a property of the world.
-      {"sampled in the SAME pass as the copy (the resolve ENDS the pass, so the sample precedes it)",
-       kSame, 2, true},
+      {"sampled in the SAME pass as the copy (the resolve ENDS the pass, so the sample precedes it)", kSame, 2, true},
       {"never sampled at all", kUnsampled, 2, false},
   };
   for (const Case& c : cases) {
     const bool got = is_cross_frame_feedback(c.dest, c.pass);
     if (got != c.want) {
       ok = false;
-      Log.error("SELFTEST FAILED [{}]: classified cross-frame={} but expected {}. The copy "
-                "classifier does not separate the two cases, so suppressing on its verdict would "
-                "either starve an intra-frame consumer or leave feedback running twice per tick.",
-                c.name, got, c.want);
+      Log.error(
+          "SELFTEST FAILED [{}]: classified cross-frame={} but expected {}. The copy "
+          "classifier does not separate the two cases, so suppressing on its verdict would "
+          "either starve an intra-frame consumer or leave feedback running twice per tick.",
+          c.name, got, c.want);
     }
   }
   g_copySampledAtPass = savedSamples;
   if (ok) {
-    Log.info("copy classifier selftest PASSED: separates sampled-before (feedback) from "
-             "sampled-after and same-pass (intra-frame), and refuses an unsampled copy — all four "
-             "run, not just the one it is expected to find.");
+    Log.info(
+        "copy classifier selftest PASSED: separates sampled-before (feedback) from "
+        "sampled-after and same-pass (intra-frame), and refuses an unsampled copy — all four "
+        "run, not just the one it is expected to find.");
   }
   return ok;
 }
-
 
 long snapped_tick_count() noexcept { return g_snappedTicks; }
 
@@ -820,10 +823,11 @@ bool capture_replay_snapshot() {
   // frame built from stale uniforms — geometry from this tick with some other tick's transforms,
   // which looks like a render bug rather than a bookkeeping one. Refuse loudly instead.
   if (g_uniformShadowSize != frame.uniforms.size()) {
-    Log.error("uniform shadow is {} bytes but the frame recorded {} — some uniform write bypassed "
-              "push_uniform. Refusing to snapshot: replaying from a short shadow would present this "
-              "tick's geometry with stale transforms and read as a render defect.",
-              g_uniformShadowSize, frame.uniforms.size());
+    Log.error(
+        "uniform shadow is {} bytes but the frame recorded {} — some uniform write bypassed "
+        "push_uniform. Refusing to snapshot: replaying from a short shadow would present this "
+        "tick's geometry with stale transforms and read as a render defect.",
+        g_uniformShadowSize, frame.uniforms.size());
     return false;
   }
   g_replaySnapshot.uniforms.resize(g_uniformShadowSize);
@@ -848,10 +852,10 @@ bool capture_replay_snapshot() {
     }
     cmds += c;
     if (++n % 200 == 0) {
-      Log.info("replay snapshot avg over {} ticks: pass-list copy {:.0f} us ({} commands), uniform "
-               "copy {:.0f} us ({} B)",
-               n, accPasses / (double)n, cmds / n, accUniforms / (double)n,
-               g_replaySnapshot.uniforms.size());
+      Log.info(
+          "replay snapshot avg over {} ticks: pass-list copy {:.0f} us ({} commands), uniform "
+          "copy {:.0f} us ({} B)",
+          n, accPasses / (double)n, cmds / n, accUniforms / (double)n, g_replaySnapshot.uniforms.size());
     }
   }
   return true;
@@ -872,17 +876,20 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
     return false;
   }
   if (!g_replaySnapshot.valid) {
-    Log.error("interpolate_recorded_frame: no snapshot, so there is nothing to read the true "
-              "matrices from. Interpolating from the staging itself would read back what this "
-              "function is about to overwrite.");
+    Log.error(
+        "interpolate_recorded_frame: no snapshot, so there is nothing to read the true "
+        "matrices from. Interpolating from the staging itself would read back what this "
+        "function is about to overwrite.");
     return false;
   }
   // The attribution numbers in interp::report() are only worth reading if the discriminator behind
   // them actually discriminates. Prove that once, on synthetic input, before it is ever pointed at
   // the game — a self-test that nobody runs is the same bug one level up.
   static const bool s_selftestOk = interp::selftest();
+  static const bool s_indexedSelftestOk = indexed_interp::selftest();
   static const bool s_copyClassifierOk = copy_classifier_selftest();
   (void)s_selftestOk;
+  (void)s_indexedSelftestOk;
   (void)s_copyClassifierOk;
   // A tick the game declared discontinuous has no meaningful in-between: the halfway pose is a
   // viewpoint it never simulated. Force alpha 1 rather than skipping the pass, so the pairing table
@@ -891,7 +898,8 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
   if (!resampling) {
     g_snapCurrentTick = g_snapNextTick;
     g_snapNextTick = false;
-    if (g_snapCurrentTick) ++g_snappedTicks;
+    if (g_snapCurrentTick)
+      ++g_snappedTicks;
   }
   const bool snapping = g_snapCurrentTick;
   if (snapping) {
@@ -979,15 +987,18 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
       // question is answerable by looking rather than by argument.
       static const int s_feedbackMode = [] {
         const char* e = std::getenv("AURORA_EFB_FEEDBACK");
-        if (e == nullptr) return 0;
-        if (std::strcmp(e, "present") == 0) return 1;
-        if (std::strcmp(e, "tick") == 0) return 2;
+        if (e == nullptr)
+          return 0;
+        if (std::strcmp(e, "present") == 0)
+          return 1;
+        if (std::strcmp(e, "tick") == 0)
+          return 2;
         return 0;
       }();
-      const bool suppress = s_feedbackMode == 2 ||
-                            (s_feedbackMode == 0 && is_cross_frame_feedback(pass.resolveDest, i));
+      const bool suppress =
+          s_feedbackMode == 2 || (s_feedbackMode == 0 && is_cross_frame_feedback(pass.resolveDest, i));
       if (suppress) {
-        pass.resolveTarget = {};   // feedback: leave it to the replay emission, once per tick
+        pass.resolveTarget = {}; // feedback: leave it to the replay emission, once per tick
         ++thisTick;
       } else {
         ++s_kept;
@@ -998,19 +1009,20 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
       // The classifier's INPUT, printed beside its output. "0 suppressed" has two completely
       // different causes — no copy is feedback, or nothing ever told the classifier that a copy's
       // result was sampled — and without this line they are the same number.
-      Log.info("  classifier input: note_copy_texture_sampled accepted {} call(s), refused {} "
-               "(null dest, no recording frame, or the replay emission); {} distinct copy dest(s) "
-               "have a recorded sample this frame.{}",
-               g_noteSampledCalls, g_noteSampledRefused, g_copySampledAtPass.size(),
-               g_noteSampledCalls == 0
-                   ? "  <-- NEVER ACCEPTED A SAMPLE. The verdict below is not about the scene; the "
-                     "classifier was never given anything to classify."
-                   : "");
-      Log.info("EFB copies over {} ticks: {} suppressed on the interpolated emission (cross-frame "
-               "feedback, sampled only BEFORE the pass that writes them) and {} kept (intra-frame, "
-               "a later pass reads them). Both numbers matter: all-suppressed means an intra-frame "
-               "copy is being starved, all-kept means no feedback copy was recognised.",
-               s_ticks, s_suppressed, s_kept);
+      Log.info(
+          "  classifier input: note_copy_texture_sampled accepted {} call(s), refused {} "
+          "(null dest, no recording frame, or the replay emission); {} distinct copy dest(s) "
+          "have a recorded sample this frame.{}",
+          g_noteSampledCalls, g_noteSampledRefused, g_copySampledAtPass.size(),
+          g_noteSampledCalls == 0 ? "  <-- NEVER ACCEPTED A SAMPLE. The verdict below is not about the scene; the "
+                                    "classifier was never given anything to classify."
+                                  : "");
+      Log.info(
+          "EFB copies over {} ticks: {} suppressed on the interpolated emission (cross-frame "
+          "feedback, sampled only BEFORE the pass that writes them) and {} kept (intra-frame, "
+          "a later pass reads them). Both numbers matter: all-suppressed means an intra-frame "
+          "copy is being starved, all-kept means no feedback copy was recognised.",
+          s_ticks, s_suppressed, s_kept);
     }
   }
 
@@ -1034,9 +1046,10 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
     // camera measurements in interp::report(). If the snapped ticks do not coincide with the ticks
     // that measured a large camera step, then either the signal is firing on non-cuts or it is
     // missing real ones — and a snap count alone could not tell you which.
-    Log.info("tick {}: SNAPPED (alpha forced to 1) — the game declared the camera discontinuous, so "
-             "this tick has no in-between to show",
-             interp::tick_index());
+    Log.info(
+        "tick {}: SNAPPED (alpha forced to 1) — the game declared the camera discontinuous, so "
+        "this tick has no in-between to show",
+        interp::tick_index());
   }
   for (auto& pass : frame.renderPasses) {
     for (auto& cmd : pass.commands) {
@@ -1046,7 +1059,7 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
       gx::DrawData& d = cmd.data.draw.gx;
 
       if (d.uniformRange.offset + d.uniformRange.size > snap.size()) {
-        continue;   // outside the snapshot: cannot have been recorded by this frame
+        continue; // outside the snapshot: cannot have been recorded by this frame
       }
       uint8_t* dst = frame.uniforms.data() + d.uniformRange.offset;
       // Every draw ends up on the interpolated viewpoint, one way or the other. A draw that was
@@ -1064,15 +1077,13 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
         // hashing that attributes one global change to every population separately — which is what
         // six unrelated sites all reading "387 of 388" turned out to be.
         const bool haveVerts = d.posF32XYZ != 0 && d.vtxCount > 0 && verts_readable(d.vertRange);
-        interp::note_ortho_geometry(d.pop, snap.data() + d.uniformRange.offset,
-                                    d.uniformRange.size, d.mtxPosOffset,
+        interp::note_ortho_geometry(d.pop, snap.data() + d.uniformRange.offset, d.uniformRange.size, d.mtxPosOffset,
                                     haveVerts ? frame.verts.data() + d.vertRange.offset : nullptr,
                                     haveVerts ? d.vertRange.size : 0);
       }
-      interp::note_disposition(d.pop,
-                               d.ortho != 0   ? interp::Disposition::SnappedOrtho
-                               : d.exact != 0 ? interp::Disposition::SnappedExact
-                                              : interp::Disposition::Pending);
+      interp::note_disposition(d.pop, d.ortho != 0   ? interp::Disposition::SnappedOrtho
+                                      : d.exact != 0 ? interp::Disposition::SnappedExact
+                                                     : interp::Disposition::Pending);
       // EXACT: the emitter has declared this draw screen-space under a perspective projection (an
       // identity position matrix with eye-space vertices — SMS_FillScreenAlpha's dst-alpha mask).
       // The ortho test cannot see it and the camera delta must not touch it: sliding a full-screen
@@ -1086,9 +1097,35 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
       // SUPPRESSES the camera delta, leaving the particle worse off than untagged. patch_billboard
       // recognises the tag by having a recorded world position for it and applies the object's own
       // displacement as a translation on top of the camera delta.
-      if (interp::patch_billboard(d.tag, snap.data() + d.uniformRange.offset, dst,
-                                  d.uniformRange.size, d.mtxPosOffset, d.mtxNrmOffset, alpha)) {
+      if (interp::patch_billboard(d.tag, snap.data() + d.uniformRange.offset, dst, d.uniformRange.size, d.mtxPosOffset,
+                                  d.mtxNrmOffset, alpha)) {
         interp::note_disposition(d.pop, interp::Disposition::Billboard);
+        continue;
+      }
+
+      // TDL quad batches rebuild a separate indexed array under an identity matrix. Repoint only
+      // this interpolated emission at a temporary array; the replay snapshot keeps the exact
+      // current-tick offset in its untouched uniform copy.
+      if (d.indexedPosSample != 0) {
+        std::vector<uint8_t> indexedPositions;
+        if (indexed_interp::patch(d.indexedPosSample, alpha, resampling, indexedPositions)) {
+          const Range range = push_storage(indexedPositions.data(), indexedPositions.size());
+          ASSERT(d.posArrayUniformOffset + sizeof(uint32_t) <= d.uniformRange.size,
+                 "indexed position array uniform offset {} is outside {}-byte block", d.posArrayUniformOffset,
+                 d.uniformRange.size);
+          std::memcpy(dst + d.posArrayUniformOffset, &range.offset, sizeof(range.offset));
+          interp::note_disposition(d.pop, interp::Disposition::Paired);
+          continue;
+        }
+        // Do not fall through to matrix pairing: these batches deliberately carry identity
+        // matrices, so identity-to-identity would report a pair while leaving the array snapped.
+        // A first sighting or incompatible array receives the same camera-only fallback as other
+        // unpaired perspective geometry.
+        if (d.ortho == 0) {
+          interp::patch_camera_only(snap.data() + d.uniformRange.offset, dst, d.uniformRange.size, d.mtxPosOffset,
+                                    d.mtxNrmOffset, d.texMtxCamMask);
+          interp::note_disposition(d.pop, interp::Disposition::CameraOnly);
+        }
         continue;
       }
 
@@ -1109,9 +1146,8 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
       if ((d.posF32XYZ != 0 || d.posS16XYZ != 0) && d.tag != 0 && d.vtxCount > 0 && verts_readable(d.vertRange)) {
         std::vector<uint8_t> tmp(d.vertRange.size);
         memcpy(tmp.data(), frame.verts.data() + d.vertRange.offset, d.vertRange.size);
-        if (interp::patch_vertices(d.tag, d.vtxCount, d.vtxStride, d.posOffset, d.posS16XYZ != 0,
-                                   d.posFrac, d.deformF32OffsetMask,
-                                   frame.verts.data() + d.vertRange.offset, tmp.data(), alpha,
+        if (interp::patch_vertices(d.tag, d.vtxCount, d.vtxStride, d.posOffset, d.posS16XYZ != 0, d.posFrac,
+                                   d.deformF32OffsetMask, frame.verts.data() + d.vertRange.offset, tmp.data(), alpha,
                                    d.pop)) {
           d.vertRange = push_verts(tmp.data(), tmp.size(), 4);
           interp::note_disposition(d.pop, interp::Disposition::Paired);
@@ -1119,15 +1155,15 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
         }
       }
       bool firstEverSighting = false;
-      if (interp::patch_draw(d.tag, d.vtxCount, snap.data() + d.uniformRange.offset, dst,
-                             d.uniformRange.size, d.mtxPosOffset, d.mtxNrmOffset, alpha,
-                             d.texMtxCamMask, d.pnMtxSlot, d.pop, &firstEverSighting)) {
+      if (interp::patch_draw(d.tag, d.vtxCount, snap.data() + d.uniformRange.offset, dst, d.uniformRange.size,
+                             d.mtxPosOffset, d.mtxNrmOffset, alpha, d.texMtxCamMask, d.pnMtxSlot, d.pop,
+                             &firstEverSighting)) {
         interp::note_disposition(d.pop, interp::Disposition::Paired);
       } else if (d.ortho == 0) {
         // Perspective only. An orthographic draw's matrix is not model x view, so a camera delta
         // does not belong in it — it would slide the HUD bodily every other frame.
-        interp::patch_camera_only(snap.data() + d.uniformRange.offset, dst, d.uniformRange.size,
-                                  d.mtxPosOffset, d.mtxNrmOffset, d.texMtxCamMask);
+        interp::patch_camera_only(snap.data() + d.uniformRange.offset, dst, d.uniformRange.size, d.mtxPosOffset,
+                                  d.mtxNrmOffset, d.texMtxCamMask);
         // The treatment is the same either way — the camera delta is what an unpaired draw needs.
         // The AUDIT distinguishes them, because a birth is unpairable by construction and a miss on
         // an object that drew before is a defect, and one number cannot say which happened.
@@ -1143,6 +1179,7 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
   static long s_ticks = 0;
   if (!resampling && (++s_ticks % 300) == 0) {
     interp::report();
+    indexed_interp::report();
   }
   return true;
 }
@@ -1150,8 +1187,9 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
 bool install_replay_snapshot(bool consume) {
   ZoneScoped;
   if (!g_replaySnapshot.valid) {
-    Log.error("install_replay_snapshot: no snapshot has been captured; the replay frame would present "
-              "whatever the EFB happens to hold");
+    Log.error(
+        "install_replay_snapshot: no snapshot has been captured; the replay frame would present "
+        "whatever the EFB happens to hold");
     return false;
   }
   if (g_recordingFrame == nullptr) {
@@ -1165,8 +1203,7 @@ bool install_replay_snapshot(bool consume) {
          frame.uniforms.size());
   // Discard the passes begin_frame() created (a fresh EFB pass carrying only its viewport/scissor
   // commands) — the replay's content is the snapshot, entirely.
-  frame.renderPasses = consume ? std::move(g_replaySnapshot.renderPasses)
-                               : g_replaySnapshot.renderPasses;
+  frame.renderPasses = consume ? std::move(g_replaySnapshot.renderPasses) : g_replaySnapshot.renderPasses;
   const size_t uniformSize = g_replaySnapshot.uniforms.size();
   frame.uniforms.append(g_replaySnapshot.uniforms.data(), uniformSize);
   ASSERT(frame.uniforms.size() == uniformSize, "Replay uniform block landed at {} bytes, expected {}",
@@ -1471,7 +1508,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
                 .g = clearColorValue.y(),
                 .b = clearColorValue.z(),
                 .a = clearColorValue.w(),
-        },
+            },
         .depth = clearDepthValue,
         .rectEnabled = !fullRect,
         .rect = rect,
@@ -2092,10 +2129,11 @@ void end_frame(EndFrameCallback callback) {
       static bool s_reported = false;
       if (!s_reported) {
         s_reported = true;
-        Log.info("replay emission carried its own geometry above the reserved prefix: verts +{} indices +{} storage "
-                 "+{} bytes (an overlay drawing on an in-between frame)",
-                 frame.verts.size() - frame.replayPrefix.verts, frame.indices.size() - frame.replayPrefix.indices,
-                 frame.storage.size() - frame.replayPrefix.storage);
+        Log.info(
+            "replay emission carried its own geometry above the reserved prefix: verts +{} indices +{} storage "
+            "+{} bytes (an overlay drawing on an in-between frame)",
+            frame.verts.size() - frame.replayPrefix.verts, frame.indices.size() - frame.replayPrefix.indices,
+            frame.storage.size() - frame.replayPrefix.storage);
       }
     }
     ASSERT(frame.copied.verts >= frame.replayPrefix.verts && frame.copied.indices >= frame.replayPrefix.indices &&
@@ -2155,6 +2193,7 @@ void end_frame(EndFrameCallback callback) {
   // stamping the previous object's identity onto every later draw, and interpolation would then
   // pair those draws with the wrong object's matrices — wrong, plausible, and silent.
   gx::fifo::g_pendingDrawTag = 0;
+  gx::fifo::g_pendingDrawIndexedDeform = 0;
   end_pipeline_frame();
   ++g_frameIndex;
   g_recordingFrame = nullptr;
@@ -2178,31 +2217,31 @@ void end_frame(EndFrameCallback callback) {
   // alternate real/zero and read exactly like a frame-dropping defect. The numbers the user cares
   // about belong to the frame the game actually drew, so leave the last real publish standing.
   const bool publishStats = !frame.replayEmission;
-  render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, publishStats,
-                                             callback = std::move(callback)]() mutable {
-    auto& packet = g_framePackets[frameSlot];
-    g_stagingBuffers[stagingSlot].Unmap();
-    s_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
-    auto encoder = std::move(packet.encoder);
-    const auto stats = packet.stats;
-    packet = {};
-    if (publishStats) {
-      g_stats.drawCallCount = stats.drawCallCount;
-      g_stats.mergedDrawCallCount = stats.mergedDrawCallCount;
-      g_stats.lastVertSize = stats.lastVertSize;
-      g_stats.lastUniformSize = stats.lastUniformSize;
-      g_stats.lastIndexSize = stats.lastIndexSize;
-      g_stats.lastStorageSize = stats.lastStorageSize;
-      g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
-    }
-    if (callback) {
-      callback(encoder);
-    }
-    g_frameSlots.release(frameSlot);
-    expire_cached_bind_groups();
-    map_staging_buffer(stagingSlot, true);
-    process_events();
-  });
+  render_worker::enqueue_end_frame(
+      frameId, [frameSlot, stagingSlot, publishStats, callback = std::move(callback)]() mutable {
+        auto& packet = g_framePackets[frameSlot];
+        g_stagingBuffers[stagingSlot].Unmap();
+        s_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
+        auto encoder = std::move(packet.encoder);
+        const auto stats = packet.stats;
+        packet = {};
+        if (publishStats) {
+          g_stats.drawCallCount = stats.drawCallCount;
+          g_stats.mergedDrawCallCount = stats.mergedDrawCallCount;
+          g_stats.lastVertSize = stats.lastVertSize;
+          g_stats.lastUniformSize = stats.lastUniformSize;
+          g_stats.lastIndexSize = stats.lastIndexSize;
+          g_stats.lastStorageSize = stats.lastStorageSize;
+          g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
+        }
+        if (callback) {
+          callback(encoder);
+        }
+        g_frameSlots.release(frameSlot);
+        expire_cached_bind_groups();
+        map_staging_buffer(stagingSlot, true);
+        process_events();
+      });
 }
 
 uint32_t current_frame() noexcept { return g_frameIndex; }
@@ -2394,12 +2433,13 @@ static void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& pa
         .sampleFilter = needsScaling ? tex_copy_conv::SampleFilter::Linear : tex_copy_conv::SampleFilter::Nearest,
     };
     if (convReq.dst.get() != dstAtCheck) {
-      Log.fatal("EFB copy target changed underneath this pass: it was {} when tested and {} when "
-                "the request was built, in the SAME function with no intervening store. The "
-                "RenderPass this reads from has been destroyed or reused by another thread while "
-                "the render worker was encoding it. pass fmt {}, frame {}, replay {}",
-                static_cast<const void*>(dstAtCheck), static_cast<const void*>(convReq.dst.get()),
-                static_cast<int>(passInfo.resolveFormat), frame.frameId, frame.replayEmission);
+      Log.fatal(
+          "EFB copy target changed underneath this pass: it was {} when tested and {} when "
+          "the request was built, in the SAME function with no intervening store. The "
+          "RenderPass this reads from has been destroyed or reused by another thread while "
+          "the render worker was encoding it. pass fmt {}, frame {}, replay {}",
+          static_cast<const void*>(dstAtCheck), static_cast<const void*>(convReq.dst.get()),
+          static_cast<int>(passInfo.resolveFormat), frame.frameId, frame.replayEmission);
     }
     if (needsConversion) {
       tex_copy_conv::run(cmd, convReq);
@@ -2438,8 +2478,7 @@ void after_present() noexcept {
   const int64_t previousPresentNs = g_lastPresentNs.exchange(nowNs, std::memory_order_acq_rel);
   if (previousPresentNs != 0) {
     update_ema(g_presentPeriodNs, nowNs - previousPresentNs);
-    const double presentPeriodMs =
-        static_cast<double>(g_presentPeriodNs.load(std::memory_order_acquire)) / 1'000'000.0;
+    const double presentPeriodMs = static_cast<double>(g_presentPeriodNs.load(std::memory_order_acquire)) / 1'000'000.0;
     TracyPlot("aurora: presentPeriodMs", presentPeriodMs);
   }
   std::lock_guard lock{g_presentStatsMutex};
@@ -2521,9 +2560,12 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
         // and the eye reads that off a frame dump immediately.
         static const int s_vizTag = [] {
           const char* e = std::getenv("SB_VIZ_TAG");
-          if (e == nullptr || e[0] == '\0') return 0;
-          if (std::strcmp(e, "untagged") == 0) return 1;
-          if (std::strcmp(e, "tagged") == 0) return 2;
+          if (e == nullptr || e[0] == '\0')
+            return 0;
+          if (std::strcmp(e, "untagged") == 0)
+            return 1;
+          if (std::strcmp(e, "tagged") == 0)
+            return 2;
           Log.error("SB_VIZ_TAG={} is not 'untagged' or 'tagged'; showing everything", e);
           return 0;
         }();
@@ -2689,8 +2731,8 @@ static void write_storage_region(uint64_t offset, const uint8_t* data, size_t le
 // is already there. `outUploaded` reports whether a GPU write actually happened. A returned range
 // with size 0 means the arena is full and the caller must fall back to the per-frame path — never
 // a silent partial result.
-Range push_storage_persistent(const uint8_t* data, size_t length, ArrayUploadKey key,
-                              uint64_t contentHash, bool* outUploaded) {
+Range push_storage_persistent(const uint8_t* data, size_t length, ArrayUploadKey key, uint64_t contentHash,
+                              bool* outUploaded) {
   if (outUploaded != nullptr) {
     *outUploaded = false;
   }
@@ -2821,14 +2863,18 @@ namespace aurora {
 // silently picking one, because a confident wrong name is worse than no name.
 const char* aurora_gfx_staging_region_name(size_t capacity) {
   const char* found = nullptr;
-  const struct { size_t size; const char* name; } kRegions[] = {
-      {gfx::UniformBufferSize, "uniform"},   {gfx::VertexBufferSize, "vertex"},
-      {gfx::IndexBufferSize, "index"},       {gfx::StorageBufferSize, "storage"},
-      {gfx::TextureUploadSize, "textureUpload"},
+  const struct {
+    size_t size;
+    const char* name;
+  } kRegions[] = {
+      {gfx::UniformBufferSize, "uniform"}, {gfx::VertexBufferSize, "vertex"},         {gfx::IndexBufferSize, "index"},
+      {gfx::StorageBufferSize, "storage"}, {gfx::TextureUploadSize, "textureUpload"},
   };
   for (const auto& r : kRegions) {
-    if (r.size != capacity) continue;
-    if (found != nullptr) return "AMBIGUOUS (two staging regions share this capacity)";
+    if (r.size != capacity)
+      continue;
+    if (found != nullptr)
+      return "AMBIGUOUS (two staging regions share this capacity)";
     found = r.name;
   }
   return found != nullptr ? found : "UNKNOWN (capacity matches no staging region constant)";

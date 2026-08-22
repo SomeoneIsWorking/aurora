@@ -14,6 +14,7 @@
 #include "dolphin/gx/GXAurora.h"
 #include "gx.hpp"
 #include "../gfx/interp.hpp"
+#include "../gfx/indexed_interp.hpp"
 #include "gx_fmt.hpp"
 #include "pipeline.hpp"
 #include "shader_info.hpp"
@@ -38,7 +39,6 @@ inline bool sb_copy_dbg_chan() {
 }
 } // namespace
 
-
 namespace aurora::gx::fifo {
 static Module Log("aurora::gx::fifo");
 
@@ -53,8 +53,13 @@ extern "C" const char* sb_gx_last_marker() { return g_sbLastMarker.c_str(); }
 // SB_PROFILE_GFX per-draw build-phase accumulators (0=shaderinfo+config,
 // 1=bind_groups, 2=pipeline_ref, 3=build_uniform, 4=push_draw_command).
 // Printed and reset by the frame profiler in aurora.cpp.
-extern "C" { double g_sbGxProf[7] = {0, 0, 0, 0, 0, 0, 0};
-void sb_gx_prof_add(int slot, double us) { if (slot >= 0 && slot < 7) g_sbGxProf[slot] += us; } }
+extern "C" {
+double g_sbGxProf[7] = {0, 0, 0, 0, 0, 0, 0};
+void sb_gx_prof_add(int slot, double us) {
+  if (slot >= 0 && slot < 7)
+    g_sbGxProf[slot] += us;
+}
+}
 
 // VIGetRetraceCount is defined game-side (sms-boot/runtime/sdk_stubs.cpp) and
 // advanced once per sb_frame_present (sms-boot/runtime/frame_seam.cpp) — same
@@ -65,8 +70,7 @@ static unsigned sb_gx_vi_retrace_count() { return (&VIGetRetraceCount) ? VIGetRe
 // sms-boot's SB_LOG channel registry (sb_log.h) — weak so aurora still links
 // standalone; in-tree the sms-boot runtime always provides it.
 extern "C" int sb_log_enabled(const char* chan) __attribute__((weak));
-extern "C" void sb_logf(const char* chan, const char* fmt, ...)
-    __attribute__((weak, format(printf, 2, 3)));
+extern "C" void sb_logf(const char* chan, const char* fmt, ...) __attribute__((weak, format(printf, 2, 3)));
 // A weak symbol that resolves to null answers "channel off" — which is INDISTINGUISHABLE from
 // "channel on but the condition never occurred". That silence cost a whole investigation: an
 // SB_LOG=pnzero run reported zero zero-rotation matrix uploads while the provider simply was not
@@ -107,15 +111,18 @@ extern "C" int sb_timeline_enabled() {
     s = (e != nullptr && e[0] != '\0' && e[0] != '0') ? 1 : 0;
     // SB_TIMELINE=<startFrame> captures a 3-frame window from that frame.
     g_sbTimelineStart = (s == 1 && e != nullptr) ? std::atol(e) : 0;
-    if (g_sbTimelineStart < 1) g_sbTimelineStart = 0;
+    if (g_sbTimelineStart < 1)
+      g_sbTimelineStart = 0;
   }
   return s;
 }
 static thread_local long g_sbTimelineFrame = 0;
 static thread_local long g_sbTimelineSeq = 0;
 extern "C" void sb_timeline_log(const char* fmt, ...) {
-  if (!sb_timeline_enabled()) return;
-  if (g_sbTimelineFrame < g_sbTimelineStart || g_sbTimelineFrame > g_sbTimelineStart + 2) return;
+  if (!sb_timeline_enabled())
+    return;
+  if (g_sbTimelineFrame < g_sbTimelineStart || g_sbTimelineFrame > g_sbTimelineStart + 2)
+    return;
   char buf[256];
   va_list ap;
   va_start(ap, fmt);
@@ -130,10 +137,9 @@ extern "C" void sb_timeline_frame() {
 }
 
 static u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) {
-  return prepare_idx_buffer_impl(
-      buf, static_cast<u32>(prim), vtxStart, vtxCount, GX_QUADS, GX_TRIANGLES, GX_TRIANGLEFAN,
-      GX_TRIANGLESTRIP, GX_LINES, GX_LINESTRIP, GX_POINTS,
-      [](u32 p) { UNLIKELY FATAL("unsupported primitive type {}", p); });
+  return prepare_idx_buffer_impl(buf, static_cast<u32>(prim), vtxStart, vtxCount, GX_QUADS, GX_TRIANGLES,
+                                 GX_TRIANGLEFAN, GX_TRIANGLESTRIP, GX_LINES, GX_LINESTRIP, GX_POINTS,
+                                 [](u32 p) { UNLIKELY FATAL("unsupported primitive type {}", p); });
 }
 
 // GX FIFO opcodes - use CP_ prefix to avoid clashing with GXCommandList.h macros
@@ -429,33 +435,30 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
 extern "C" {
 __attribute__((weak)) bool sbr_state_diff_enabled();
 __attribute__((weak)) void sbr_state_oracle_aurora_frame_end();
-__attribute__((weak)) void sbr_state_oracle_aurora_raw(unsigned pos, unsigned numStages,
-                                                      unsigned numTexGens,
-                                                       const unsigned char* texmap,
-                                                       const unsigned char* texcoord,
-                                                       const unsigned char* texEnable,
-                                                       const unsigned* unitId,
-                                                       unsigned numChans,
-                                                       const unsigned short* chanCtrl,
-                                                       const unsigned* ambColor,
-                                                       const unsigned* matColor,
-                                                       const unsigned char* rasChannel,
-                                                       const unsigned* cWord, const unsigned* aWord,
-                                                       const unsigned short* kSel,
-                                                       const unsigned* konst,
-                                                       const unsigned long long* tevReg,
-                                                       unsigned raster, unsigned blend,
-                                                       const int* scissor, unsigned cull);
+__attribute__((weak)) void sbr_state_oracle_aurora_raw(
+    unsigned pos, unsigned numStages, unsigned numTexGens, const unsigned char* texmap, const unsigned char* texcoord,
+    const unsigned char* texEnable, const unsigned* unitId, unsigned numChans, const unsigned short* chanCtrl,
+    const unsigned* ambColor, const unsigned* matColor, const unsigned char* rasChannel, const unsigned* cWord,
+    const unsigned* aWord, const unsigned short* kSel, const unsigned* konst, const unsigned long long* tevReg,
+    unsigned raster, unsigned blend, const int* scissor, unsigned cull);
 }
 static void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
 
 // Ring buffer of recent draws — dumped alongside the opcode ring buffer at
 // unknown-opcode FATAL so a fifo desync's originating draw is visible without
 // enabling AURORA_DRAW_TRACE (which spams stderr fast enough to skew timing).
-struct RecentDraw { u32 pos; u8 cmd; u16 vtxCount; u32 vtxSize; };
+struct RecentDraw {
+  u32 pos;
+  u8 cmd;
+  u16 vtxCount;
+  u32 vtxSize;
+};
 static constexpr size_t kRecentDrawN = 16;
 static thread_local RecentDraw s_recentDraws[kRecentDrawN];
-struct RecentCmd { u32 pos; u8 cmd; };
+struct RecentCmd {
+  u32 pos;
+  u8 cmd;
+};
 // 128 (was 32): a fifo desync into vertex/pointer data emits a long run of
 // misread short commands (e.g. 31 zero-bytes = 31 NOPs) that floods a small
 // ring and hides the pre-desync commands where the mis-advance actually
@@ -510,14 +513,12 @@ void process(const u8* data, u32 size, bool bigEndian) {
     if (s_traceEnabled) {
       Log.warn("[fifo trace] pos={} cmd=0x{:02X} opcode=0x{:02X}", cmdPos, cmd, opcode);
     }
-    if (s_traceMark != nullptr && s_traceMarkBudget > 0 &&
-        g_sbLastMarker.find(s_traceMark) != std::string::npos) {
+    if (s_traceMark != nullptr && s_traceMarkBudget > 0 && g_sbLastMarker.find(s_traceMark) != std::string::npos) {
       --s_traceMarkBudget;
       if (opcode >= 0x80 && opcode < 0xC0) {
         const u16 vc = pos + 2 <= size ? read_u16(data + pos, bigEndian) : 0;
         std::fprintf(stderr, "[fifo-mark] pos=%u cmd=%02x DRAW verts=%u vtxSize=%u fmt=%u\n", cmdPos, cmd, vc,
-                     g_gxState.lastVtxFmt == (cmd & CP_VAT_MASK) ? g_gxState.lastVtxSize : 0u,
-                     cmd & CP_VAT_MASK);
+                     g_gxState.lastVtxFmt == (cmd & CP_VAT_MASK) ? g_gxState.lastVtxSize : 0u, cmd & CP_VAT_MASK);
       } else {
         std::fprintf(stderr, "[fifo-mark] pos=%u cmd=%02x next=[%02x %02x %02x %02x %02x %02x %02x %02x]\n", cmdPos,
                      cmd, pos + 0 < size ? data[pos + 0] : 0, pos + 1 < size ? data[pos + 1] : 0,
@@ -549,7 +550,8 @@ void process(const u8* data, u32 size, bool bigEndian) {
           s_frames = f;
           std::fprintf(stderr, "[opcode-census] frame %ld:", f);
           for (int i = 0; i < 32; ++i)
-            if (s_counts[i] != 0) std::fprintf(stderr, " %02x=%ld", i << 3, s_counts[i]);
+            if (s_counts[i] != 0)
+              std::fprintf(stderr, " %02x=%ld", i << 3, s_counts[i]);
           std::fprintf(stderr, "\n");
         }
       }
@@ -618,13 +620,13 @@ void process(const u8* data, u32 size, bool bigEndian) {
         for (int i = 0; i < 3; ++i) {
           u32 u;
           std::memcpy(&u, srcData + i * 4, 4);
-          if (!array.le) u = __builtin_bswap32(u);
+          if (!array.le)
+            u = __builtin_bswap32(u);
           std::memcpy(&r0[i], &u, 4);
         }
         if (r0[0] == 0.f && r0[1] == 0.f && r0[2] == 0.f)
-          sb_logf("pnzero", "%s idx=%u dst=%03x base=%p mark='%s'",
-                  arrayType == GX_POS_MTX_ARRAY ? "pos" : "nrm", srcArrayIdx, dstAddr,
-                  array.data, g_sbLastMarker.c_str());
+          sb_logf("pnzero", "%s idx=%u dst=%03x base=%p mark='%s'", arrayType == GX_POS_MTX_ARRAY ? "pos" : "nrm",
+                  srcArrayIdx, dstAddr, array.data, g_sbLastMarker.c_str());
       }
       break;
     }
@@ -696,7 +698,8 @@ void process(const u8* data, u32 size, bool bigEndian) {
           std::string trail;
           for (size_t i = 0; i < kRecentN; ++i) {
             const auto& r = s_recent[(s_recentHead + i) % kRecentN];
-            if (r.pos == 0 && r.cmd == 0 && i == 0) continue;
+            if (r.pos == 0 && r.cmd == 0 && i == 0)
+              continue;
             const auto& next = s_recent[(s_recentHead + i + 1) % kRecentN];
             // The chronologically-next command's start (the last entry's "next"
             // is the desync pos itself).
@@ -713,11 +716,10 @@ void process(const u8* data, u32 size, bool bigEndian) {
           std::string trail;
           for (size_t i = 0; i < kRecentDrawN; ++i) {
             const auto& r = s_recentDraws[(s_recentDrawHead + i) % kRecentDrawN];
-            if (r.pos == 0 && r.cmd == 0 && i == 0) continue;
-            trail += fmt::format(
-                " [pos={} cmd=0x{:02X} vtxCount={} vtxSize={} end={}]",
-                r.pos, r.cmd, r.vtxCount, r.vtxSize,
-                r.pos + 3 + r.vtxCount * r.vtxSize);
+            if (r.pos == 0 && r.cmd == 0 && i == 0)
+              continue;
+            trail += fmt::format(" [pos={} cmd=0x{:02X} vtxCount={} vtxSize={} end={}]", r.pos, r.cmd, r.vtxCount,
+                                 r.vtxSize, r.pos + 3 + r.vtxCount * r.vtxSize);
           }
           Log.error("  recent draws (oldest first):{}", trail);
         }
@@ -728,13 +730,13 @@ void process(const u8* data, u32 size, bool bigEndian) {
           const size_t lo = (pos >= 129) ? pos - 129 : 0;
           const size_t hi = (pos + 31 < size) ? pos + 31 : size;
           for (size_t i = lo; i < hi; ++i) {
-            if ((i - lo) % 16 == 0) hex += fmt::format("\n    {:07}:", i);
+            if ((i - lo) % 16 == 0)
+              hex += fmt::format("\n    {:07}:", i);
             hex += fmt::format(" {:02x}", data[i]);
           }
           Log.error("  bytes around pos {}:{}", pos - 1, hex);
         }
-        FATAL("command_processor: unknown opcode 0x{:02X} at pos {} (total fifo size {})",
-              cmd, pos - 1, size);
+        FATAL("command_processor: unknown opcode 0x{:02X} at pos {} (total fifo size {})", cmd, pos - 1, size);
       }
       break;
     }
@@ -1550,13 +1552,15 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
         s_reject = env && env[0] && env[0] != '0' ? 1 : 0;
       }
       if (s_reject) {
-        Log.error("CP_REG_ARRAYBASE_ID (addr=0x{:02X}, attr={}) rejected: raw 32-bit "
-                  "pointer 0x{:08X}. Emit GX_AURORA_LOAD_ARRAYBASE for the full 64-bit host pointer.",
-                  addr, addr - 0xA0, value);
+        Log.error(
+            "CP_REG_ARRAYBASE_ID (addr=0x{:02X}, attr={}) rejected: raw 32-bit "
+            "pointer 0x{:08X}. Emit GX_AURORA_LOAD_ARRAYBASE for the full 64-bit host pointer.",
+            addr, addr - 0xA0, value);
       } else {
-        Log.debug("CP_REG_ARRAYBASE_ID (addr=0x{:02X}, attr={}) ignored (raw=0x{:08X}); "
-                  "expect GX_AURORA_LOAD_ARRAYBASE for this attr.",
-                  addr, addr - 0xA0, value);
+        Log.debug(
+            "CP_REG_ARRAYBASE_ID (addr=0x{:02X}, attr={}) ignored (raw=0x{:08X}); "
+            "expect GX_AURORA_LOAD_ARRAYBASE for this attr.",
+            addr, addr - 0xA0, value);
       }
     }
     // Array strides (0xB0-0xBF)
@@ -1619,8 +1623,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           static const bool s_ambTrace = std::getenv("SB_AMB_TRACE") != nullptr;
           if (s_ambTrace) {
             static long n = 0;
-            std::fprintf(stderr, "[amb-trace] n=%ld reg=0A val=%08x mark='%s'\n",
-                         ++n, val, g_sbLastMarker.c_str());
+            std::fprintf(stderr, "[amb-trace] n=%ld reg=0A val=%08x mark='%s'\n", ++n, val, g_sbLastMarker.c_str());
           }
         }
         g_gxState.colorChannelState[GX_COLOR0].ambColor = unpack_color(val);
@@ -1633,8 +1636,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           static const bool s_ambTrace = std::getenv("SB_AMB_TRACE") != nullptr;
           if (s_ambTrace) {
             static long n = 0;
-            std::fprintf(stderr, "[amb-trace] n=%ld reg=0B val=%08x mark='%s'\n",
-                         ++n, val, g_sbLastMarker.c_str());
+            std::fprintf(stderr, "[amb-trace] n=%ld reg=0B val=%08x mark='%s'\n", ++n, val, g_sbLastMarker.c_str());
           }
         }
         g_gxState.colorChannelState[GX_COLOR1].ambColor = unpack_color(val);
@@ -1681,7 +1683,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           bool bit10 = bp_get(val, 1, 10) != 0;
           u32 lightsHi = bp_get(val, 4, 11);
           if (!bit9) {
-            chan.attnFn = GX_AF_NONE;  // GX_AF_NONE (or hw "Dir": attn=1, diffuse applies)
+            chan.attnFn = GX_AF_NONE; // GX_AF_NONE (or hw "Dir": attn=1, diffuse applies)
           } else if (!bit10) {
             chan.attnFn = GX_AF_SPEC;
           } else {
@@ -1768,8 +1770,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
           {
             static const lucent::Channel chProjSet{"projset"};
             lucent::debug(chProjSet, "type={} p=({:.4f} {:.4f} {:.4f} {:.4f} {:.4f} {:.4f}) mark='{}'",
-                          projType == GX_ORTHOGRAPHIC ? 'O' : 'P', p0, p1, p2, p3, p4, p5,
-                          g_sbLastMarker);
+                          projType == GX_ORTHOGRAPHIC ? 'O' : 'P', p0, p1, p2, p3, p4, p5, g_sbLastMarker);
           }
           // Reconstruct 4x4 projection matrix from 6 params
           auto& proj = g_gxState.proj;
@@ -1831,10 +1832,11 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
               // moved the failure three subsystems away, to shader generation's "unhandled tcg src
               // 21" — a message that names neither the register nor the writer. Say it here, where
               // the offending value is still in hand.
-              Log.error("XF texgen {}: source row {} is out of range (val 0x{:08X}); tcg.src left at "
-                        "{}. This write came from the guest stream, so either the game configured a "
-                        "row this decode does not know or the FIFO parse mis-framed the write.",
-                        tcIdx, srcRow, val, underlying(tcg.src));
+              Log.error(
+                  "XF texgen {}: source row {} is out of range (val 0x{:08X}); tcg.src left at "
+                  "{}. This write came from the guest stream, so either the game configured a "
+                  "row this decode does not know or the FIFO parse mis-framed the write.",
+                  tcIdx, srcRow, val, underlying(tcg.src));
             }
             g_gxState.stateDirty = true;
           }
@@ -1914,8 +1916,7 @@ static uint32_t eye_space_texgen_mask(const gx::ShaderInfo& info) {
     // this draw uses, and an identity texgen matrix means there is no matrix at all. A per-vertex
     // POSITION-matrix index means the model-view differs per vertex, so the correction below has no
     // single matrix to express itself against either.
-    if (info.indexAttr.test(GX_VA_TEX0MTXIDX + i) || tcg.mtx == GX_IDENTITY ||
-        info.indexAttr.test(GX_VA_PNMTXIDX)) {
+    if (info.indexAttr.test(GX_VA_TEX0MTXIDX + i) || tcg.mtx == GX_IDENTITY || info.indexAttr.test(GX_VA_PNMTXIDX)) {
       ++g_texgenRejectIndexed;
       continue;
     }
@@ -1925,8 +1926,8 @@ static uint32_t eye_space_texgen_mask(const gx::ShaderInfo& info) {
     // of the shared postex_mtx array. Written this way so the two cannot drift apart.
     const u32 idx = tcg.mtx / 3;
     ASSERT(idx >= MaxPnMtx && idx < MaxPnMtx + MaxTexMtx,
-           "texgen {} matrix {} maps to postex_mtx[{}], outside the texture block [{}, {})", i,
-           underlying(tcg.mtx), idx, MaxPnMtx, MaxPnMtx + MaxTexMtx);
+           "texgen {} matrix {} maps to postex_mtx[{}], outside the texture block [{}, {})", i, underlying(tcg.mtx),
+           idx, MaxPnMtx, MaxPnMtx + MaxTexMtx);
     mask |= 1u << idx;
   }
   return mask;
@@ -1936,32 +1937,30 @@ static uint32_t eye_space_texgen_mask(const gx::ShaderInfo& info) {
 // Byte offset of GX_VA_POS within a vertex record, and whether it is the one shape the vertex lerp
 // can handle: DIRECT, three components, f32. GX's attribute order is fixed (PNMTXIDX, the eight
 // TEXnMTXIDX, POS, ...), so the offset is the sum of what precedes POS under the current descriptor.
-static void calculate_pos_layout(GXVtxFmt fmt, u16& posOffset, u8& posF32XYZ, u8& posS16XYZ,
-                                 u8& posFrac) {
+static void calculate_pos_layout(GXVtxFmt fmt, u16& posOffset, u8& posF32XYZ, u8& posS16XYZ, u8& posFrac) {
   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
   u32 off = 0;
   for (int i = GX_VA_PNMTXIDX; i < GX_VA_POS; ++i) {
     switch (g_gxState.vtxDesc[i]) {
-    case GX_NONE: break;
+    case GX_NONE:
+      break;
     case GX_DIRECT: {
       const auto attr = static_cast<GXAttr>(i);
       off += comp_type_size(attr, vtxFmt.attrs[i].type) * comp_cnt_count(attr, vtxFmt.attrs[i].cnt);
       break;
     }
-    case GX_INDEX8: off += 1; break;
-    case GX_INDEX16: off += 2; break;
+    case GX_INDEX8:
+      off += 1;
+      break;
+    case GX_INDEX16:
+      off += 2;
+      break;
     }
   }
   posOffset = static_cast<u16>(off);
   const auto& pf = vtxFmt.attrs[GX_VA_POS];
-  posF32XYZ = (g_gxState.vtxDesc[GX_VA_POS] == GX_DIRECT && pf.type == GX_F32 &&
-               pf.cnt == GX_POS_XYZ)
-                  ? 1u
-                  : 0u;
-  posS16XYZ = (g_gxState.vtxDesc[GX_VA_POS] == GX_DIRECT && pf.type == GX_S16 &&
-               pf.cnt == GX_POS_XYZ)
-                  ? 1u
-                  : 0u;
+  posF32XYZ = (g_gxState.vtxDesc[GX_VA_POS] == GX_DIRECT && pf.type == GX_F32 && pf.cnt == GX_POS_XYZ) ? 1u : 0u;
+  posS16XYZ = (g_gxState.vtxDesc[GX_VA_POS] == GX_DIRECT && pf.type == GX_S16 && pf.cnt == GX_POS_XYZ) ? 1u : 0u;
   posFrac = pf.frac;
 }
 
@@ -1972,9 +1971,14 @@ static uint64_t calculate_deform_f32_layout(GXVtxFmt fmt) {
   static uint64_t unrepresentable = 0;
   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
     switch (g_gxState.vtxDesc[i]) {
-    case GX_NONE: break;
-    case GX_INDEX8: off += 1; break;
-    case GX_INDEX16: off += 2; break;
+    case GX_NONE:
+      break;
+    case GX_INDEX8:
+      off += 1;
+      break;
+    case GX_INDEX16:
+      off += 2;
+      break;
     case GX_DIRECT: {
       const auto attr = static_cast<GXAttr>(i);
       const auto& af = vtxFmt.attrs[i];
@@ -1985,8 +1989,10 @@ static uint64_t calculate_deform_f32_layout(GXVtxFmt fmt) {
       if (i != GX_VA_POS && i != GX_VA_CLR0 && i != GX_VA_CLR1 && af.type == GX_F32) {
         for (uint32_t c = 0; c < count; ++c) {
           const uint32_t byteOff = off + c * width;
-          if (byteOff < 64) mask |= uint64_t{1} << byteOff;
-          else ++unrepresentable;
+          if (byteOff < 64)
+            mask |= uint64_t{1} << byteOff;
+          else
+            ++unrepresentable;
         }
       }
       off += width * count;
@@ -1998,8 +2004,10 @@ static uint64_t calculate_deform_f32_layout(GXVtxFmt fmt) {
     static uint64_t lastReported = 0;
     if (unrepresentable != lastReported) {
       lastReported = unrepresentable;
-      Log.warn("deforming f32 layout: {} component(s) landed at byte offset >=64 and are not "
-               "covered by vertex interpolation", unrepresentable);
+      Log.warn(
+          "deforming f32 layout: {} component(s) landed at byte offset >=64 and are not "
+          "covered by vertex interpolation",
+          unrepresentable);
     }
   }
   return mask;
@@ -2058,6 +2066,7 @@ long g_sbPushedDrawCount = 0; // exported: SB_NO_ZWRITE_DRAWS window check in gx
 uint64_t g_pendingDrawTag = 0;
 uint8_t g_pendingDrawPop = 0;
 uint8_t g_pendingDrawExact = 0;
+uint8_t g_pendingDrawIndexedDeform = 0;
 // Coverage, so "tagging is on" can be distinguished from "tagging is silently doing nothing".
 long g_taggedDrawCount = 0;
 long g_untaggedDrawCount = 0;
@@ -2131,8 +2140,7 @@ static double sb_tsc_ns_per_tick() {
     const uint64_t t0 = sb_tsc();
     // Busy-wait rather than sleep: a sleeping thread can be migrated, and this is a handful
     // of milliseconds once per process.
-    while (sb_now_ns() - n0 < 20000000LL) {
-    }
+    while (sb_now_ns() - n0 < 20000000LL) {}
     const uint64_t t1 = sb_tsc();
     const int64_t n1 = sb_now_ns();
     const uint64_t dt = t1 - t0;
@@ -2226,9 +2234,9 @@ long g_dpCalls = 0;
 // different explanations and the fix differs: a game emitting genuinely tiny primitives needs a
 // cheaper per-primitive path, while large primitives arriving unmerged would mean batching is
 // leaving work on the table. Bucketed by vertex count.
-long g_dpVerts[8] = {};   // 1-2, 3, 4, 5-6, 7-12, 13-24, 25-48, 49+
+long g_dpVerts[8] = {}; // 1-2, 3, 4, 5-6, 7-12, 13-24, 25-48, 49+
 long g_dpVertTotal = 0;
-long g_dpPrimKind[8] = {};   // by GXPrimitive, indexed (prim >> 4) & 7
+long g_dpPrimKind[8] = {}; // by GXPrimitive, indexed (prim >> 4) & 7
 
 static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size) {
   const bool dpProf = sb_drawprim_profile();
@@ -2241,8 +2249,14 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     ++g_dpPrimKind[(static_cast<u32>(prim) >> 4) & 7u];
   }
   struct DpScope {
-    bool on; int64_t t0;
-    ~DpScope() { if (on) { g_dpTotalNs += sb_now_ns() - t0; ++g_dpCalls; } }
+    bool on;
+    int64_t t0;
+    ~DpScope() {
+      if (on) {
+        g_dpTotalNs += sb_now_ns() - t0;
+        ++g_dpCalls;
+      }
+    }
   } dpScope{dpProf, dpT0};
 
   // Phase probes. `dpTick` is the timestamp of the previous probe; DP_PHASE(p) closes the region
@@ -2250,17 +2264,22 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   // also computes what NO phase claimed.
   uint64_t dpTick = dpProf ? sb_tsc() : 0;
   struct DpWhole {
-    bool on; uint64_t t0;
-    ~DpWhole() { if (on) { g_dpWholeTicks += sb_tsc() - t0; } }
+    bool on;
+    uint64_t t0;
+    ~DpWhole() {
+      if (on) {
+        g_dpWholeTicks += sb_tsc() - t0;
+      }
+    }
   } dpWhole{dpProf, dpTick};
-#define DP_PHASE(p)                                                                                \
-  do {                                                                                             \
-    if (dpProf) {                                                                                  \
-      const uint64_t _t = sb_tsc();                                                                \
-      g_dpPhase[(p)] += _t - dpTick;                                                               \
-      ++g_dpPhaseCalls[(p)];                                                                       \
-      dpTick = _t;                                                                                 \
-    }                                                                                              \
+#define DP_PHASE(p)                                                                                                    \
+  do {                                                                                                                 \
+    if (dpProf) {                                                                                                      \
+      const uint64_t _t = sb_tsc();                                                                                    \
+      g_dpPhase[(p)] += _t - dpTick;                                                                                   \
+      ++g_dpPhaseCalls[(p)];                                                                                           \
+      dpTick = _t;                                                                                                     \
+    }                                                                                                                  \
   } while (0)
 
   ZoneScoped;
@@ -2294,16 +2313,16 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           // (matrix-index attrs are u8 DIRECT).
           u32 off = 0;
           for (int a = GX_VA_PNMTXIDX; a < GX_VA_POS; ++a)
-            if (g_gxState.vtxDesc[a] == GX_DIRECT) off += 1;
+            if (g_gxState.vtxDesc[a] == GX_DIRECT)
+              off += 1;
           const u16 idx = read_u16(data + pos + off, true);
           const auto& arr = g_gxState.arrays[GX_VA_POS];
           const float* p = arr.data != nullptr
                                ? reinterpret_cast<const float*>(static_cast<const u8*>(arr.data) + idx * arr.stride)
                                : nullptr;
-          std::fprintf(stderr,
-                       "[pos-probe] n=%d verts=%u idx=%u stride=%u arr=%p le=%d xyz=(%g, %g, %g)\n", n,
-                       vtxCount, idx, arr.stride, arr.data, static_cast<int>(arr.le),
-                       p ? p[0] : 0.f, p ? p[1] : 0.f, p ? p[2] : 0.f);
+          std::fprintf(stderr, "[pos-probe] n=%d verts=%u idx=%u stride=%u arr=%p le=%d xyz=(%g, %g, %g)\n", n,
+                       vtxCount, idx, arr.stride, arr.data, static_cast<int>(arr.le), p ? p[0] : 0.f, p ? p[1] : 0.f,
+                       p ? p[2] : 0.f);
         }
       }
     }
@@ -2327,8 +2346,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     // Both projections: an orthographic sweep found nothing larger than a text glyph, so a
     // PERSPECTIVE quad is the remaining shape. Identical state and multiplicity between two
     // runtimes says nothing about where a quad actually lands.
-    if (s_after >= 0 && static_cast<long>(sb_gx_vi_retrace_count()) >= s_after &&
-        vtxCount == 4) {
+    if (s_after >= 0 && static_cast<long>(sb_gx_vi_retrace_count()) >= s_after && vtxCount == 4) {
       const auto& pf = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
       const auto pd = g_gxState.vtxDesc[GX_VA_POS];
       // Decode the quad's corners whatever format the positions arrive in. Handling only
@@ -2336,9 +2354,9 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       // 42 indexed perspective ones), which is how a sweep "found no large quad" while looking
       // at a third of them.
       const bool indexed = (pd == GX_INDEX8 || pd == GX_INDEX16);
-      const bool decodable = (pd == GX_DIRECT || indexed) &&
-                             (pf.type == GX_F32 || pf.type == GX_S16 || pf.type == GX_U16 ||
-                              pf.type == GX_S8 || pf.type == GX_U8);
+      const bool decodable =
+          (pd == GX_DIRECT || indexed) &&
+          (pf.type == GX_F32 || pf.type == GX_S16 || pf.type == GX_U16 || pf.type == GX_S8 || pf.type == GX_U8);
       if (decodable) {
         const unsigned comps = pf.cnt == GX_POS_XYZ ? 3 : 2;
         const float scale = 1.0f / (float)(1u << pf.frac);
@@ -2349,35 +2367,46 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         u32 off = 0;
         for (int a = GX_VA_PNMTXIDX; a < GX_VA_POS; ++a) {
           const auto d = g_gxState.vtxDesc[a];
-          if (d == GX_NONE) continue;
+          if (d == GX_NONE)
+            continue;
           off += (d == GX_INDEX16) ? 2 : 1;
         }
 
         auto component = [&](const u8* base, unsigned i) -> float {
           switch (pf.type) {
-          case GX_F32: return read_f32(base + i * 4, true);
-          case GX_S16: return (float)(s16)read_u16(base + i * 2, true) * scale;
-          case GX_U16: return (float)read_u16(base + i * 2, true) * scale;
-          case GX_S8:  return (float)(s8)base[i] * scale;
-          default:     return (float)base[i] * scale;
+          case GX_F32:
+            return read_f32(base + i * 4, true);
+          case GX_S16:
+            return (float)(s16)read_u16(base + i * 2, true) * scale;
+          case GX_U16:
+            return (float)read_u16(base + i * 2, true) * scale;
+          case GX_S8:
+            return (float)(s8)base[i] * scale;
+          default:
+            return (float)base[i] * scale;
           }
         };
 
         float xs[4], ys[4];
         bool ok = true;
         for (unsigned v = 0; v < 4 && ok; ++v) {
-          const u32 vsz = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize
-                                                      : calculate_last_vtx_size(fmt);
+          const u32 vsz = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize : calculate_last_vtx_size(fmt);
           const u32 base = pos + v * vsz + off;
           const u8* src = nullptr;
           if (indexed) {
             const u32 need = (pd == GX_INDEX16) ? 2u : 1u;
-            if (base + need > size || arr.data == nullptr) { ok = false; break; }
+            if (base + need > size || arr.data == nullptr) {
+              ok = false;
+              break;
+            }
             const u32 idx = (pd == GX_INDEX16) ? read_u16(data + base, true) : data[base];
             src = static_cast<const u8*>(arr.data) + (size_t)idx * arr.stride;
           } else {
             const u32 width = (pf.type == GX_F32) ? 4u : (pf.type == GX_S16 || pf.type == GX_U16) ? 2u : 1u;
-            if (base + comps * width > size) { ok = false; break; }
+            if (base + comps * width > size) {
+              ok = false;
+              break;
+            }
             src = data + base;
           }
           xs[v] = component(src, 0);
@@ -2386,8 +2415,10 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         if (ok) {
           float x0 = xs[0], x1 = xs[0], y0 = ys[0], y1 = ys[0];
           for (unsigned v = 1; v < 4; ++v) {
-            x0 = xs[v] < x0 ? xs[v] : x0; x1 = xs[v] > x1 ? xs[v] : x1;
-            y0 = ys[v] < y0 ? ys[v] : y0; y1 = ys[v] > y1 ? ys[v] : y1;
+            x0 = xs[v] < x0 ? xs[v] : x0;
+            x1 = xs[v] > x1 ? xs[v] : x1;
+            y0 = ys[v] < y0 ? ys[v] : y0;
+            y1 = ys[v] > y1 ? ys[v] : y1;
           }
           // SB_SKIP_BIGQUAD=<extent>: drop 4-vertex quads whose decoded extent exceeds this,
           // i.e. the scene-covering ones, without touching the hundreds of small UI quads that
@@ -2411,11 +2442,10 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
             std::fprintf(stderr,
                          "[quad-rect] #%ld %c x=[%.0f..%.0f] y=[%.0f..%.0f] w=%.0f h=%.0f "
                          "tex0=%ux%u tev=%u bm=%d bf=%d/%d cU=%d aU=%d\n",
-                         n, g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
-                         x0, x1, y0, y1, x1 - x0, y1 - y0, t0.width(), t0.height(),
-                         g_gxState.numTevStages, (int)g_gxState.blendMode,
-                         (int)g_gxState.blendFacSrc, (int)g_gxState.blendFacDst,
-                         g_gxState.colorUpdate ? 1 : 0, g_gxState.alphaUpdate ? 1 : 0);
+                         n, g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', x0, x1, y0, y1, x1 - x0, y1 - y0,
+                         t0.width(), t0.height(), g_gxState.numTevStages, (int)g_gxState.blendMode,
+                         (int)g_gxState.blendFacSrc, (int)g_gxState.blendFacDst, g_gxState.colorUpdate ? 1 : 0,
+                         g_gxState.alphaUpdate ? 1 : 0);
         }
       }
     }
@@ -2454,7 +2484,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         if (c1 != nullptr) {
           s_wy = (float)std::atof(c1 + 1);
           const char* c2 = std::strchr(c1 + 1, ',');
-          if (c2 != nullptr) s_wframe = std::atol(c2 + 1);
+          if (c2 != nullptr)
+            s_wframe = std::atol(c2 + 1);
         }
       }
     }
@@ -2492,17 +2523,19 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
 
       if (decodable) {
         // Offset of POS and of the matrix index within a vertex.
-        u32 posOff2 = 0; int pnOff2 = -1;
+        u32 posOff2 = 0;
+        int pnOff2 = -1;
         for (int a = GX_VA_PNMTXIDX; a < GX_VA_POS; ++a) {
           const auto d = g_gxState.vtxDesc[a];
-          if (d == GX_NONE) continue;
-          if (a == GX_VA_PNMTXIDX) pnOff2 = (int)posOff2;
+          if (d == GX_NONE)
+            continue;
+          if (a == GX_VA_PNMTXIDX)
+            pnOff2 = (int)posOff2;
           posOff2 += (d == GX_INDEX16) ? 2 : 1;
         }
         const float invFrac2 = 1.0f / (float)(1u << pf.frac);
         const float* P2 = reinterpret_cast<const float*>(&g_gxState.proj);
-        const u32 vsz2 = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize
-                                                     : calculate_last_vtx_size(fmt);
+        const u32 vsz2 = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize : calculate_last_vtx_size(fmt);
         const auto& vp2 = g_gxState.logicalViewport;
 
         float sx0 = 1e30f, sx1 = -1e30f, sy0 = 1e30f, sy1 = -1e30f;
@@ -2521,11 +2554,14 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         u32 wneg = 0;
         for (u32 v = 0; v < vtxCount; ++v) {
           const u32 base = pos + v * vsz2;
-          if (base + vsz2 > size) break;
+          if (base + vsz2 > size)
+            break;
           const u8* vp = data + base;
           u32 mtxIdx = g_gxState.currentPnMtx;
-          if (pnOff2 >= 0) mtxIdx = vp[pnOff2] / 3u;
-          if (firstMtxIdx == 0xFFFF) firstMtxIdx = mtxIdx;
+          if (pnOff2 >= 0)
+            mtxIdx = vp[pnOff2] / 3u;
+          if (firstMtxIdx == 0xFFFF)
+            firstMtxIdx = mtxIdx;
           const u8* src;
           if (idxed) {
             const u32 i2 = (pd2 == GX_INDEX16) ? read_u16(vp + posOff2, true) : vp[posOff2];
@@ -2540,11 +2576,14 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           const bool be = !idxed || !arr2.le;
           float x, y, z;
           if (pf.type == GX_F32) {
-            x = read_f32(src, be); y = read_f32(src + 4, be);
+            x = read_f32(src, be);
+            y = read_f32(src + 4, be);
             z = pf.cnt == GX_POS_XYZ ? read_f32(src + 8, be) : 0.f;
           } else {
             auto rs = [&](const u8* q) { return (float)(s16)read_u16(q, be) * invFrac2; };
-            x = rs(src); y = rs(src + 2); z = pf.cnt == GX_POS_XYZ ? rs(src + 4) : 0.f;
+            x = rs(src);
+            y = rs(src + 2);
+            z = pf.cnt == GX_POS_XYZ ? rs(src + 4) : 0.f;
           }
           const float* M = reinterpret_cast<const float*>(&g_gxState.pnMtx[mtxIdx % MaxPnMtx].pos);
           float mv[3];
@@ -2562,8 +2601,10 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           // NDC -> screen pixels, origin top-left.
           const float px = vp2.left + (nx * 0.5f + 0.5f) * vp2.width;
           const float py = vp2.top + (0.5f - ny * 0.5f) * vp2.height;
-          sx0 = std::min(sx0, px); sx1 = std::max(sx1, px);
-          sy0 = std::min(sy0, py); sy1 = std::max(sy1, py);
+          sx0 = std::min(sx0, px);
+          sx1 = std::max(sx1, px);
+          sy0 = std::min(sy0, py);
+          sy1 = std::max(sy1, py);
           any = true;
         }
 
@@ -2582,7 +2623,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           };
           auto lerp4 = [](const std::array<float, 4>& a, const std::array<float, 4>& b, float t) {
             std::array<float, 4> r{};
-            for (int i = 0; i < 4; ++i) r[i] = a[i] + (b[i] - a[i]) * t;
+            for (int i = 0; i < 4; ++i)
+              r[i] = a[i] + (b[i] - a[i]) * t;
             return r;
           };
           auto triHits = [&](std::array<float, 4> a, std::array<float, 4> b, std::array<float, 4> c) {
@@ -2592,13 +2634,16 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
               const auto& cur = poly[i];
               const auto& nxt = poly[(i + 1) % poly.size()];
               const bool curIn = cur[3] >= kEps, nxtIn = nxt[3] >= kEps;
-              if (curIn) out.push_back(cur);
+              if (curIn)
+                out.push_back(cur);
               if (curIn != nxtIn) {
                 const float d = nxt[3] - cur[3];
-                if (std::fabs(d) > 1e-20f) out.push_back(lerp4(cur, nxt, (kEps - cur[3]) / d));
+                if (std::fabs(d) > 1e-20f)
+                  out.push_back(lerp4(cur, nxt, (kEps - cur[3]) / d));
               }
             }
-            if (out.size() < 3) return false;
+            if (out.size() < 3)
+              return false;
             // Fan-triangulate the clipped polygon and do an exact point-in-triangle test.
             float px0, py0;
             scr(out[0], px0, py0);
@@ -2611,7 +2656,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
               const float d3 = (s_wx - px0) * (py2 - py0) - (px2 - px0) * (s_wy - py0);
               const bool neg = d1 < 0 || d2 < 0 || d3 < 0;
               const bool pos = d1 > 0 || d2 > 0 || d3 > 0;
-              if (!(neg && pos)) return true;   // no sign mix -> inside
+              if (!(neg && pos))
+                return true; // no sign mix -> inside
             }
             return false;
           };
@@ -2619,8 +2665,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           switch (prim) {
           case GX_QUADS:
             for (size_t i = 0; i + 3 < n && !hits; i += 4)
-              hits = triHits(clips[i], clips[i + 1], clips[i + 2]) ||
-                     triHits(clips[i], clips[i + 2], clips[i + 3]);
+              hits = triHits(clips[i], clips[i + 1], clips[i + 2]) || triHits(clips[i], clips[i + 2], clips[i + 3]);
             break;
           case GX_TRIANGLES:
             for (size_t i = 0; i + 2 < n && !hits; i += 3)
@@ -2635,7 +2680,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
               hits = triHits(clips[0], clips[i], clips[i + 1]);
             break;
           default:
-            break;   // lines/points: no area, cannot cover a pixel
+            break; // lines/points: no area, cannot cover a pixel
           }
         }
         // Report when the box covers the point OR when the quad crosses the eye plane (where
@@ -2643,7 +2688,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         // culprit is known to be a 4-vertex draw, so an exhaustive list for one frame is
         // small and cannot hide it.
         const bool boxCovers = any && s_wx >= sx0 && s_wx <= sx1 && s_wy >= sy0 && s_wy <= sy1;
-        const bool covers = hits;   // exact, clip-correct coverage
+        const bool covers = hits; // exact, clip-correct coverage
         (void)boxCovers;
         // A prim with vertices at or behind the eye plane has NO trustworthy screen box: the
         // in-front vertices alone give a box that can exclude the watch point while the clipped
@@ -2662,23 +2707,23 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         {
           static int s_dinit = 0;
           static bool s_don = false;
-          if (!s_dinit) { s_dinit = 1; s_don = std::getenv("SB_DEGEN_DRAW") != nullptr; }
+          if (!s_dinit) {
+            s_dinit = 1;
+            s_don = std::getenv("SB_DEGEN_DRAW") != nullptr;
+          }
           // Restricted to boxes that land ON SCREEN: a prim projecting to a single point far
           // outside the viewport is simply offscreen geometry, not a collapsed limb.
           const bool onScreen = sx0 > -64.f && sx1 < 704.f && sy0 > -64.f && sy1 < 512.f;
           if (s_don && any && onScreen && vtxCount >= 3 && (sx1 - sx0) < 8.f && (sy1 - sy0) < 8.f) {
             static long n = 0;
             if (++n <= 40) {
-              const float* M = reinterpret_cast<const float*>(
-                  &g_gxState.pnMtx[firstMtxIdx % MaxPnMtx].pos);
+              const float* M = reinterpret_cast<const float*>(&g_gxState.pnMtx[firstMtxIdx % MaxPnMtx].pos);
               std::fprintf(stderr,
                            "[degen] draw#%ld verts=%u mtx=%u box=[%.1f..%.1f x %.1f..%.1f] "
                            "M=[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f] "
                            "tex0=%ux%u mark='%s'\n",
-                           g_sbPushedDrawCount, vtxCount, firstMtxIdx, sx0, sx1, sy0, sy1,
-                           M[0], M[1], M[2], M[3], M[4], M[5], M[6], M[7],
-                           M[8], M[9], M[10], M[11],
-                           g_gxState.textures[0].texObj.width(),
+                           g_sbPushedDrawCount, vtxCount, firstMtxIdx, sx0, sx1, sy0, sy1, M[0], M[1], M[2], M[3], M[4],
+                           M[5], M[6], M[7], M[8], M[9], M[10], M[11], g_gxState.textures[0].texObj.width(),
                            g_gxState.textures[0].texObj.height(), g_sbLastMarker.c_str());
             }
           }
@@ -2687,8 +2732,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
         // The frame gate applies to REPORTING only. `covers` must be computed on every frame,
         // because SB_SKIP_COVERING has to drop the draw in every frame to change the picture —
         // gating the computation would skip in one frame and leave the dumped one untouched.
-        const bool report = (s_wframe < 0 ||
-                             static_cast<long>(sb_gx_vi_retrace_count()) == s_wframe);
+        const bool report = (s_wframe < 0 || static_cast<long>(sb_gx_vi_retrace_count()) == s_wframe);
         if (report && (covers || wneg > 0 || vtxCount == 4)) {
           const auto& t0 = g_gxState.textures[0].texObj;
           const auto& st = g_gxState.tevStages[g_gxState.numTevStages ? g_gxState.numTevStages - 1 : 0];
@@ -2697,11 +2741,9 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
                        "tex0=%ux%u fmt=%u mips=%u hasMip=%d maxlod=%.1f minf=%d mode0=%08x id=%u "
                        "tev=%u bm=%d bf=%d/%d cU=%d aU=%d zc=%d zu=%d cull=%d "
                        "lastTEV=c(%d,%d,%d,%d)op=%d,%d,%d mark='%s'\n",
-                       covers ? "COVERS"
-                              : (wneg == 0 ? "       "
-                                           : (wneg < vtxCount ? "PARTIAL" : "BEHIND ")),
-                       g_sbPushedDrawCount, g_gxState.projType == GX_ORTHOGRAPHIC ? "O" : "P",
-                       vtxCount, wneg, sx0, sx1, sy0, sy1, t0.width(), t0.height(),
+                       covers ? "COVERS" : (wneg == 0 ? "       " : (wneg < vtxCount ? "PARTIAL" : "BEHIND ")),
+                       g_sbPushedDrawCount, g_gxState.projType == GX_ORTHOGRAPHIC ? "O" : "P", vtxCount, wneg, sx0, sx1,
+                       sy0, sy1, t0.width(), t0.height(),
                        // Mip state, because over-mipping is a KNOWN cause of exactly this
                        // symptom: a texture decoded with more levels than its dimensions
                        // support samples GARBAGE past the level-0 data and reads as white
@@ -2711,16 +2753,12 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
                        // min-filter field. If the recomp's registers say a MIP filter while
                        // aurora's flag says no mips, the flag simply isn't derived on the
                        // register path — which is a derivation gap, not missing game data.
-                       (int)t0.min_filter(), t0.mode0,
-                       t0.texObjId,
-                       g_gxState.numTevStages, (int)g_gxState.blendMode,
-                       (int)g_gxState.blendFacSrc, (int)g_gxState.blendFacDst,
-                       g_gxState.colorUpdate ? 1 : 0, g_gxState.alphaUpdate ? 1 : 0,
-                       (int)g_gxState.depthCompare, (int)g_gxState.depthUpdate,
-                       (int)g_gxState.cullMode,
-                       (int)st.colorPass.a, (int)st.colorPass.b, (int)st.colorPass.c,
-                       (int)st.colorPass.d, (int)st.colorOp.op, (int)st.colorOp.bias,
-                       (int)st.colorOp.scale, g_sbLastMarker.c_str());
+                       (int)t0.min_filter(), t0.mode0, t0.texObjId, g_gxState.numTevStages, (int)g_gxState.blendMode,
+                       (int)g_gxState.blendFacSrc, (int)g_gxState.blendFacDst, g_gxState.colorUpdate ? 1 : 0,
+                       g_gxState.alphaUpdate ? 1 : 0, (int)g_gxState.depthCompare, (int)g_gxState.depthUpdate,
+                       (int)g_gxState.cullMode, (int)st.colorPass.a, (int)st.colorPass.b, (int)st.colorPass.c,
+                       (int)st.colorPass.d, (int)st.colorOp.op, (int)st.colorOp.bias, (int)st.colorOp.scale,
+                       g_sbLastMarker.c_str());
         }
       }
     }
@@ -2733,7 +2771,10 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   {
     static int s_uvInit = 0;
     static const char* s_uvWant = nullptr;
-    if (!s_uvInit) { s_uvInit = 1; s_uvWant = std::getenv("SB_UV_PROBE"); }
+    if (!s_uvInit) {
+      s_uvInit = 1;
+      s_uvWant = std::getenv("SB_UV_PROBE");
+    }
     if (s_uvWant != nullptr && s_uvWant[0] != '\0' && vtxCount > 0) {
       const auto& t0obj = g_gxState.textures[0].texObj;
       char dims[32];
@@ -2745,49 +2786,73 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           // Byte offset of each attribute within a vertex, in GX attribute order.
           const auto attrBytes = [&](int a) -> u32 {
             const auto d = g_gxState.vtxDesc[a];
-            if (d == GX_NONE) return 0;
-            if (d == GX_INDEX8) return 1;
-            if (d == GX_INDEX16) return 2;
-            if (a >= GX_VA_PNMTXIDX && a <= GX_VA_TEX7MTXIDX) return 1;
+            if (d == GX_NONE)
+              return 0;
+            if (d == GX_INDEX8)
+              return 1;
+            if (d == GX_INDEX16)
+              return 2;
+            if (a >= GX_VA_PNMTXIDX && a <= GX_VA_TEX7MTXIDX)
+              return 1;
             const auto& af = g_gxState.vtxFmts[fmt].attrs[a];
             u32 comps = 0;
-            if (a == GX_VA_POS) comps = af.cnt == GX_POS_XYZ ? 3 : 2;
-            else if (a == GX_VA_NRM) comps = 3;
-            else if (a == GX_VA_CLR0 || a == GX_VA_CLR1) comps = 0;  // handled below
-            else comps = af.cnt == GX_TEX_ST ? 2 : 1;
+            if (a == GX_VA_POS)
+              comps = af.cnt == GX_POS_XYZ ? 3 : 2;
+            else if (a == GX_VA_NRM)
+              comps = 3;
+            else if (a == GX_VA_CLR0 || a == GX_VA_CLR1)
+              comps = 0; // handled below
+            else
+              comps = af.cnt == GX_TEX_ST ? 2 : 1;
             if (a == GX_VA_CLR0 || a == GX_VA_CLR1) {
               switch (af.type) {
-              case GX_RGB565: case GX_RGBA4: return 2;
-              case GX_RGB8: case GX_RGBA6: return 3;
-              default: return 4;
+              case GX_RGB565:
+              case GX_RGBA4:
+                return 2;
+              case GX_RGB8:
+              case GX_RGBA6:
+                return 3;
+              default:
+                return 4;
               }
             }
             u32 csz = 0;
             switch (af.type) {
-            case GX_U8: case GX_S8: csz = 1; break;
-            case GX_U16: case GX_S16: csz = 2; break;
-            default: csz = 4; break;
+            case GX_U8:
+            case GX_S8:
+              csz = 1;
+              break;
+            case GX_U16:
+            case GX_S16:
+              csz = 2;
+              break;
+            default:
+              csz = 4;
+              break;
             }
             return comps * csz;
           };
           for (int which = 0; which < 2; ++which) {
             const int target = GX_VA_TEX0 + which;
-            if (g_gxState.vtxDesc[target] != GX_DIRECT) continue;
+            if (g_gxState.vtxDesc[target] != GX_DIRECT)
+              continue;
             const auto& af = g_gxState.vtxFmts[fmt].attrs[target];
-            if (af.type != GX_F32) continue;   // only decode what is unambiguous
+            if (af.type != GX_F32)
+              continue; // only decode what is unambiguous
             u32 off = 0;
-            for (int a = GX_VA_PNMTXIDX; a < target; ++a) off += attrBytes(a);
-            const u32 vsz = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize
-                                                        : calculate_last_vtx_size(fmt);
+            for (int a = GX_VA_PNMTXIDX; a < target; ++a)
+              off += attrBytes(a);
+            const u32 vsz = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize : calculate_last_vtx_size(fmt);
             // Stamp the frame ordinal: two probe lines could be consecutive FRAMES or two
             // draws within one frame, and a per-frame rate cannot be read off the sequence
             // without knowing which.
-            std::fprintf(stderr, "[uv-probe] n=%d rc=%u tex%d verts=%u vsz=%u off=%u uv:", n,
-                         sb_gx_vi_retrace_count(), which, vtxCount, vsz, off);
+            std::fprintf(stderr, "[uv-probe] n=%d rc=%u tex%d verts=%u vsz=%u off=%u uv:", n, sb_gx_vi_retrace_count(),
+                         which, vtxCount, vsz, off);
             const unsigned show = vtxCount < 4 ? vtxCount : 4;
             for (unsigned v = 0; v < show; ++v) {
               const u32 base = pos + v * vsz + off;
-              if (base + 8 > size) break;
+              if (base + 8 > size)
+                break;
               const float u = read_f32(data + base, true);
               const float vv = read_f32(data + base + 4, true);
               std::fprintf(stderr, " (%.4f,%.4f)", u, vv);
@@ -2831,7 +2896,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     if (s_minVerts == -2) {
       const char* e = std::getenv("SB_NDC_PROBE");
       s_minVerts = (e != nullptr && e[0] != '\0') ? std::atoi(e) : -1;
-      if (s_minVerts == 0) s_minVerts = 1;
+      if (s_minVerts == 0)
+        s_minVerts = 1;
       s_markFilter = std::getenv("SB_NDC_MARK");
       if (const char* a = std::getenv("SB_NDC_PROBE_AFTER"); a != nullptr && a[0] != '\0') {
         s_afterRetrace = std::atol(a);
@@ -2863,8 +2929,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       std::fprintf(stderr,
                    "[ndc-draw] #%ld NOT WALKABLE: posDesc=%d posType=%d arr=%p verts=%u -- extend the walker "
                    "before trusting this window\n",
-                   s_ndcDrawCounter, static_cast<int>(posDesc), static_cast<int>(posFmt.type),
-                   arr.data, vtxCount);
+                   s_ndcDrawCounter, static_cast<int>(posDesc), static_cast<int>(posFmt.type), arr.data, vtxCount);
     }
     // SB_NDC_DRAW companion [tex-id]: texture-identity line for every windowed draw —
     // GC image address (image3), host data ptr, dims/format, data version, and an FNV-1a
@@ -2876,32 +2941,46 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       const u8* td = static_cast<const u8*>(tobj.data);
       u32 w = tobj.width(), h = tobj.height(), f = tobj.format();
       // Size of the base level in GC layout (fmt-dependent bpp); enough for identity.
-      u32 bpp4 = (f == GX_TF_RGBA8) ? 128 : (f == GX_TF_RGB565 || f == GX_TF_RGB5A3 || f == GX_TF_IA8) ? 64
-                 : (f == GX_TF_I8 || f == GX_TF_IA4 || f == GX_TF_C8)                                   ? 32
-                                                                                                        : 16; // bits per 4 texels
+      u32 bpp4 = (f == GX_TF_RGBA8)                                           ? 128
+                 : (f == GX_TF_RGB565 || f == GX_TF_RGB5A3 || f == GX_TF_IA8) ? 64
+                 : (f == GX_TF_I8 || f == GX_TF_IA4 || f == GX_TF_C8)         ? 32
+                                                                              : 16; // bits per 4 texels
       u64 nbytes = static_cast<u64>(w) * h * bpp4 / 32;
-      if (nbytes > 0x4000) nbytes = 0x4000;
+      if (nbytes > 0x4000)
+        nbytes = 0x4000;
       u64 hash = 1469598103934665603ull;
       u32 aZero = 0, aFull = 0, aSamp = 0;
       if (td != nullptr) {
-        for (u64 i = 0; i < nbytes; ++i) { hash ^= td[i]; hash *= 1099511628211ull; }
+        for (u64 i = 0; i < nbytes; ++i) {
+          hash ^= td[i];
+          hash *= 1099511628211ull;
+        }
         if (f == GX_TF_RGB5A3) {
           // 16bpp BE: top bit 0 => 3-bit alpha in bits 12-14 (0 possible); top bit 1 => opaque.
           for (u64 i = 0; i + 1 < nbytes; i += 2) {
             u16 v = static_cast<u16>((td[i] << 8) | td[i + 1]);
             ++aSamp;
-            if (v & 0x8000) ++aFull;
-            else if ((v & 0x7000) == 0) ++aZero;
+            if (v & 0x8000)
+              ++aFull;
+            else if ((v & 0x7000) == 0)
+              ++aZero;
           }
         } else if (f == GX_TF_IA8) {
-          for (u64 i = 0; i + 1 < nbytes; i += 2) { ++aSamp; if (td[i] == 0) ++aZero; else if (td[i] == 0xFF) ++aFull; }
+          for (u64 i = 0; i + 1 < nbytes; i += 2) {
+            ++aSamp;
+            if (td[i] == 0)
+              ++aZero;
+            else if (td[i] == 0xFF)
+              ++aFull;
+          }
         }
       }
       // Mip-level alpha summary (RGB5A3): the cutout (GEQUAL 128) samples the mip
       // matching on-screen size — a zero/stale mip chain makes SMALL instances
       // vanish while big ones only wash out. Level offsets follow GC layout
       // (levels packed contiguously after the base).
-      char mipbuf[160]; mipbuf[0] = 0;
+      char mipbuf[160];
+      mipbuf[0] = 0;
       if (td != nullptr && f == GX_TF_RGB5A3 && tobj.mip_count() > 1) {
         u64 off = static_cast<u64>(w) * h * 2;
         int mn = 0;
@@ -2912,8 +2991,10 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           for (u64 i = 0; i + 1 < lb; i += 2) {
             u16 v = static_cast<u16>((td[off + i] << 8) | td[off + i + 1]);
             ++n;
-            if (v & 0x8000) ++fu;
-            else if ((v & 0x7000) == 0) ++z;
+            if (v & 0x8000)
+              ++fu;
+            else if ((v & 0x7000) == 0)
+              ++z;
           }
           mn += std::snprintf(mipbuf + mn, sizeof(mipbuf) - mn, " L%u[n=%u z=%u f=%u]", lvl, n, z, fu);
           off += lb;
@@ -2922,9 +3003,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       std::fprintf(stderr,
                    "[tex-id] #%ld image3=0x%x data=%p %ux%u fmt=%u ver=%u mips=%u hash=%016llx "
                    "alpha[samp=%u zero=%u full=%u]%s\n",
-                   s_ndcDrawCounter, tobj.image3, static_cast<const void*>(td), w, h, f,
-                   tobj.texDataVersion, tobj.mip_count(), static_cast<unsigned long long>(hash),
-                   aSamp, aZero, aFull, mipbuf);
+                   s_ndcDrawCounter, tobj.image3, static_cast<const void*>(td), w, h, f, tobj.texDataVersion,
+                   tobj.mip_count(), static_cast<unsigned long long>(hash), aSamp, aZero, aFull, mipbuf);
     }
     const bool probeMatch = s_minVerts > 0 && s_printed < 400 && afterWindowOk &&
                             vtxCount >= static_cast<u16>(s_minVerts) &&
@@ -2936,7 +3016,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       int pnOff = -1;
       for (int a = GX_VA_PNMTXIDX; a < GX_VA_POS; ++a) {
         if (g_gxState.vtxDesc[a] == GX_DIRECT) {
-          if (a == GX_VA_PNMTXIDX) pnOff = static_cast<int>(posOff);
+          if (a == GX_VA_PNMTXIDX)
+            pnOff = static_cast<int>(posOff);
           posOff += 1;
         }
       }
@@ -2949,8 +3030,10 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       for (u32 v = 0; v < vtxCount; ++v) {
         const u8* vp = data + pos + v * vtxSize;
         u32 mtxIdx = g_gxState.currentPnMtx;
-        if (pnOff >= 0) mtxIdx = vp[pnOff] / 3u;
-        if (v == 0) firstMtx = mtxIdx;
+        if (pnOff >= 0)
+          mtxIdx = vp[pnOff] / 3u;
+        if (v == 0)
+          firstMtx = mtxIdx;
         u32 idx = posDesc == GX_INDEX16 ? read_u16(vp + posOff, true) : vp[posOff];
         const u8* pd = static_cast<const u8*>(arr.data) + idx * arr.stride;
         float x, y, z;
@@ -2958,25 +3041,31 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           auto rf = [le](const u8* p) {
             u32 u;
             std::memcpy(&u, p, 4);
-            if (!le) u = __builtin_bswap32(u);
+            if (!le)
+              u = __builtin_bswap32(u);
             float f;
             std::memcpy(&f, &u, 4);
             return f;
           };
-          x = rf(pd); y = rf(pd + 4); z = posFmt.cnt == GX_POS_XYZ ? rf(pd + 8) : 0.f;
+          x = rf(pd);
+          y = rf(pd + 4);
+          z = posFmt.cnt == GX_POS_XYZ ? rf(pd + 8) : 0.f;
         } else {
           auto rs = [le](const u8* p) {
             u16 u;
             std::memcpy(&u, p, 2);
-            if (!le) u = static_cast<u16>((u << 8) | (u >> 8));
+            if (!le)
+              u = static_cast<u16>((u << 8) | (u >> 8));
             return static_cast<float>(static_cast<s16>(u));
           };
-          x = rs(pd) * invFrac; y = rs(pd + 2) * invFrac;
+          x = rs(pd) * invFrac;
+          y = rs(pd + 2) * invFrac;
           z = posFmt.cnt == GX_POS_XYZ ? rs(pd + 4) * invFrac : 0.f;
         }
         const float* M = reinterpret_cast<const float*>(&g_gxState.pnMtx[mtxIdx % MaxPnMtx].pos);
         float mv[3];
-        for (int c = 0; c < 3; ++c) mv[c] = M[4 * c] * x + M[4 * c + 1] * y + M[4 * c + 2] * z + M[4 * c + 3];
+        for (int c = 0; c < 3; ++c)
+          mv[c] = M[4 * c] * x + M[4 * c + 1] * y + M[4 * c + 2] * z + M[4 * c + 3];
         float clip[4];
         for (int c = 0; c < 4; ++c)
           clip[c] = P[4 * c] * mv[0] + P[4 * c + 1] * mv[1] + P[4 * c + 2] * mv[2] + P[4 * c + 3];
@@ -2986,19 +3075,24 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
             std::fprintf(stderr,
                          "[ndc-probe-behind]  v%u idx=%u pos=(%.1f,%.1f,%.1f) mtx=%u M=[%.3f %.3f %.3f %.3f | "
                          "%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f] mv=(%.1f,%.1f,%.1f) clipW=%.3f mark='%s'\n",
-                         v, idx, x, y, z, mtxIdx, M[0], M[1], M[2], M[3], M[4], M[5], M[6], M[7], M[8], M[9],
-                         M[10], M[11], mv[0], mv[1], mv[2], clip[3], g_sbLastMarker.c_str());
+                         v, idx, x, y, z, mtxIdx, M[0], M[1], M[2], M[3], M[4], M[5], M[6], M[7], M[8], M[9], M[10],
+                         M[11], mv[0], mv[1], mv[2], clip[3], g_sbLastMarker.c_str());
           }
           continue;
         }
         const float nx = clip[0] / clip[3], ny = clip[1] / clip[3], nz = clip[2] / clip[3];
-        xmin = std::min(xmin, nx); xmax = std::max(xmax, nx);
-        ymin = std::min(ymin, ny); ymax = std::max(ymax, ny);
-        zmin = std::min(zmin, nz); zmax = std::max(zmax, nz);
+        xmin = std::min(xmin, nx);
+        xmax = std::max(xmax, nx);
+        ymin = std::min(ymin, ny);
+        ymax = std::max(ymax, ny);
+        zmin = std::min(zmin, nz);
+        zmax = std::max(zmax, nz);
         // GC clip z convention: visible depth is z/w in [-1, 0]. Aurora runs
         // with unclippedDepth, so XY containment alone decides rasterization.
-        if (nx >= -1.f && nx <= 1.f && ny >= -1.f && ny <= 1.f) ++in;
-        if (nz >= -1.f && nz <= 0.f) ++zin;
+        if (nx >= -1.f && nx <= 1.f && ny >= -1.f && ny <= 1.f)
+          ++in;
+        if (nz >= -1.f && nz <= 0.f)
+          ++zin;
         if (ndcDrawWindowed ? v < 32 : (s_printed <= 6 && v < 4)) {
           // Also fetch this vertex's CLR0 raw bytes (if indexed) — shading
           // ground truth for "geometry rasterizes but comes out black".
@@ -3008,16 +3102,29 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
             u32 c0off = 0;
             for (int a = GX_VA_PNMTXIDX; a < GX_VA_CLR0; ++a) {
               switch (g_gxState.vtxDesc[a]) {
-              case GX_NONE: break;
-              case GX_DIRECT: c0off += a < GX_VA_POS ? 1 : comp_type_size(static_cast<GXAttr>(a), g_gxState.vtxFmts[fmt].attrs[a].type) * comp_cnt_count(static_cast<GXAttr>(a), g_gxState.vtxFmts[fmt].attrs[a].cnt); break;
-              case GX_INDEX8: c0off += (a == GX_VA_NRM && g_gxState.vtxFmts[fmt].attrs[a].cnt == GX_NRM_NBT3) ? 3 : 1; break;
-              case GX_INDEX16: c0off += (a == GX_VA_NRM && g_gxState.vtxFmts[fmt].attrs[a].cnt == GX_NRM_NBT3) ? 6 : 2; break;
+              case GX_NONE:
+                break;
+              case GX_DIRECT:
+                c0off += a < GX_VA_POS
+                             ? 1
+                             : comp_type_size(static_cast<GXAttr>(a), g_gxState.vtxFmts[fmt].attrs[a].type) *
+                                   comp_cnt_count(static_cast<GXAttr>(a), g_gxState.vtxFmts[fmt].attrs[a].cnt);
+                break;
+              case GX_INDEX8:
+                c0off += (a == GX_VA_NRM && g_gxState.vtxFmts[fmt].attrs[a].cnt == GX_NRM_NBT3) ? 3 : 1;
+                break;
+              case GX_INDEX16:
+                c0off += (a == GX_VA_NRM && g_gxState.vtxFmts[fmt].attrs[a].cnt == GX_NRM_NBT3) ? 6 : 2;
+                break;
               }
             }
             const u32 cidx = c0desc == GX_INDEX16 ? read_u16(vp + c0off, true) : vp[c0off];
             const auto& carr = g_gxState.arrays[GX_VA_CLR0];
             const u8* cd = static_cast<const u8*>(carr.data) + cidx * carr.stride;
-            c0raw[0] = cd[0]; c0raw[1] = cd[1]; c0raw[2] = cd[2]; c0raw[3] = carr.stride > 3 ? cd[3] : 0;
+            c0raw[0] = cd[0];
+            c0raw[1] = cd[1];
+            c0raw[2] = cd[2];
+            c0raw[3] = carr.stride > 3 ? cd[3] : 0;
           }
           // TEX0 UVs (indexed) — which texture region this vertex samples. For an
           // alpha-cutout material (aComp GEQUAL) wrong UVs land on transparent
@@ -3029,10 +3136,20 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
             u32 t0off = 0;
             for (int a = GX_VA_PNMTXIDX; a < GX_VA_TEX0; ++a) {
               switch (g_gxState.vtxDesc[a]) {
-              case GX_NONE: break;
-              case GX_DIRECT: t0off += a < GX_VA_POS ? 1 : comp_type_size(static_cast<GXAttr>(a), g_gxState.vtxFmts[fmt].attrs[a].type) * comp_cnt_count(static_cast<GXAttr>(a), g_gxState.vtxFmts[fmt].attrs[a].cnt); break;
-              case GX_INDEX8: t0off += (a == GX_VA_NRM && g_gxState.vtxFmts[fmt].attrs[a].cnt == GX_NRM_NBT3) ? 3 : 1; break;
-              case GX_INDEX16: t0off += (a == GX_VA_NRM && g_gxState.vtxFmts[fmt].attrs[a].cnt == GX_NRM_NBT3) ? 6 : 2; break;
+              case GX_NONE:
+                break;
+              case GX_DIRECT:
+                t0off += a < GX_VA_POS
+                             ? 1
+                             : comp_type_size(static_cast<GXAttr>(a), g_gxState.vtxFmts[fmt].attrs[a].type) *
+                                   comp_cnt_count(static_cast<GXAttr>(a), g_gxState.vtxFmts[fmt].attrs[a].cnt);
+                break;
+              case GX_INDEX8:
+                t0off += (a == GX_VA_NRM && g_gxState.vtxFmts[fmt].attrs[a].cnt == GX_NRM_NBT3) ? 3 : 1;
+                break;
+              case GX_INDEX16:
+                t0off += (a == GX_VA_NRM && g_gxState.vtxFmts[fmt].attrs[a].cnt == GX_NRM_NBT3) ? 6 : 2;
+                break;
               }
             }
             const u32 tidx = t0desc == GX_INDEX16 ? read_u16(vp + t0off, true) : vp[t0off];
@@ -3041,11 +3158,28 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
             const auto& tfmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0];
             const bool tle = tarr.le;
             if (tfmt.type == GX_F32) {
-              auto rf = [tle](const u8* p) { u32 u; std::memcpy(&u, p, 4); if (!tle) u = __builtin_bswap32(u); float f; std::memcpy(&f, &u, 4); return f; };
-              t0u = rf(tdp); t0v = rf(tdp + 4);
+              auto rf = [tle](const u8* p) {
+                u32 u;
+                std::memcpy(&u, p, 4);
+                if (!tle)
+                  u = __builtin_bswap32(u);
+                float f;
+                std::memcpy(&f, &u, 4);
+                return f;
+              };
+              t0u = rf(tdp);
+              t0v = rf(tdp + 4);
             } else if (tfmt.type == GX_S16 || tfmt.type == GX_U16) {
-              auto rs = [tle, &tfmt](const u8* p) { u16 u; std::memcpy(&u, p, 2); if (!tle) u = static_cast<u16>((u << 8) | (u >> 8)); float f = tfmt.type == GX_S16 ? static_cast<float>(static_cast<s16>(u)) : static_cast<float>(u); return f / static_cast<float>(1u << tfmt.frac); };
-              t0u = rs(tdp); t0v = rs(tdp + 2);
+              auto rs = [tle, &tfmt](const u8* p) {
+                u16 u;
+                std::memcpy(&u, p, 2);
+                if (!tle)
+                  u = static_cast<u16>((u << 8) | (u >> 8));
+                float f = tfmt.type == GX_S16 ? static_cast<float>(static_cast<s16>(u)) : static_cast<float>(u);
+                return f / static_cast<float>(1u << tfmt.frac);
+              };
+              t0u = rs(tdp);
+              t0v = rs(tdp + 2);
             }
           }
           std::fprintf(stderr,
@@ -3059,30 +3193,28 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       // outputs black".
       {
         const auto& t0 = g_gxState.tevStages[0];
-        std::fprintf(stderr,
-                     "[ndc-probe]  tev0 C[a=%d b=%d c=%d d=%d op=%d bias=%d scale=%d out=%d] "
-                     "A[a=%d b=%d c=%d d=%d op=%d out=%d] ras=%d tc=%d tm=%d nStages=%u\n",
-                     static_cast<int>(t0.colorPass.a), static_cast<int>(t0.colorPass.b),
-                     static_cast<int>(t0.colorPass.c), static_cast<int>(t0.colorPass.d),
-                     static_cast<int>(t0.colorOp.op), static_cast<int>(t0.colorOp.bias),
-                     static_cast<int>(t0.colorOp.scale), static_cast<int>(t0.colorOp.outReg),
-                     static_cast<int>(t0.alphaPass.a), static_cast<int>(t0.alphaPass.b),
-                     static_cast<int>(t0.alphaPass.c), static_cast<int>(t0.alphaPass.d),
-                     static_cast<int>(t0.alphaOp.op), static_cast<int>(t0.alphaOp.outReg),
-                     static_cast<int>(t0.channelId), static_cast<int>(t0.texCoordId),
-                     static_cast<int>(t0.texMapId), g_gxState.numTevStages);
+        std::fprintf(
+            stderr,
+            "[ndc-probe]  tev0 C[a=%d b=%d c=%d d=%d op=%d bias=%d scale=%d out=%d] "
+            "A[a=%d b=%d c=%d d=%d op=%d out=%d] ras=%d tc=%d tm=%d nStages=%u\n",
+            static_cast<int>(t0.colorPass.a), static_cast<int>(t0.colorPass.b), static_cast<int>(t0.colorPass.c),
+            static_cast<int>(t0.colorPass.d), static_cast<int>(t0.colorOp.op), static_cast<int>(t0.colorOp.bias),
+            static_cast<int>(t0.colorOp.scale), static_cast<int>(t0.colorOp.outReg), static_cast<int>(t0.alphaPass.a),
+            static_cast<int>(t0.alphaPass.b), static_cast<int>(t0.alphaPass.c), static_cast<int>(t0.alphaPass.d),
+            static_cast<int>(t0.alphaOp.op), static_cast<int>(t0.alphaOp.outReg), static_cast<int>(t0.channelId),
+            static_cast<int>(t0.texCoordId), static_cast<int>(t0.texMapId), g_gxState.numTevStages);
       }
       std::fprintf(stderr,
                    "[ndc-probe] #%d verts=%u inXY=%u inZ=%u wneg=%u proj=%c ndcX=[%.2f..%.2f] ndcY=[%.2f..%.2f] "
                    "ndcZ=[%.4f..%.4f] mtx0=%u cull=%d aComp=%d/%u,%d/%u zc=%d zu=%d mark='%s'\n",
-                   ndcDrawWindowed ? static_cast<int>(s_ndcDrawCounter) : s_printed,
-                   vtxCount, in, zin, wneg, g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', xmin, xmax,
-                   ymin, ymax, zmin, zmax, firstMtx, static_cast<int>(g_gxState.cullMode),
-                   static_cast<int>(g_gxState.alphaCompare.comp0), g_gxState.alphaCompare.ref0,
-                   static_cast<int>(g_gxState.alphaCompare.comp1), g_gxState.alphaCompare.ref1,
-                   static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
-                   g_sbLastMarker.c_str());
-      if (g_gxState.projType != GX_ORTHOGRAPHIC) ++s_printedP;
+                   ndcDrawWindowed ? static_cast<int>(s_ndcDrawCounter) : s_printed, vtxCount, in, zin, wneg,
+                   g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', xmin, xmax, ymin, ymax, zmin, zmax, firstMtx,
+                   static_cast<int>(g_gxState.cullMode), static_cast<int>(g_gxState.alphaCompare.comp0),
+                   g_gxState.alphaCompare.ref0, static_cast<int>(g_gxState.alphaCompare.comp1),
+                   g_gxState.alphaCompare.ref1, static_cast<int>(g_gxState.depthCompare),
+                   static_cast<int>(g_gxState.depthUpdate), g_sbLastMarker.c_str());
+      if (g_gxState.projType != GX_ORTHOGRAPHIC)
+        ++s_printedP;
     }
   }
 
@@ -3122,9 +3254,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
                     static_cast<int>(g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0].type),
                     static_cast<int>(g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0].cnt),
                     g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0].frac,
-                    static_cast<const void*>(g_gxState.arrays[GX_VA_TEX0].data),
-                    g_gxState.arrays[GX_VA_TEX0].stride, g_gxState.numTevStages,
-                    static_cast<int>(hstage0.texCoordId), static_cast<int>(hstage0.texMapId),
+                    static_cast<const void*>(g_gxState.arrays[GX_VA_TEX0].data), g_gxState.arrays[GX_VA_TEX0].stride,
+                    g_gxState.numTevStages, static_cast<int>(hstage0.texCoordId), static_cast<int>(hstage0.texMapId),
                     static_cast<int>(hstage0.channelId), htexW, htexH, hwrapS, hwrapT, g_sbLastMarker);
     }
     if (s_n < 400) {
@@ -3139,8 +3270,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           break;
         case GX_DIRECT:
           off += (a < GX_VA_POS) ? 1
-                                  : comp_type_size(static_cast<GXAttr>(a), vtxFmt.attrs[a].type) *
-                                        comp_cnt_count(static_cast<GXAttr>(a), vtxFmt.attrs[a].cnt);
+                                 : comp_type_size(static_cast<GXAttr>(a), vtxFmt.attrs[a].type) *
+                                       comp_cnt_count(static_cast<GXAttr>(a), vtxFmt.attrs[a].cnt);
           break;
         case GX_INDEX8:
           off += (a == GX_VA_NRM && vtxFmt.attrs[a].cnt == GX_NRM_NBT3) ? 3 : 1;
@@ -3175,7 +3306,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           src = static_cast<const u8*>(arr.data) + idx * arr.stride;
           le = arr.le;
         }
-        if (src == nullptr) continue;
+        if (src == nullptr)
+          continue;
         auto readComp = [&](const u8* p) -> float {
           switch (t0Fmt.type) {
           case GX_U8:
@@ -3185,19 +3317,22 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           case GX_U16: {
             u16 x;
             std::memcpy(&x, p, 2);
-            if (!le) x = static_cast<u16>((x << 8) | (x >> 8));
+            if (!le)
+              x = static_cast<u16>((x << 8) | (x >> 8));
             return static_cast<float>(x);
           }
           case GX_S16: {
             u16 x;
             std::memcpy(&x, p, 2);
-            if (!le) x = static_cast<u16>((x << 8) | (x >> 8));
+            if (!le)
+              x = static_cast<u16>((x << 8) | (x >> 8));
             return static_cast<float>(static_cast<s16>(x));
           }
           case GX_F32: {
             u32 xi;
             std::memcpy(&xi, p, 4);
-            if (!le) xi = __builtin_bswap32(xi);
+            if (!le)
+              xi = __builtin_bswap32(xi);
             float f;
             std::memcpy(&f, &xi, 4);
             return f;
@@ -3243,7 +3378,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     u32 off = 0;
     for (int a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7; ++a) {
       const auto desc = g_gxState.vtxDesc[a];
-      if (desc == GX_NONE) continue;
+      if (desc == GX_NONE)
+        continue;
       if (desc == GX_DIRECT) {
         off += comp_type_size(static_cast<GXAttr>(a), vtxFmt.attrs[a].type) *
                comp_cnt_count(static_cast<GXAttr>(a), vtxFmt.attrs[a].cnt);
@@ -3272,14 +3408,16 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           const auto& fl = fields[f];
           for (u8 k = 0; k < fl.n; ++k) {
             const u32 idx = fl.wide == 2 ? read_u16(vp + fl.off + k * 2, true) : vp[fl.off + k];
-            if (idx > maxIdx[fl.attr]) maxIdx[fl.attr] = idx;
+            if (idx > maxIdx[fl.attr])
+              maxIdx[fl.attr] = idx;
           }
         }
       }
       for (int f = 0; f < nFields; ++f) {
         auto& arr = g_gxState.arrays[fields[f].attr];
         const u32 need = (maxIdx[fields[f].attr] + 1) * arr.stride;
-        if (need > arr.sizeAuto) arr.sizeAuto = need;
+        if (need > arr.sizeAuto)
+          arr.sizeAuto = need;
         if (arr.cachedRange.size < arr.sizeAuto) {
           arr.cachedRange = {};
           g_gxState.stateDirty = true;
@@ -3306,7 +3444,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       s_init = 1;
       const char* e = std::getenv("SB_SKIP_COVERING");
       s_on = e != nullptr && e[0] != '\0';
-      if (s_on) s_mode = std::atoi(e);
+      if (s_on)
+        s_mode = std::atoi(e);
     }
     // =1 drops only draws whose box contains the point; =2 ALSO drops eye-plane-crossing
     // draws, whose box is not a valid coverage answer at all.
@@ -3323,8 +3462,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     // The blend FACTORS are stale whenever blending is off — they keep whatever was last set.
     // Matching on them without checking blendMode silently sweeps in opaque draws, which is
     // how two supposedly disjoint blend-pair filters ended up selecting overlapping sets.
-    const bool bfMatch = s_bfSrc < 0 || (g_gxState.blendMode == GX_BM_BLEND &&
-                                         (int)g_gxState.blendFacSrc == s_bfSrc &&
+    const bool bfMatch = s_bfSrc < 0 || (g_gxState.blendMode == GX_BM_BLEND && (int)g_gxState.blendFacSrc == s_bfSrc &&
                                          (int)g_gxState.blendFacDst == s_bfDst);
 
     // SB_SKIP_WNEG_KIND=partial|full selects which half of the crossing class to drop.
@@ -3332,15 +3470,15 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     // dropping them must be a visual no-op. If the image moves, the skip mechanism itself
     // perturbs unrelated rendering and every skip result here is contaminated.
     static int s_kindInit = 0;
-    static int s_kind = 0;   // 0 = both, 1 = partial only, 2 = full only
+    static int s_kind = 0; // 0 = both, 1 = partial only, 2 = full only
     if (!s_kindInit) {
       s_kindInit = 1;
       if (const char* e = std::getenv("SB_SKIP_WNEG_KIND"); e != nullptr && e[0] != '\0')
         s_kind = (e[0] == 'p') ? 1 : (e[0] == 'f') ? 2 : 0;
     }
-    const bool wnegMatch = s_kind == 1 ? sb_wneg_partial
-                         : s_kind == 2 ? sb_wneg_full
-                                       : (sb_wneg_partial || sb_wneg_full);
+    const bool wnegMatch = s_kind == 1   ? sb_wneg_partial
+                           : s_kind == 2 ? sb_wneg_full
+                                         : (sb_wneg_partial || sb_wneg_full);
     // With a blend filter set the test is about THAT family alone, so the coverage clause is
     // dropped — otherwise the 393k harmless covering draws ride along and blur the answer.
     // SB_SKIP_BF=<src>,<dst> (diagnostic): drop EVERY draw using that blend pair, with no
@@ -3354,10 +3492,11 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       if (const char* e = std::getenv("SB_SKIP_BF"); e != nullptr && e[0] != '\0')
         std::sscanf(e, "%d,%d", &s_allBfSrc, &s_allBfDst);
     }
-    if (s_allBfSrc >= 0 && g_gxState.blendMode == GX_BM_BLEND &&
-        (int)g_gxState.blendFacSrc == s_allBfSrc && (int)g_gxState.blendFacDst == s_allBfDst) {
+    if (s_allBfSrc >= 0 && g_gxState.blendMode == GX_BM_BLEND && (int)g_gxState.blendFacSrc == s_allBfSrc &&
+        (int)g_gxState.blendFacDst == s_allBfDst) {
       static long nbf = 0;
-      if ((++nbf % 500) == 1) std::fprintf(stderr, "[skip-bf] dropped %ld draws\n", nbf);
+      if ((++nbf % 500) == 1)
+        std::fprintf(stderr, "[skip-bf] dropped %ld draws\n", nbf);
       pos += totalVtxBytes;
       return;
     }
@@ -3368,7 +3507,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     const bool coversClause = sb_covers_watch && s_bfSrc < 0 && s_kind == 0;
     if (s_on && (coversClause || (s_mode >= 2 && wnegMatch && bfMatch))) {
       static long n = 0;
-      if ((++n % 100) == 1) std::fprintf(stderr, "[skip-covering] dropped %ld covering draws\n", n);
+      if ((++n % 100) == 1)
+        std::fprintf(stderr, "[skip-covering] dropped %ld covering draws\n", n);
       pos += totalVtxBytes;
       if (dpProf) {
         ++g_dpEarlyReturns; // no phase claims this exit; it shows up as unattributed
@@ -3461,14 +3601,15 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   pos += 2;
 
   u32 vtxSize;
-  if (g_gxState.lastVtxFmt == fmt) vtxSize = g_gxState.lastVtxSize;
-  else vtxSize = calculate_last_vtx_size(fmt);
+  if (g_gxState.lastVtxFmt == fmt)
+    vtxSize = g_gxState.lastVtxSize;
+  else
+    vtxSize = calculate_last_vtx_size(fmt);
 
   // PER-DRAW STATE ORACLE (sms-recomp/runtime/state_oracle.h). Aurora renders this stream
   // correctly, so its state at each draw is the reference the native path is checked against.
   // Weak symbols: aurora still links standalone, where these do nothing.
-  if (sbr_state_diff_enabled != nullptr && sbr_state_oracle_aurora_raw != nullptr &&
-      sbr_state_diff_enabled()) {
+  if (sbr_state_diff_enabled != nullptr && sbr_state_oracle_aurora_raw != nullptr && sbr_state_diff_enabled()) {
     // Aurora processes one contiguous buffer per frame, so a position that goes BACKWARDS is the
     // start of the next frame's buffer — the only frame boundary visible from inside this layer.
     static thread_local u32 s_lastCmdPos = 0;
@@ -3490,14 +3631,16 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
       unsigned r = 0;
       for (int c = 0; c < 4; ++c) {
         long x = std::lround((double)v[c] * 255.0);
-        if (x < 0) x = 0;
-        if (x > 255) x = 255;
+        if (x < 0)
+          x = 0;
+        if (x > 255)
+          x = 255;
         r = (r << 8) | (unsigned)x;
       }
       return r;
     };
     const auto rawOp = [](const TevOp& o, unsigned& bias, unsigned& sub, unsigned& scale) {
-      if (static_cast<unsigned>(o.op) >= 8) {   // compare mode: bias field is 3 on the wire
+      if (static_cast<unsigned>(o.op) >= 8) { // compare mode: bias field is 3 on the wire
         bias = 3;
         sub = (static_cast<unsigned>(o.op) - 8) & 1;
         scale = ((static_cast<unsigned>(o.op) - 8) >> 1) & 3;
@@ -3509,35 +3652,42 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
     };
     for (u32 k = 0; k < 16 && k < g_gxState.tevStages.size(); ++k) {
       const auto& ts = g_gxState.tevStages[k];
-      const bool enabled = ts.texMapId != GX_TEXMAP_NULL &&
-                           (static_cast<u32>(ts.texMapId) & 0x100u) == 0;
+      const bool enabled = ts.texMapId != GX_TEXMAP_NULL && (static_cast<u32>(ts.texMapId) & 0x100u) == 0;
       texEnable[k] = enabled ? 1 : 0;
       texmap[k] = static_cast<unsigned char>(static_cast<u32>(ts.texMapId) & 7);
       texcoord[k] = static_cast<unsigned char>(static_cast<u32>(ts.texCoordId) & 7);
-      switch (ts.channelId) {   // canonical hw ras values {0,1,5,6,7}
-      case GX_COLOR0A0: rasChannel[k] = 0; break;
-      case GX_COLOR1A1: rasChannel[k] = 1; break;
-      case GX_ALPHA_BUMP: rasChannel[k] = 5; break;
-      case GX_ALPHA_BUMPN: rasChannel[k] = 6; break;
-      case GX_COLOR_ZERO: rasChannel[k] = 7; break;
-      default: rasChannel[k] = 7; break;
+      switch (ts.channelId) { // canonical hw ras values {0,1,5,6,7}
+      case GX_COLOR0A0:
+        rasChannel[k] = 0;
+        break;
+      case GX_COLOR1A1:
+        rasChannel[k] = 1;
+        break;
+      case GX_ALPHA_BUMP:
+        rasChannel[k] = 5;
+        break;
+      case GX_ALPHA_BUMPN:
+        rasChannel[k] = 6;
+        break;
+      case GX_COLOR_ZERO:
+        rasChannel[k] = 7;
+        break;
+      default:
+        rasChannel[k] = 7;
+        break;
       }
       unsigned bias, sub, scale;
       rawOp(ts.colorOp, bias, sub, scale);
       cWord[k] = static_cast<unsigned>(ts.colorPass.d) | static_cast<unsigned>(ts.colorPass.c) << 4 |
-                 static_cast<unsigned>(ts.colorPass.b) << 8 |
-                 static_cast<unsigned>(ts.colorPass.a) << 12 | bias << 16 | sub << 18 |
-                 (ts.colorOp.clamp ? 1u : 0u) << 19 | scale << 20 |
+                 static_cast<unsigned>(ts.colorPass.b) << 8 | static_cast<unsigned>(ts.colorPass.a) << 12 | bias << 16 |
+                 sub << 18 | (ts.colorOp.clamp ? 1u : 0u) << 19 | scale << 20 |
                  static_cast<unsigned>(ts.colorOp.outReg) << 22;
       rawOp(ts.alphaOp, bias, sub, scale);
-      aWord[k] = static_cast<unsigned>(ts.alphaPass.d) << 4 |
-                 static_cast<unsigned>(ts.alphaPass.c) << 7 |
-                 static_cast<unsigned>(ts.alphaPass.b) << 10 |
-                 static_cast<unsigned>(ts.alphaPass.a) << 13 | bias << 16 | sub << 18 |
-                 (ts.alphaOp.clamp ? 1u : 0u) << 19 | scale << 20 |
+      aWord[k] = static_cast<unsigned>(ts.alphaPass.d) << 4 | static_cast<unsigned>(ts.alphaPass.c) << 7 |
+                 static_cast<unsigned>(ts.alphaPass.b) << 10 | static_cast<unsigned>(ts.alphaPass.a) << 13 |
+                 bias << 16 | sub << 18 | (ts.alphaOp.clamp ? 1u : 0u) << 19 | scale << 20 |
                  static_cast<unsigned>(ts.alphaOp.outReg) << 22;
-      kSel[k] = static_cast<unsigned short>(static_cast<unsigned>(ts.kcSel) |
-                                            static_cast<unsigned>(ts.kaSel) << 8);
+      kSel[k] = static_cast<unsigned short>(static_cast<unsigned>(ts.kcSel) | static_cast<unsigned>(ts.kaSel) << 8);
     }
     // Report the BP-REGISTER image base, not the SDK texObj slot. `textures[m].texObj` is set by
     // GXLoadTexObj, which J3D almost never calls — it binds by replaying display lists that write
@@ -3551,12 +3701,11 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
     for (u32 c = 0; c < 4 && c < MaxColorChannels; ++c) {
       const auto& cfg = g_gxState.colorChannelConfig[c];
       const unsigned attnFn = cfg.attnFn == GX_AF_NONE ? 0u : (cfg.attnFn == GX_AF_SPEC ? 1u : 2u);
-      const unsigned mask =
-          static_cast<unsigned>(g_gxState.colorChannelState[c].lightMask.to_ulong() & 0xFFu);
-      chanCtrl[c] = static_cast<unsigned short>(
-          (cfg.matSrc == GX_SRC_VTX ? 1u : 0u) | (cfg.lightingEnabled ? 2u : 0u) |
-          (cfg.ambSrc == GX_SRC_VTX ? 4u : 0u) | ((static_cast<unsigned>(cfg.diffFn) & 3u) << 3) |
-          (attnFn << 5) | (mask << 8));
+      const unsigned mask = static_cast<unsigned>(g_gxState.colorChannelState[c].lightMask.to_ulong() & 0xFFu);
+      chanCtrl[c] =
+          static_cast<unsigned short>((cfg.matSrc == GX_SRC_VTX ? 1u : 0u) | (cfg.lightingEnabled ? 2u : 0u) |
+                                      (cfg.ambSrc == GX_SRC_VTX ? 4u : 0u) |
+                                      ((static_cast<unsigned>(cfg.diffFn) & 3u) << 3) | (attnFn << 5) | (mask << 8));
     }
     for (u32 c = 0; c < 2; ++c) {
       ambColor[c] = q8(g_gxState.colorChannelState[c].ambColor);
@@ -3566,8 +3715,7 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
       konst[j] = q8(g_gxState.kcolors[j]);
       unsigned long long r = 0;
       for (int c = 0; c < 4; ++c)
-        r = (r << 16) |
-            (unsigned short)(short)std::lround((double)g_gxState.colorRegs[j][c] * 255.0);
+        r = (r << 16) | (unsigned short)(short)std::lround((double)g_gxState.colorRegs[j][c] * 255.0);
       tevReg[j] = r;
     }
     // Raster state, packed identically to the recomp side (state_oracle.h documents the layout).
@@ -3580,19 +3728,17 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
                                : g_gxState.blendMode == GX_BM_LOGIC    ? 2u
                                : g_gxState.blendMode == GX_BM_SUBTRACT ? 3u
                                                                        : 0u;
-    const unsigned blendBits = blendMode | (((unsigned)g_gxState.blendFacSrc & 15u) << 3) |
-                               (((unsigned)g_gxState.blendFacDst & 15u) << 7);
+    const unsigned blendBits =
+        blendMode | (((unsigned)g_gxState.blendFacSrc & 15u) << 3) | (((unsigned)g_gxState.blendFacDst & 15u) << 7);
     // SCISSOR and CULL — the two pieces of per-draw raster state the oracle never carried. Aurora
     // confines every draw to this rect (BP 0x20/0x21) and applies GENMODE's cull mode; the recomp
     // renderer does neither, so comparing them tells us whether the hardware is CLIPPING draws that
     // this port paints across the whole target.
-    const int scissorRect[4] = {g_gxState.logicalScissor.x, g_gxState.logicalScissor.y,
-                                g_gxState.logicalScissor.width, g_gxState.logicalScissor.height};
-    sbr_state_oracle_aurora_raw(cmdPos, g_gxState.numTevStages, g_gxState.numTexGens, texmap,
-                                texcoord, texEnable, unitId, g_gxState.numChans, chanCtrl,
-                                ambColor, matColor, rasChannel, cWord, aWord, kSel, konst, tevReg,
-                                rasterBits, blendBits, scissorRect,
-                                (unsigned)g_gxState.cullMode);
+    const int scissorRect[4] = {g_gxState.logicalScissor.x, g_gxState.logicalScissor.y, g_gxState.logicalScissor.width,
+                                g_gxState.logicalScissor.height};
+    sbr_state_oracle_aurora_raw(cmdPos, g_gxState.numTevStages, g_gxState.numTexGens, texmap, texcoord, texEnable,
+                                unitId, g_gxState.numChans, chanCtrl, ambColor, matColor, rasChannel, cWord, aWord,
+                                kSel, konst, tevReg, rasterBits, blendBits, scissorRect, (unsigned)g_gxState.cullMode);
   }
 
   s_recentDraws[s_recentDrawHead] = {cmdPos, cmd, vtxCount, vtxSize};
@@ -3605,8 +3751,8 @@ static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   }
   if (s_traceEnabled) {
     Log.warn("[draw trace] pos={} cmd=0x{:02X} prim=0x{:02X} fmt={} vtxCount={} vtxSize={} totalBytes={} nextPos={}",
-             cmdPos, cmd, static_cast<u32>(prim), static_cast<u32>(fmt),
-             vtxCount, vtxSize, vtxCount * vtxSize, pos + vtxCount * vtxSize);
+             cmdPos, cmd, static_cast<u32>(prim), static_cast<u32>(fmt), vtxCount, vtxSize, vtxCount * vtxSize,
+             pos + vtxCount * vtxSize);
   }
 
   draw_prim(prim, fmt, vtxCount, data, pos, size);
@@ -3656,8 +3802,8 @@ static DrawDescRec s_lastDrawRec{};
 static DrawDescRec s_drawDescRing[16]{};
 static unsigned s_drawDescRingPos = 0;
 
-static void sb_record_draw_desc(unsigned prim, int fmt, unsigned vtxCount, unsigned numIndices,
-                                unsigned vertBytes, const std::string& mark, long drawIdx) {
+static void sb_record_draw_desc(unsigned prim, int fmt, unsigned vtxCount, unsigned numIndices, unsigned vertBytes,
+                                const std::string& mark, long drawIdx) {
   DrawDescRec& r = s_lastDrawRec;
   r.used = true;
   r.prim = prim;
@@ -3674,13 +3820,11 @@ static void sb_record_draw_desc(unsigned prim, int fmt, unsigned vtxCount, unsig
 }
 
 static int sb_format_draw_desc(char* w, size_t cap, const DrawDescRec& r, const char* suffix) {
-  return std::snprintf(w, cap, "\n  prim=0x%02x fmt=%d verts=%u idx=%u vertBytes=%u mark='%s' drawIdx=%ld%s",
-                       r.prim, r.fmt, r.vtxCount, r.numIndices, r.vertBytes, r.mark, r.drawIdx,
-                       suffix);
+  return std::snprintf(w, cap, "\n  prim=0x%02x fmt=%d verts=%u idx=%u vertBytes=%u mark='%s' drawIdx=%ld%s", r.prim,
+                       r.fmt, r.vtxCount, r.numIndices, r.vertBytes, r.mark, r.drawIdx, suffix);
 }
 
-const char* sb_last_draw_desc()
-{
+const char* sb_last_draw_desc() {
   static char all[16 * 200];
   char* w = all;
   *w = '\0';
@@ -3706,8 +3850,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
                          u32 numIndices) {
   const bool dpProf = sb_drawprim_profile();
   const uint64_t dpDesc0 = dpProf ? sb_tsc() : 0;
-  sb_record_draw_desc((unsigned)prim, (int)fmt, (unsigned)vtxCount, (unsigned)numIndices,
-                      (unsigned)vertRange.size, g_sbLastMarker, (long)g_sbPushedDrawCount);
+  sb_record_draw_desc((unsigned)prim, (int)fmt, (unsigned)vtxCount, (unsigned)numIndices, (unsigned)vertRange.size,
+                      g_sbLastMarker, (long)g_sbPushedDrawCount);
   if (dpProf) {
     g_dpDescTicks += sb_tsc() - dpDesc0;
   }
@@ -3742,9 +3886,12 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   {
     static int s_init = 0;
     static bool s_on = false;
-    if (!s_init) { s_init = 1; s_on = std::getenv("SB_SKIP_ADD_OVERLAY") != nullptr; }
-    if (s_on && vtxCount == 4 && g_gxState.projType == GX_ORTHOGRAPHIC &&
-        g_gxState.blendFacDst == GX_BL_ONE && !g_gxState.alphaUpdate) {
+    if (!s_init) {
+      s_init = 1;
+      s_on = std::getenv("SB_SKIP_ADD_OVERLAY") != nullptr;
+    }
+    if (s_on && vtxCount == 4 && g_gxState.projType == GX_ORTHOGRAPHIC && g_gxState.blendFacDst == GX_BL_ONE &&
+        !g_gxState.alphaUpdate) {
       return;
     }
   }
@@ -3756,11 +3903,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   {
     static int s_init = 0;
     static bool s_on = false;
-    if (!s_init) { s_init = 1; s_on = std::getenv("SB_SKIP_OPAQUE_P4") != nullptr; }
-    if (s_on && vtxCount == 4 && g_gxState.projType != GX_ORTHOGRAPHIC &&
-        g_gxState.blendMode == GX_BM_NONE) {
+    if (!s_init) {
+      s_init = 1;
+      s_on = std::getenv("SB_SKIP_OPAQUE_P4") != nullptr;
+    }
+    if (s_on && vtxCount == 4 && g_gxState.projType != GX_ORTHOGRAPHIC && g_gxState.blendMode == GX_BM_NONE) {
       static long n = 0;
-      if ((++n % 200) == 1) std::fprintf(stderr, "[skip-opaque-p4] skipped %ld draws\n", n);
+      if ((++n % 200) == 1)
+        std::fprintf(stderr, "[skip-opaque-p4] skipped %ld draws\n", n);
       return;
     }
   }
@@ -3771,12 +3921,15 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   {
     static int s_init = 0;
     static bool s_on = false;
-    if (!s_init) { s_init = 1; s_on = std::getenv("SB_SKIP_SCENEQUAD") != nullptr; }
-    if (s_on && vtxCount == 4 && g_gxState.projType != GX_ORTHOGRAPHIC &&
-        g_gxState.blendFacSrc == GX_BL_ONE && g_gxState.blendFacDst == GX_BL_ONE &&
-        !g_gxState.colorUpdate) {
+    if (!s_init) {
+      s_init = 1;
+      s_on = std::getenv("SB_SKIP_SCENEQUAD") != nullptr;
+    }
+    if (s_on && vtxCount == 4 && g_gxState.projType != GX_ORTHOGRAPHIC && g_gxState.blendFacSrc == GX_BL_ONE &&
+        g_gxState.blendFacDst == GX_BL_ONE && !g_gxState.colorUpdate) {
       static long n = 0;
-      if ((++n % 200) == 1) std::fprintf(stderr, "[skip-scenequad] skipped %ld draws\n", n);
+      if ((++n % 200) == 1)
+        std::fprintf(stderr, "[skip-scenequad] skipped %ld draws\n", n);
       return;
     }
   }
@@ -3786,13 +3939,16 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   {
     static int s_init = 0;
     static bool s_on = false;
-    if (!s_init) { s_init = 1; s_on = std::getenv("SB_SKIP_FADER") != nullptr; }
-    if (s_on && vtxCount == 4 && g_gxState.projType == GX_ORTHOGRAPHIC &&
-        g_gxState.numTexGens == 0) {
+    if (!s_init) {
+      s_init = 1;
+      s_on = std::getenv("SB_SKIP_FADER") != nullptr;
+    }
+    if (s_on && vtxCount == 4 && g_gxState.projType == GX_ORTHOGRAPHIC && g_gxState.numTexGens == 0) {
       // A skip that matches nothing produces a null result indistinguishable from "this draw
       // is not the cause". Count and report, so the null can be told apart from the no-op.
       static long n = 0;
-      if ((++n % 200) == 1) std::fprintf(stderr, "[skip-fader] skipped %ld draws\n", n);
+      if ((++n % 200) == 1)
+        std::fprintf(stderr, "[skip-fader] skipped %ld draws\n", n);
       return;
     }
   }
@@ -3803,7 +3959,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   {
     static int s_init = 0;
     static const char* s_want = nullptr;
-    if (!s_init) { s_init = 1; s_want = std::getenv("SB_SKIP_VERTS"); }
+    if (!s_init) {
+      s_init = 1;
+      s_want = std::getenv("SB_SKIP_VERTS");
+    }
     if (s_want != nullptr && s_want[0] != '\0') {
       char buf[16];
       std::snprintf(buf, sizeof(buf), "%u", vtxCount);
@@ -3811,10 +3970,11 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       size_t start = 0;
       while (start <= want.size()) {
         const size_t comma = want.find(',', start);
-        const auto tok = want.substr(start, comma == std::string_view::npos
-                                                ? std::string_view::npos : comma - start);
-        if (!tok.empty() && tok == buf) return;
-        if (comma == std::string_view::npos) break;
+        const auto tok = want.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
+        if (!tok.empty() && tok == buf)
+          return;
+        if (comma == std::string_view::npos)
+          break;
         start = comma + 1;
       }
     }
@@ -3826,7 +3986,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   {
     static int s_init = 0;
     static const char* s_want = nullptr;
-    if (!s_init) { s_init = 1; s_want = std::getenv("SB_SKIP_TEX"); }
+    if (!s_init) {
+      s_init = 1;
+      s_want = std::getenv("SB_SKIP_TEX");
+    }
     if (s_want != nullptr && s_want[0] != '\0') {
       const auto& t0 = g_gxState.textures[0].texObj;
       char buf[24];
@@ -3835,10 +3998,11 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       size_t start = 0;
       while (start <= want.size()) {
         const size_t comma = want.find(',', start);
-        const auto tok = want.substr(start, comma == std::string_view::npos
-                                                ? std::string_view::npos : comma - start);
-        if (!tok.empty() && tok == buf) return;
-        if (comma == std::string_view::npos) break;
+        const auto tok = want.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
+        if (!tok.empty() && tok == buf)
+          return;
+        if (comma == std::string_view::npos)
+          break;
         start = comma + 1;
       }
     }
@@ -3856,7 +4020,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   {
     static long s_onlyLo = -2, s_onlyHi = -2;
     if (s_onlyLo == -2) {
-      s_onlyLo = -1; s_onlyHi = -1;
+      s_onlyLo = -1;
+      s_onlyHi = -1;
       if (const char* w = std::getenv("SB_ONLY_DRAW"); w != nullptr && w[0] != '\0') {
         char* endp = nullptr;
         s_onlyLo = std::strtol(w, &endp, 0);
@@ -3879,18 +4044,22 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         static int s_ln = 0;
         if (s_ln++ < 16) {
           std::fprintf(stderr,
-              "[light-dbg] verts=%u diffFn=%d attnFn=%d matSrc=%d ambSrc=%d mask=%02x amb=(%.2f,%.2f,%.2f) mat=(%.2f,%.2f,%.2f)\n",
-              vtxCount, static_cast<int>(lc.diffFn), static_cast<int>(lc.attnFn), static_cast<int>(lc.matSrc),
-              static_cast<int>(lc.ambSrc), static_cast<unsigned>(ls.lightMask.to_ulong() & 0xff),
-              ls.ambColor.x(), ls.ambColor.y(), ls.ambColor.z(), ls.matColor.x(), ls.matColor.y(), ls.matColor.z());
+                       "[light-dbg] verts=%u diffFn=%d attnFn=%d matSrc=%d ambSrc=%d mask=%02x amb=(%.2f,%.2f,%.2f) "
+                       "mat=(%.2f,%.2f,%.2f)\n",
+                       vtxCount, static_cast<int>(lc.diffFn), static_cast<int>(lc.attnFn), static_cast<int>(lc.matSrc),
+                       static_cast<int>(lc.ambSrc), static_cast<unsigned>(ls.lightMask.to_ulong() & 0xff),
+                       ls.ambColor.x(), ls.ambColor.y(), ls.ambColor.z(), ls.matColor.x(), ls.matColor.y(),
+                       ls.matColor.z());
           for (u32 i = 0; i < GX::MaxLights; ++i) {
-            if (!ls.lightMask.test(i)) continue;
+            if (!ls.lightMask.test(i))
+              continue;
             const auto& L = g_gxState.lights[i];
             std::fprintf(stderr,
-                "   L%u color=(%.3f,%.3f,%.3f) pos=(%.0f,%.0f,%.0f) dir=(%.2f,%.2f,%.2f) cosAtt=(%.3f,%.3f,%.3f) distAtt=(%.4f,%.4f,%.4f)\n",
-                i, L.color.x(), L.color.y(), L.color.z(), L.pos.x(), L.pos.y(), L.pos.z(),
-                L.dir.x(), L.dir.y(), L.dir.z(), L.cosAtt.x(), L.cosAtt.y(), L.cosAtt.z(),
-                L.distAtt.x(), L.distAtt.y(), L.distAtt.z());
+                         "   L%u color=(%.3f,%.3f,%.3f) pos=(%.0f,%.0f,%.0f) dir=(%.2f,%.2f,%.2f) "
+                         "cosAtt=(%.3f,%.3f,%.3f) distAtt=(%.4f,%.4f,%.4f)\n",
+                         i, L.color.x(), L.color.y(), L.color.z(), L.pos.x(), L.pos.y(), L.pos.z(), L.dir.x(),
+                         L.dir.y(), L.dir.z(), L.cosAtt.x(), L.cosAtt.y(), L.cosAtt.z(), L.distAtt.x(), L.distAtt.y(),
+                         L.distAtt.z());
           }
         }
       }
@@ -3938,16 +4107,22 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     // 1000/3000). Counting distinct retrace values gives a robust ordinal frame
     // index regardless of step size or rate.
     static long s_targetFrame = -2;
-    static long s_frameIdx = -1;       // # of retrace changes seen so far
+    static long s_frameIdx = -1; // # of retrace changes seen so far
     static long s_prevRetrace = -1;
-    if (s_targetFrame == -2) s_targetFrame = std::atol(fe);
+    if (s_targetFrame == -2)
+      s_targetFrame = std::atol(fe);
     const long rc = static_cast<long>(sb_gx_vi_retrace_count());
-    if (rc != s_prevRetrace) { s_prevRetrace = rc; ++s_frameIdx; }
+    if (rc != s_prevRetrace) {
+      s_prevRetrace = rc;
+      ++s_frameIdx;
+    }
     s_ddFrameActive = (s_frameIdx == s_targetFrame);
     if (s_frameIdx == s_targetFrame) {
       static long s_frameDumped = 0;
       const auto& vp = g_gxState.logicalViewport;
-      std::fprintf(stderr, "[draw-dump-frame] #%ld frame=%ld retrace=%ld prim=%u verts=%u proj=%c vp=%.0fx%.0f bm=%d sf=%d df=%d cU=%d aU=%d mark='%s'\n",
+      std::fprintf(stderr,
+                   "[draw-dump-frame] #%ld frame=%ld retrace=%ld prim=%u verts=%u proj=%c vp=%.0fx%.0f bm=%d sf=%d "
+                   "df=%d cU=%d aU=%d mark='%s'\n",
                    s_frameDumped++, s_targetFrame, rc, static_cast<unsigned>(prim), vtxCount,
                    g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', vp.width, vp.height,
                    static_cast<int>(g_gxState.blendMode), static_cast<int>(g_gxState.blendFacSrc),
@@ -3963,7 +4138,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     static int s_dumped = 0;
     static int s_start = -1;
     static long s_afterRetrace = -1;
-    static int s_windowDumped = 0; // draws emitted since the retrace window opened
+    static int s_windowDumped = 0;   // draws emitted since the retrace window opened
     static bool s_fullFrame = false; // SB_DRAW_DUMP_FRAME set: no 200-draw cap
     if (s_start < 0) {
       s_start = std::atoi(e);
@@ -3989,12 +4164,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     // s_fullFrame (SB_DRAW_DUMP_FRAME set): dump the full ch0 line for exactly the
     // target frame's draws (gated by s_ddFrameActive) — uncapped, one frame. Else the
     // legacy 200-cap windowed / draw-index behavior.
-    const bool inRange = s_dumpAll ? true
-                       : s_fullFrame ? s_ddFrameActive
-                       : windowed ? (afterWindowOk && s_windowDumped < 200)
-                                   : (s_dumped >= s_start && s_dumped < s_start + 200);
+    const bool inRange = s_dumpAll     ? true
+                         : s_fullFrame ? s_ddFrameActive
+                         : windowed    ? (afterWindowOk && s_windowDumped < 200)
+                                       : (s_dumped >= s_start && s_dumped < s_start + 200);
     if (inRange) {
-      if (windowed) ++s_windowDumped;
+      if (windowed)
+        ++s_windowDumped;
       const auto& obj = g_gxState.textures[0].texObj;
       const auto* pn = reinterpret_cast<const float*>(&g_gxState.pnMtx[g_gxState.currentPnMtx].pos);
       const auto& vp = g_gxState.logicalViewport;
@@ -4027,22 +4203,18 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       {
         int o = 0;
         tevbuf[0] = '\0';
-        const unsigned nst = g_gxState.numTevStages < MaxTevStages ? g_gxState.numTevStages
-                                                                   : MaxTevStages;
+        const unsigned nst = g_gxState.numTevStages < MaxTevStages ? g_gxState.numTevStages : MaxTevStages;
         for (unsigned st = 0; st < nst && o < static_cast<int>(sizeof(tevbuf)) - 72; ++st) {
           const auto& t = g_gxState.tevStages[st];
           o += std::snprintf(tevbuf + o, sizeof(tevbuf) - o,
                              "%s%u:c(%d,%d,%d,%d)o=%d,%d,%d,r%d a(%d,%d,%d,%d)o=%d,%d,%d,r%d "
                              "tm=%d tc=%d ch=%d k=%d/%d",
-                             o ? " | " : "", st,
-                             (int)t.colorPass.a, (int)t.colorPass.b, (int)t.colorPass.c,
-                             (int)t.colorPass.d, (int)t.colorOp.op, (int)t.colorOp.bias,
-                             (int)t.colorOp.scale, (int)t.colorOp.outReg,
-                             (int)t.alphaPass.a, (int)t.alphaPass.b, (int)t.alphaPass.c,
-                             (int)t.alphaPass.d, (int)t.alphaOp.op, (int)t.alphaOp.bias,
-                             (int)t.alphaOp.scale, (int)t.alphaOp.outReg,
-                             (int)t.texMapId, (int)t.texCoordId, (int)t.channelId,
-                             (int)t.kcSel, (int)t.kaSel);
+                             o ? " | " : "", st, (int)t.colorPass.a, (int)t.colorPass.b, (int)t.colorPass.c,
+                             (int)t.colorPass.d, (int)t.colorOp.op, (int)t.colorOp.bias, (int)t.colorOp.scale,
+                             (int)t.colorOp.outReg, (int)t.alphaPass.a, (int)t.alphaPass.b, (int)t.alphaPass.c,
+                             (int)t.alphaPass.d, (int)t.alphaOp.op, (int)t.alphaOp.bias, (int)t.alphaOp.scale,
+                             (int)t.alphaOp.outReg, (int)t.texMapId, (int)t.texCoordId, (int)t.channelId, (int)t.kcSel,
+                             (int)t.kaSel);
         }
       }
       // Texgen configuration. A stage naming a GENERATED texcoord (tc=N) says nothing about
@@ -4053,13 +4225,11 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       {
         int o = 0;
         tcgbuf[0] = '\0';
-        const unsigned ntc = g_gxState.numTexGens < MaxTexCoord ? g_gxState.numTexGens
-                                                                : MaxTexCoord;
+        const unsigned ntc = g_gxState.numTexGens < MaxTexCoord ? g_gxState.numTexGens : MaxTexCoord;
         for (unsigned t = 0; t < ntc && o < static_cast<int>(sizeof(tcgbuf)) - 40; ++t) {
           const auto& c = g_gxState.tcgs[t];
-          o += std::snprintf(tcgbuf + o, sizeof(tcgbuf) - o, "%s%u:ty=%d src=%d mtx=%d pm=%d n=%d",
-                             o ? "," : "", t, (int)c.type, (int)c.src, (int)c.mtx,
-                             (int)c.postMtx, c.normalize ? 1 : 0);
+          o += std::snprintf(tcgbuf + o, sizeof(tcgbuf) - o, "%s%u:ty=%d src=%d mtx=%d pm=%d n=%d", o ? "," : "", t,
+                             (int)c.type, (int)c.src, (int)c.mtx, (int)c.postMtx, c.normalize ? 1 : 0);
         }
       }
       char texbuf[256];
@@ -4068,12 +4238,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         texbuf[0] = '\0';
         for (int m = 0; m < GX_MAX_TEXMAP && o < static_cast<int>(sizeof(texbuf)) - 16; ++m) {
           const auto& to = g_gxState.textures[m];
-          if (!to.ref) continue;   // not bound on this map
+          if (!to.ref)
+            continue; // not bound on this map
           // Include the texel pointer: two textures of identical dimensions can be entirely
           // different resources (a raw-RAM texture vs an EFB-copy result), and dimensions
           // alone cannot tell them apart.
-          o += std::snprintf(texbuf + o, sizeof(texbuf) - o, "%s%d:%ux%u@%p", o ? "," : "", m,
-                             to.texObj.width(), to.texObj.height(), to.texObj.data);
+          o += std::snprintf(texbuf + o, sizeof(texbuf) - o, "%s%d:%ux%u@%p", o ? "," : "", m, to.texObj.width(),
+                             to.texObj.height(), to.texObj.data);
         }
       }
       // clr0Desc/clr1Desc: whether this draw's VCD actually supplies CLR0/CLR1
@@ -4090,51 +4261,46 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         tcvbuf[0] = '\0';
         for (int t = 0; t < 4 && o < static_cast<int>(sizeof(tcvbuf)) - 40; ++t) {
           const auto d = g_gxState.vtxDesc[GX_VA_TEX0 + t];
-          if (d == GX_NONE) continue;
+          if (d == GX_NONE)
+            continue;
           const auto& a = g_gxState.vtxFmts[fmt].attrs[GX_VA_TEX0 + t];
-          o += std::snprintf(tcvbuf + o, sizeof(tcvbuf) - o, "%st%d:d=%d cnt=%d ty=%d fr=%u",
-                             o ? "," : "", t, (int)d, (int)a.cnt, (int)a.type, a.frac);
+          o += std::snprintf(tcvbuf + o, sizeof(tcvbuf) - o, "%st%d:d=%d cnt=%d ty=%d fr=%u", o ? "," : "", t, (int)d,
+                             (int)a.cnt, (int)a.type, a.frac);
         }
       }
-      std::fprintf(stderr,
-                   "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u texs=[%s] tevp=[%s] tcg=[%s] tcv=[%s] zcmp=%d zupd=%d trans=(%.1f,%.1f,%.1f) "
-                   "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
-                   "tev=%u ch0[light=%d matSrc=%d ambSrc=%d attnFn=%d diffFn=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
-                   "a0[light=%d matSrc=%d ambSrc=%d mat=%.2f amb=%.2f mask=%02x] "
-                   "prj=[%.4f %.4f %.4f %.4f cx=%.4f cy=%.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] clr0=%d clr1=%d mtxIdx=%u "
-                   "cull=%d zfunc=%d acmp=[c0=%d r0=%u op=%d c1=%d r1=%u] "
-                   "posmtx=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] mark='%s'\n",
-                   s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(), texbuf, tevbuf, tcgbuf, tcvbuf,
-                   static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate),
-                   pn[3], pn[7], pn[11], g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P',
-                   static_cast<unsigned>(g_gxState.blendMode), vp.left, vp.top, vp.width, vp.height,
-                   sc.x, sc.y, sc.width, sc.height, g_gxState.numTevStages,
-                   static_cast<int>(cc.lightingEnabled), static_cast<int>(cc.matSrc), static_cast<int>(cc.ambSrc),
-                   static_cast<int>(cc.attnFn), static_cast<int>(cc.diffFn),
-                   cs.matColor.x(),
-                   cs.matColor.y(), cs.matColor.z(), cs.matColor.w(), cs.ambColor.x(), cs.ambColor.y(),
-                   cs.ambColor.z(), static_cast<unsigned>(cs.lightMask.to_ulong() & 0xff),
-                   static_cast<int>(cca.lightingEnabled), static_cast<int>(cca.matSrc), static_cast<int>(cca.ambSrc),
-                   csa.matColor.w(), csa.ambColor.w(), static_cast<unsigned>(csa.lightMask.to_ulong() & 0xff),
-                   reinterpret_cast<const float*>(&g_gxState.proj)[0],
-                   reinterpret_cast<const float*>(&g_gxState.proj)[5],
-                   reinterpret_cast<const float*>(&g_gxState.proj)[10],
-                   reinterpret_cast<const float*>(&g_gxState.proj)[11],
-                   reinterpret_cast<const float*>(&g_gxState.proj)[2],
-                   reinterpret_cast<const float*>(&g_gxState.proj)[6],
-                   g_gxState.colorUpdate ? 1 : 0, g_gxState.alphaUpdate ? 1 : 0,
-                   static_cast<int>(g_gxState.blendMode), static_cast<int>(g_gxState.blendFacSrc),
-                   static_cast<int>(g_gxState.blendFacDst), static_cast<int>(posDesc),
-                   static_cast<int>(posFmt.cnt), static_cast<int>(posFmt.type), posFmt.frac,
-                   static_cast<int>(clr0Desc), static_cast<int>(clr1Desc),
-                   g_gxState.currentPnMtx,
-                   static_cast<int>(g_gxState.cullMode),
-                   static_cast<int>(g_gxState.depthFunc),
-                   static_cast<int>(g_gxState.alphaCompare.comp0), g_gxState.alphaCompare.ref0,
-                   static_cast<int>(g_gxState.alphaCompare.op),
-                   static_cast<int>(g_gxState.alphaCompare.comp1), g_gxState.alphaCompare.ref1,
-                   pn[0], pn[1], pn[2], pn[3], pn[4], pn[5], pn[6], pn[7],
-                   pn[8], pn[9], pn[10], pn[11], g_sbLastMarker.c_str());
+      std::fprintf(
+          stderr,
+          "[draw-dump] #%d prim=%u verts=%u tex0=%ux%u texs=[%s] tevp=[%s] tcg=[%s] tcv=[%s] zcmp=%d zupd=%d "
+          "trans=(%.1f,%.1f,%.1f) "
+          "proj=%c blend=%u vp=(%.0f,%.0f %.0fx%.0f) sc=(%d,%d %ux%u) "
+          "tev=%u ch0[light=%d matSrc=%d ambSrc=%d attnFn=%d diffFn=%d mat=(%.2f,%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) "
+          "mask=%02x] "
+          "a0[light=%d matSrc=%d ambSrc=%d mat=%.2f amb=%.2f mask=%02x] "
+          "prj=[%.4f %.4f %.4f %.4f cx=%.4f cy=%.4f] cU=%d aU=%d bm=%d bf=%d/%d pos[desc=%d cnt=%d type=%d frac=%u] "
+          "clr0=%d clr1=%d mtxIdx=%u "
+          "cull=%d zfunc=%d acmp=[c0=%d r0=%u op=%d c1=%d r1=%u] "
+          "posmtx=[%.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f] mark='%s'\n",
+          s_dumped, static_cast<unsigned>(prim), vtxCount, obj.width(), obj.height(), texbuf, tevbuf, tcgbuf, tcvbuf,
+          static_cast<int>(g_gxState.depthCompare), static_cast<int>(g_gxState.depthUpdate), pn[3], pn[7], pn[11],
+          g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', static_cast<unsigned>(g_gxState.blendMode), vp.left,
+          vp.top, vp.width, vp.height, sc.x, sc.y, sc.width, sc.height, g_gxState.numTevStages,
+          static_cast<int>(cc.lightingEnabled), static_cast<int>(cc.matSrc), static_cast<int>(cc.ambSrc),
+          static_cast<int>(cc.attnFn), static_cast<int>(cc.diffFn), cs.matColor.x(), cs.matColor.y(), cs.matColor.z(),
+          cs.matColor.w(), cs.ambColor.x(), cs.ambColor.y(), cs.ambColor.z(),
+          static_cast<unsigned>(cs.lightMask.to_ulong() & 0xff), static_cast<int>(cca.lightingEnabled),
+          static_cast<int>(cca.matSrc), static_cast<int>(cca.ambSrc), csa.matColor.w(), csa.ambColor.w(),
+          static_cast<unsigned>(csa.lightMask.to_ulong() & 0xff), reinterpret_cast<const float*>(&g_gxState.proj)[0],
+          reinterpret_cast<const float*>(&g_gxState.proj)[5], reinterpret_cast<const float*>(&g_gxState.proj)[10],
+          reinterpret_cast<const float*>(&g_gxState.proj)[11], reinterpret_cast<const float*>(&g_gxState.proj)[2],
+          reinterpret_cast<const float*>(&g_gxState.proj)[6], g_gxState.colorUpdate ? 1 : 0,
+          g_gxState.alphaUpdate ? 1 : 0, static_cast<int>(g_gxState.blendMode), static_cast<int>(g_gxState.blendFacSrc),
+          static_cast<int>(g_gxState.blendFacDst), static_cast<int>(posDesc), static_cast<int>(posFmt.cnt),
+          static_cast<int>(posFmt.type), posFmt.frac, static_cast<int>(clr0Desc), static_cast<int>(clr1Desc),
+          g_gxState.currentPnMtx, static_cast<int>(g_gxState.cullMode), static_cast<int>(g_gxState.depthFunc),
+          static_cast<int>(g_gxState.alphaCompare.comp0), g_gxState.alphaCompare.ref0,
+          static_cast<int>(g_gxState.alphaCompare.op), static_cast<int>(g_gxState.alphaCompare.comp1),
+          g_gxState.alphaCompare.ref1, pn[0], pn[1], pn[2], pn[3], pn[4], pn[5], pn[6], pn[7], pn[8], pn[9], pn[10],
+          pn[11], g_sbLastMarker.c_str());
       // Active-light colors/positions for this draw (the fields the [draw-dump]
       // line above can't fit) — needed to compare a lit draw's SHADING between
       // native boot and .dff replay (e.g. the file-select Mario overalls washout,
@@ -4150,30 +4316,34 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         const auto& c1a = g_gxState.colorChannelConfig[GX_ALPHA1];
         const auto& s1a = g_gxState.colorChannelState[GX_ALPHA1];
         std::fprintf(stderr,
-                     "   [dd-ch1] #%d ch1[light=%d matSrc=%d ambSrc=%d attnFn=%d diffFn=%d mat=(%.2f,%.2f,%.2f) amb=(%.2f,%.2f,%.2f) mask=%02x] "
+                     "   [dd-ch1] #%d ch1[light=%d matSrc=%d ambSrc=%d attnFn=%d diffFn=%d mat=(%.2f,%.2f,%.2f) "
+                     "amb=(%.2f,%.2f,%.2f) mask=%02x] "
                      "a1[light=%d matSrc=%d ambSrc=%d mask=%02x]\n",
                      s_dumped, static_cast<int>(c1.lightingEnabled), static_cast<int>(c1.matSrc),
                      static_cast<int>(c1.ambSrc), static_cast<int>(c1.attnFn), static_cast<int>(c1.diffFn),
                      s1.matColor.x(), s1.matColor.y(), s1.matColor.z(), s1.ambColor.x(), s1.ambColor.y(),
                      s1.ambColor.z(), static_cast<unsigned>(s1.lightMask.to_ulong() & 0xff),
-                     static_cast<int>(c1a.lightingEnabled), static_cast<int>(c1a.matSrc),
-                     static_cast<int>(c1a.ambSrc), static_cast<unsigned>(s1a.lightMask.to_ulong() & 0xff));
+                     static_cast<int>(c1a.lightingEnabled), static_cast<int>(c1a.matSrc), static_cast<int>(c1a.ambSrc),
+                     static_cast<unsigned>(s1a.lightMask.to_ulong() & 0xff));
       }
       // Dump lights referenced by EITHER color channel (ch0 mask=cs, ch1 mask):
       // Mario's ch1 uses L2 (mask=04) which the ch0-only loop below never showed.
       const auto ch1Mask = g_gxState.colorChannelState[GX_COLOR1].lightMask;
       if (cs.lightMask.any() || ch1Mask.any()) {
         for (u32 li = 0; li < GX::MaxLights; ++li) {
-          if (!cs.lightMask.test(li) && !ch1Mask.test(li)) continue;
+          if (!cs.lightMask.test(li) && !ch1Mask.test(li))
+            continue;
           const auto& L = g_gxState.lights[li];
-          std::fprintf(stderr, "   [dd-light] #%d L%u col=(%.3f,%.3f,%.3f) pos=(%.0f,%.0f,%.0f) cosAtt=(%.3f,%.3f,%.3f) distAtt=(%.4f,%.4f,%.4f)\n",
+          std::fprintf(stderr,
+                       "   [dd-light] #%d L%u col=(%.3f,%.3f,%.3f) pos=(%.0f,%.0f,%.0f) cosAtt=(%.3f,%.3f,%.3f) "
+                       "distAtt=(%.4f,%.4f,%.4f)\n",
                        s_dumped, li, L.color.x(), L.color.y(), L.color.z(), L.pos.x(), L.pos.y(), L.pos.z(),
                        L.cosAtt.x(), L.cosAtt.y(), L.cosAtt.z(), L.distAtt.x(), L.distAtt.y(), L.distAtt.z());
         }
         for (u32 k = 0; k < 4; ++k) {
           const auto& kc = g_gxState.kcolors[k];
-          std::fprintf(stderr, "   [dd-konst] #%d K%u=(%.3f,%.3f,%.3f,%.3f)\n",
-                       s_dumped, k, kc.x(), kc.y(), kc.z(), kc.w());
+          std::fprintf(stderr, "   [dd-konst] #%d K%u=(%.3f,%.3f,%.3f,%.3f)\n", s_dumped, k, kc.x(), kc.y(), kc.z(),
+                       kc.w());
         }
       }
       // SB_LOG=pn: full pos/nrm matrix PALETTE (all 10 PnMtx slots) for this
@@ -4188,10 +4358,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         for (u32 mi = 0; mi < MaxPnMtx; ++mi) {
           const auto* p = reinterpret_cast<const float*>(&g_gxState.pnMtx[mi].pos);
           const auto* n = reinterpret_cast<const float*>(&g_gxState.pnMtx[mi].nrm);
-          sb_logf("pn", "pos #%d %u [%.4f %.4f %.4f %.2f | %.4f %.4f %.4f %.2f | %.4f %.4f %.4f %.2f]",
-                  s_dumped, mi, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]);
-          sb_logf("pn", "nrm #%d %u [%.4f %.4f %.4f | %.4f %.4f %.4f | %.4f %.4f %.4f]",
-                  s_dumped, mi, n[0], n[1], n[2], n[4], n[5], n[6], n[8], n[9], n[10]);
+          sb_logf("pn", "pos #%d %u [%.4f %.4f %.4f %.2f | %.4f %.4f %.4f %.2f | %.4f %.4f %.4f %.2f]", s_dumped, mi,
+                  p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]);
+          sb_logf("pn", "nrm #%d %u [%.4f %.4f %.4f | %.4f %.4f %.4f | %.4f %.4f %.4f]", s_dumped, mi, n[0], n[1], n[2],
+                  n[4], n[5], n[6], n[8], n[9], n[10]);
         }
       }
       // SB_LOG=vtxarr: bound vertex-array identity per dumped draw — attr,
@@ -4202,9 +4372,11 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       // black patches: suspect TEX1 marking-overlay UVs).
       if (sb_gx_log_on("vtxarr")) {
         for (u32 at = GX_VA_POS; at <= GX_VA_TEX7; ++at) {
-          if (g_gxState.vtxDesc[at] != GX_INDEX8 && g_gxState.vtxDesc[at] != GX_INDEX16) continue;
+          if (g_gxState.vtxDesc[at] != GX_INDEX8 && g_gxState.vtxDesc[at] != GX_INDEX16)
+            continue;
           const auto& arr = g_gxState.arrays[at];
-          if (arr.data == nullptr) continue;
+          if (arr.data == nullptr)
+            continue;
           const u8* d = (const u8*)arr.data;
           // Full-array FNV hash, endianness-normalized to BE so a native
           // (host-LE) array and a replay (BE) array with the same VALUES hash
@@ -4216,14 +4388,19 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
             const u32 esz = (arr.stride >= 4 && (arr.stride % 4) == 0) ? 4u : 2u;
             for (u32 off = 0; off + esz <= nbytes; off += esz) {
               u8 b[4];
-              for (u32 k = 0; k < esz; ++k) b[k] = d[off + (arr.le ? esz - 1 - k : k)];
-              for (u32 k = 0; k < esz; ++k) { hash ^= b[k]; hash *= 1099511628211ull; }
+              for (u32 k = 0; k < esz; ++k)
+                b[k] = d[off + (arr.le ? esz - 1 - k : k)];
+              for (u32 k = 0; k < esz; ++k) {
+                hash ^= b[k];
+                hash *= 1099511628211ull;
+              }
             }
           }
-          sb_logf("vtxarr", "#%d attr=%u stride=%u le=%d n=%u hash=%016llx first16=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
-                  s_dumped, at, arr.stride, arr.le ? 1 : 0, nbytes, (unsigned long long)hash,
-                  d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
-                  d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]);
+          sb_logf("vtxarr",
+                  "#%d attr=%u stride=%u le=%d n=%u hash=%016llx "
+                  "first16=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                  s_dumped, at, arr.stride, arr.le ? 1 : 0, nbytes, (unsigned long long)hash, d[0], d[1], d[2], d[3],
+                  d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13], d[14], d[15]);
         }
       }
       // SB_LOG=texgen: per-coord texgen config + the referenced texmatrix rows
@@ -4233,16 +4410,16 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       if (sb_gx_log_on("texgen")) {
         for (u32 tc = 0; tc < aurora::gx::MaxTexCoord; ++tc) {
           const auto& t = g_gxState.tcgs[tc];
-          if (t.src == GX_MAX_TEXGENSRC) continue;
-          sb_logf("texgen", "#%d coord=%u type=%d src=%d mtx=%d post=%d norm=%d",
-                  s_dumped, tc, (int)t.type, (int)t.src, (int)t.mtx, (int)t.postMtx,
-                  t.normalize ? 1 : 0);
+          if (t.src == GX_MAX_TEXGENSRC)
+            continue;
+          sb_logf("texgen", "#%d coord=%u type=%d src=%d mtx=%d post=%d norm=%d", s_dumped, tc, (int)t.type, (int)t.src,
+                  (int)t.mtx, (int)t.postMtx, t.normalize ? 1 : 0);
           if (t.mtx != GX_IDENTITY) {
             const u32 mi = ((u32)t.mtx - GX_TEXMTX0) / 3;
             if (mi < aurora::gx::MaxTexMtx) {
               const float* m = reinterpret_cast<const float*>(&g_gxState.texMtxs[mi]);
-              sb_logf("texgen", "#%d   texmtx%u=[%.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f]",
-                      s_dumped, mi, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]);
+              sb_logf("texgen", "#%d   texmtx%u=[%.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f]", s_dumped, mi, m[0], m[1],
+                      m[2], m[3], m[4], m[5], m[6], m[7]);
             }
           }
         }
@@ -4253,23 +4430,20 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       if (std::getenv("SB_TEV_DUMP") != nullptr) {
         for (unsigned st = 0; st < g_gxState.numTevStages; ++st) {
           const auto& s = g_gxState.tevStages[st];
-          std::fprintf(stderr,
-                       "  [tev] #%d stage=%u texMap=%d texCoord=%d chan=%d "
-                       "colorPass(a=%d b=%d c=%d d=%d op=%d bias=%d scale=%d clamp_outReg=%d) "
-                       "alphaPass(a=%d b=%d c=%d d=%d op=%d bias=%d scale=%d outReg=%d) "
-                       "kcSel=%d kaSel=%d swapRas=%d swapTex=%d\n",
-                       s_dumped - 1, st, static_cast<int>(s.texMapId), static_cast<int>(s.texCoordId),
-                       static_cast<int>(s.channelId), static_cast<int>(s.colorPass.a),
-                       static_cast<int>(s.colorPass.b), static_cast<int>(s.colorPass.c),
-                       static_cast<int>(s.colorPass.d), static_cast<int>(s.colorOp.op),
-                       static_cast<int>(s.colorOp.bias), static_cast<int>(s.colorOp.scale),
-                       static_cast<int>(s.colorOp.outReg), static_cast<int>(s.alphaPass.a),
-                       static_cast<int>(s.alphaPass.b), static_cast<int>(s.alphaPass.c),
-                       static_cast<int>(s.alphaPass.d), static_cast<int>(s.alphaOp.op),
-                       static_cast<int>(s.alphaOp.bias), static_cast<int>(s.alphaOp.scale),
-                       static_cast<int>(s.alphaOp.outReg), static_cast<int>(s.kcSel),
-                       static_cast<int>(s.kaSel), static_cast<int>(s.tevSwapRas),
-                       static_cast<int>(s.tevSwapTex));
+          std::fprintf(
+              stderr,
+              "  [tev] #%d stage=%u texMap=%d texCoord=%d chan=%d "
+              "colorPass(a=%d b=%d c=%d d=%d op=%d bias=%d scale=%d clamp_outReg=%d) "
+              "alphaPass(a=%d b=%d c=%d d=%d op=%d bias=%d scale=%d outReg=%d) "
+              "kcSel=%d kaSel=%d swapRas=%d swapTex=%d\n",
+              s_dumped - 1, st, static_cast<int>(s.texMapId), static_cast<int>(s.texCoordId),
+              static_cast<int>(s.channelId), static_cast<int>(s.colorPass.a), static_cast<int>(s.colorPass.b),
+              static_cast<int>(s.colorPass.c), static_cast<int>(s.colorPass.d), static_cast<int>(s.colorOp.op),
+              static_cast<int>(s.colorOp.bias), static_cast<int>(s.colorOp.scale), static_cast<int>(s.colorOp.outReg),
+              static_cast<int>(s.alphaPass.a), static_cast<int>(s.alphaPass.b), static_cast<int>(s.alphaPass.c),
+              static_cast<int>(s.alphaPass.d), static_cast<int>(s.alphaOp.op), static_cast<int>(s.alphaOp.bias),
+              static_cast<int>(s.alphaOp.scale), static_cast<int>(s.alphaOp.outReg), static_cast<int>(s.kcSel),
+              static_cast<int>(s.kaSel), static_cast<int>(s.tevSwapRas), static_cast<int>(s.tevSwapTex));
         }
         // Report ALL bound texmaps (0-7), not just texMap0: a multi-texmap
         // material (Mario overalls = 4 texmaps) can wash if any texmap binds a
@@ -4277,9 +4451,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         for (unsigned tm = 0; tm < aurora::gx::MaxTextures; ++tm) {
           const auto& tu = g_gxState.textures[tm];
           const auto& tobj = tu.texObj;
-          std::fprintf(stderr, "  [tex] texMap=%u hasTex=%d fmt=%d %ux%u minFilt=%d magFilt=%d wrapS=%d wrapT=%d\n",
-                       tm, tu.ref ? 1 : 0, static_cast<int>(tobj.format()),
-                       tobj.width(), tobj.height(),
+          std::fprintf(stderr, "  [tex] texMap=%u hasTex=%d fmt=%d %ux%u minFilt=%d magFilt=%d wrapS=%d wrapT=%d\n", tm,
+                       tu.ref ? 1 : 0, static_cast<int>(tobj.format()), tobj.width(), tobj.height(),
                        static_cast<int>(tobj.min_filter()), static_cast<int>(tobj.mag_filter()),
                        static_cast<int>(tobj.wrap_s()), static_cast<int>(tobj.wrap_t()));
         }
@@ -4291,8 +4464,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         // are meaningless without them).
         for (unsigned sw = 0; sw < aurora::gx::MaxTevSwap; ++sw) {
           const auto& t = g_gxState.tevSwapTable[sw];
-          std::fprintf(stderr, "  [tevswap] %u = r%d g%d b%d a%d\n", sw, (int)t.red, (int)t.green,
-                       (int)t.blue, (int)t.alpha);
+          std::fprintf(stderr, "  [tevswap] %u = r%d g%d b%d a%d\n", sw, (int)t.red, (int)t.green, (int)t.blue,
+                       (int)t.alpha);
         }
       }
     }
@@ -4309,26 +4482,26 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     static long s_nSky = 0, s_nOther = 0;
     bool isSky = g_sbLastMarker.find("Sky") != std::string::npos;
     if (isSky ? s_nSky < 4000 : s_nOther < 5) {
-    for (unsigned st = 0; st < g_gxState.numTevStages; ++st) {
-      const auto& s = g_gxState.tevStages[st];
-      if (s.texMapId < 0 || static_cast<unsigned>(s.texMapId) >= aurora::gx::MaxTextures)
-        continue;
-      const auto& tobj = g_gxState.textures[s.texMapId].texObj;
-      if (tobj.width() == 8 && tobj.height() == 8) {
-        long& s_n = isSky ? s_nSky : s_nOther;
-        ++s_n;
-        unsigned tc = static_cast<unsigned>(s.texCoordId);
-        const auto& tcg = (tc < aurora::gx::MaxTexCoord) ? g_gxState.tcgs[tc] : g_gxState.tcgs[0];
-        std::fprintf(stderr,
-                     "[cloud-tc] #%ld mark='%s' stage=%u texMap=%d texCoord=%u fmt=%d wrapS=%d wrapT=%d "
-                     "numTexGens=%u tcg[src=%d mtx=%d type=%d post=%d norm=%d]\n",
-                     s_n, g_sbLastMarker.c_str(), st, static_cast<int>(s.texMapId), tc,
-                     static_cast<int>(tobj.format()), static_cast<int>(tobj.wrap_s()),
-                     static_cast<int>(tobj.wrap_t()), g_gxState.numTexGens,
-                     static_cast<int>(tcg.src), static_cast<int>(tcg.mtx), static_cast<int>(tcg.type),
-                     static_cast<int>(tcg.postMtx), static_cast<int>(tcg.normalize));
+      for (unsigned st = 0; st < g_gxState.numTevStages; ++st) {
+        const auto& s = g_gxState.tevStages[st];
+        if (s.texMapId < 0 || static_cast<unsigned>(s.texMapId) >= aurora::gx::MaxTextures)
+          continue;
+        const auto& tobj = g_gxState.textures[s.texMapId].texObj;
+        if (tobj.width() == 8 && tobj.height() == 8) {
+          long& s_n = isSky ? s_nSky : s_nOther;
+          ++s_n;
+          unsigned tc = static_cast<unsigned>(s.texCoordId);
+          const auto& tcg = (tc < aurora::gx::MaxTexCoord) ? g_gxState.tcgs[tc] : g_gxState.tcgs[0];
+          std::fprintf(stderr,
+                       "[cloud-tc] #%ld mark='%s' stage=%u texMap=%d texCoord=%u fmt=%d wrapS=%d wrapT=%d "
+                       "numTexGens=%u tcg[src=%d mtx=%d type=%d post=%d norm=%d]\n",
+                       s_n, g_sbLastMarker.c_str(), st, static_cast<int>(s.texMapId), tc,
+                       static_cast<int>(tobj.format()), static_cast<int>(tobj.wrap_s()),
+                       static_cast<int>(tobj.wrap_t()), g_gxState.numTexGens, static_cast<int>(tcg.src),
+                       static_cast<int>(tcg.mtx), static_cast<int>(tcg.type), static_cast<int>(tcg.postMtx),
+                       static_cast<int>(tcg.normalize));
+        }
       }
-    }
     }
   }
   // TEMP crosshatch-hunt: dump EVERY texture bound on EVERY draw marked
@@ -4339,8 +4512,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // same shared "DrawBuf Sky Xlu" — this dump identifies it by its GPU-side
   // texture binding, independent of which CPU material baked it).
   static const bool s_xhGpuDbg = std::getenv("SB_XH_GPU_DBG") != nullptr;
-  if (s_xhGpuDbg
-      && g_sbLastMarker.find("Sky Xlu") != std::string::npos) {
+  if (s_xhGpuDbg && g_sbLastMarker.find("Sky Xlu") != std::string::npos) {
     static long s_n = 0;
     if (s_n < 200) {
       for (unsigned st = 0; st < g_gxState.numTevStages; ++st) {
@@ -4353,11 +4525,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         std::fprintf(stderr,
                      "[xh-gpu] #%ld prim=%u verts=%u stage=%u texMap=%d fmt=%d %ux%u "
                      "wrapS=%d wrapT=%d proj=%c vp=(%.0f,%.0f %.0fx%.0f) numTexGens=%u\n",
-                     s_n, static_cast<unsigned>(prim), vtxCount, st,
-                     static_cast<int>(s.texMapId), static_cast<int>(tobj.format()), tobj.width(),
-                     tobj.height(), static_cast<int>(tobj.wrap_s()), static_cast<int>(tobj.wrap_t()),
-                     g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', vp.left, vp.top, vp.width,
-                     vp.height, g_gxState.numTexGens);
+                     s_n, static_cast<unsigned>(prim), vtxCount, st, static_cast<int>(s.texMapId),
+                     static_cast<int>(tobj.format()), tobj.width(), tobj.height(), static_cast<int>(tobj.wrap_s()),
+                     static_cast<int>(tobj.wrap_t()), g_gxState.projType == GX_ORTHOGRAPHIC ? 'O' : 'P', vp.left,
+                     vp.top, vp.width, vp.height, g_gxState.numTexGens);
       }
     }
   }
@@ -4430,8 +4601,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         const uint64_t contentHash =
             static_cast<uint64_t>(xxh3_hash_s(static_cast<const uint8_t*>(array.data), effSize));
         bool uploaded = false;
-        range = gfx::push_storage_persistent(static_cast<const uint8_t*>(array.data), effSize, upKey,
-                                             contentHash, &uploaded);
+        range = gfx::push_storage_persistent(static_cast<const uint8_t*>(array.data), effSize, upKey, contentHash,
+                                             &uploaded);
         if (range.size == 0) {
           // Arena full — fall back to the per-frame path rather than binding a bogus range.
           range = gfx::push_storage(static_cast<const uint8_t*>(array.data), effSize);
@@ -4458,16 +4629,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       if (sb_drawprim_profile() && hit == nullptr) {
         ++g_arrUploadCount;
         g_arrUploadBytes += effSize;
-        const uint64_t key =
-            (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(array.data)) << 8) ^ effSize;
+        const uint64_t key = (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(array.data)) << 8) ^ effSize;
         // SAFETY MEASUREMENT for keying the upload cache on data identity instead of on the
         // slot's current registration. That is only sound if a given (ptr,size) always holds the
         // same BYTES for the whole frame; if the game rewrites an array in place between two
         // draws, a data-keyed cache would serve the stale upload. Hash the uploaded bytes and
         // report any key whose content changed within a frame. A count of 0 is the precondition;
         // anything else falsifies the optimisation outright.
-        const uint64_t h =
-            static_cast<uint64_t>(xxh3_hash_s(static_cast<const uint8_t*>(array.data), effSize));
+        const uint64_t h = static_cast<uint64_t>(xxh3_hash_s(static_cast<const uint8_t*>(array.data), effSize));
         // Compare against the SAME key's hash in the previous frame.
         {
           const auto pit = g_arrHashPrevFrame.find(key);
@@ -4506,9 +4675,12 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     if (s_arrDbg == 1) {
       static long nZero = 0, nReal = 0, nCached = 0;
       static long n = 0;
-      if (cached) ++nCached;
-      else if (array.size == 0) ++nZero;
-      else ++nReal;
+      if (cached)
+        ++nCached;
+      else if (array.size == 0)
+        ++nZero;
+      else
+        ++nReal;
       ++n;
       if ((array.size > 0 && !cached && nReal <= 40) || (n % 2000) == 0)
         std::fprintf(stderr,
@@ -4525,12 +4697,17 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   auto _pt = [] { return std::chrono::steady_clock::now(); };
   auto _pa = s_prof ? _pt() : std::chrono::steady_clock::time_point{};
 
-  if (s_profArr) sb_gx_prof_add(5, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - _pArr).count());
+  if (s_profArr)
+    sb_gx_prof_add(5, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - _pArr).count());
 
   PipelineConfig config{};
   populate_pipeline_config(config, prim, fmt);
   const auto info = build_shader_info(config.shaderConfig);
-  if (s_prof) { auto n = _pt(); sb_gx_prof_add(0, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
+  if (s_prof) {
+    auto n = _pt();
+    sb_gx_prof_add(0, std::chrono::duration<double, std::micro>(n - _pa).count());
+    _pa = n;
+  }
   // SB_SKIP_HASH=<hex>: drop every draw whose shader-config hash matches (the same
   // hash SB_SHADER_HASH prints). The only way to isolate a specific draw on the raw
   // .dff replay path, where game-side markers are absent (mark=''). Multiple hashes
@@ -4546,7 +4723,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         while (*p != '\0' && s_skipN < 8) {
           s_skip[s_skipN++] = std::strtoull(p, nullptr, 16);
           const char* comma = std::strchr(p, ',');
-          if (comma == nullptr) break;
+          if (comma == nullptr)
+            break;
           p = comma + 1;
         }
       }
@@ -4554,7 +4732,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     if (s_skipN > 0) {
       const uint64_t h = static_cast<uint64_t>(xxh3_hash(config.shaderConfig));
       for (int k = 0; k < s_skipN; ++k) {
-        if (h == s_skip[k]) return;
+        if (h == s_skip[k])
+          return;
       }
     }
   }
@@ -4575,9 +4754,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
   }
   g_sbDrawSamplesCopy = false;
-  if (s_prof) _pa = _pt();
+  if (s_prof)
+    _pa = _pt();
   resolve_sampled_textures(info);
-  if (s_prof) { auto n = _pt(); sb_gx_prof_add(6, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
+  if (s_prof) {
+    auto n = _pt();
+    sb_gx_prof_add(6, std::chrono::duration<double, std::micro>(n - _pa).count());
+    _pa = n;
+  }
   // SB_SKIP_COPY_QUAD=1 (diagnostic): drop draws that sample an EFB-copy
   // texture (the screen-texture repaint quads) — separates "scene hidden
   // under the quad overdraw" from "scene never rendered".
@@ -4596,7 +4780,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // composite painting the backdrop. Restores after the draw so state isn't corrupted.
   {
     static int s_perspZonly = -1;
-    if (s_perspZonly < 0) { const char* e = std::getenv("SB_PERSP_ZONLY"); s_perspZonly = (e && e[0] && e[0] != '0') ? 1 : 0; }
+    if (s_perspZonly < 0) {
+      const char* e = std::getenv("SB_PERSP_ZONLY");
+      s_perspZonly = (e && e[0] && e[0] != '0') ? 1 : 0;
+    }
     if (s_perspZonly == 1 && g_gxState.projType != GX_ORTHOGRAPHIC) {
       g_gxState.colorUpdate = false;
     }
@@ -4646,12 +4833,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         if (!tok.empty() && g_sbLastMarker.find(tok) != std::string::npos) {
           return;
         }
-        if (comma == std::string_view::npos) break;
+        if (comma == std::string_view::npos)
+          break;
         start = comma + 1;
       }
     }
-    if (s_skipAdd == 1 && g_gxState.blendMode == GX_BM_BLEND &&
-        g_gxState.blendFacSrc == GX_BL_SRCALPHA && g_gxState.blendFacDst == GX_BL_ONE) {
+    if (s_skipAdd == 1 && g_gxState.blendMode == GX_BM_BLEND && g_gxState.blendFacSrc == GX_BL_SRCALPHA &&
+        g_gxState.blendFacDst == GX_BL_ONE) {
       return;
     }
   }
@@ -4691,7 +4879,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
           }
           return;
         }
-        if (comma == std::string_view::npos) break;
+        if (comma == std::string_view::npos)
+          break;
         start = comma + 1;
       }
     }
@@ -4720,13 +4909,18 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       while (start <= idxs.size()) {
         size_t comma = idxs.find(',', start);
         const auto tok = idxs.substr(start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
-        if (!tok.empty() && tok == buf) { matched = true; break; }
-        if (comma == std::string_view::npos) break;
+        if (!tok.empty() && tok == buf) {
+          matched = true;
+          break;
+        }
+        if (comma == std::string_view::npos)
+          break;
         start = comma + 1;
       }
     }
     ++g_sbMarkerDrawIdx;
-    if (matched) return;
+    if (matched)
+      return;
   }
   // SB_SKIP_MIRROR_FAR / SB_SKIP_MIRROR_NEAR (diagnostic, title sky
   // crosshatch bisection): the sky material draws two Mirror-wrapped quads
@@ -4754,8 +4948,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         if (dbg) {
           static long n = 0;
           if (++n <= 200)
-            lucent::debug(chSkipMirror, "far={} tex={}x{} trans={:.1f}", isFar ? 1 : 0, obj0.width(),
-                          obj0.height(), pn[3]);
+            lucent::debug(chSkipMirror, "far={} tex={}x{} trans={:.1f}", isFar ? 1 : 0, obj0.width(), obj0.height(),
+                          pn[3]);
         }
         if ((isFar && far != nullptr) || (!isFar && near != nullptr)) {
           return;
@@ -4780,22 +4974,30 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         std::fprintf(stderr,
                      "[ortho] n=%ld verts=%u tex0=%ux%u tev=%u samplesCopy=%d bm=%d bf=%d/%d cU=%d aU=%d "
                      "ch0[light=%d matSrc=%d] tev0C[a=%d b=%d c=%d d=%d] mark='%s'\n",
-                     n, vtxCount, obj.width(), obj.height(), g_gxState.numTevStages,
-                     g_sbDrawSamplesCopy ? 1 : 0, static_cast<int>(g_gxState.blendMode),
-                     static_cast<int>(g_gxState.blendFacSrc), static_cast<int>(g_gxState.blendFacDst),
-                     g_gxState.colorUpdate ? 1 : 0, g_gxState.alphaUpdate ? 1 : 0,
-                     static_cast<int>(g_gxState.colorChannelConfig[0].lightingEnabled),
-                     static_cast<int>(g_gxState.colorChannelConfig[0].matSrc),
-                     static_cast<int>(t0.colorPass.a), static_cast<int>(t0.colorPass.b),
-                     static_cast<int>(t0.colorPass.c), static_cast<int>(t0.colorPass.d), g_sbLastMarker.c_str());
+                     n, vtxCount, obj.width(), obj.height(), g_gxState.numTevStages, g_sbDrawSamplesCopy ? 1 : 0,
+                     static_cast<int>(g_gxState.blendMode), static_cast<int>(g_gxState.blendFacSrc),
+                     static_cast<int>(g_gxState.blendFacDst), g_gxState.colorUpdate ? 1 : 0,
+                     g_gxState.alphaUpdate ? 1 : 0, static_cast<int>(g_gxState.colorChannelConfig[0].lightingEnabled),
+                     static_cast<int>(g_gxState.colorChannelConfig[0].matSrc), static_cast<int>(t0.colorPass.a),
+                     static_cast<int>(t0.colorPass.b), static_cast<int>(t0.colorPass.c),
+                     static_cast<int>(t0.colorPass.d), g_sbLastMarker.c_str());
       }
     }
   }
-  if (s_prof) _pa = _pt();
+  if (s_prof)
+    _pa = _pt();
   const auto bindGroups = build_bind_groups(info);
-  if (s_prof) { auto n = _pt(); sb_gx_prof_add(1, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
+  if (s_prof) {
+    auto n = _pt();
+    sb_gx_prof_add(1, std::chrono::duration<double, std::micro>(n - _pa).count());
+    _pa = n;
+  }
   const auto pipeline = gfx::pipeline_ref(config);
-  if (s_prof) { auto n = _pt(); sb_gx_prof_add(2, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
+  if (s_prof) {
+    auto n = _pt();
+    sb_gx_prof_add(2, std::chrono::duration<double, std::micro>(n - _pa).count());
+    _pa = n;
+  }
 
   uint32_t instanceCount = 1;
   if (prim == GX_LINES) {
@@ -4805,7 +5007,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   } else if (prim == GX_POINTS) {
     instanceCount = vtxCount;
   }
-  if (s_prof) _pa = _pt();
+  if (s_prof)
+    _pa = _pt();
   // Where POS lives inside this draw's vertex record. Computed here because the descriptor state
   // that determines it is current NOW and gone by the time the recorded frame is interpolated.
   u16 posOffset = 0;
@@ -4816,7 +5019,28 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   const uint64_t deformF32OffsetMask = calculate_deform_f32_layout(fmt);
   const uint32_t texMtxCamMask = eye_space_texgen_mask(info);
   auto uniformRange = build_uniform(info, vertRange.offset, ranges);
-  if (s_prof) { auto n = _pt(); sb_gx_prof_add(3, std::chrono::duration<double, std::micro>(n - _pa).count()); _pa = n; }
+  uint32_t indexedPosSample = 0;
+  if (g_pendingDrawIndexedDeform != 0) {
+    const auto posDesc = g_gxState.vtxDesc[GX_VA_POS];
+    const auto& posFmt = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
+    const auto& posArray = g_gxState.arrays[GX_VA_POS];
+    const uint32_t posBytes = posArray.size != 0 ? posArray.size : posArray.sizeAuto;
+    ASSERT(g_pendingDrawTag != 0, "GX_AURORA_DRAW_TAG_INDEXED_DEFORM requires a following non-zero draw tag");
+    ASSERT((posDesc == GX_INDEX8 || posDesc == GX_INDEX16) && posFmt.cnt == GX_POS_XYZ && posFmt.type == GX_F32 &&
+               !posArray.le && posArray.stride >= 12 && posBytes != 0,
+           "GX_AURORA_DRAW_TAG_INDEXED_DEFORM requires big-endian indexed XYZ f32 positions; "
+           "desc={} cnt={} type={} le={} stride={} bytes={}",
+           static_cast<int>(posDesc), static_cast<int>(posFmt.cnt), static_cast<int>(posFmt.type), posArray.le,
+           posArray.stride, posBytes);
+    indexedPosSample = gfx::indexed_interp::capture(g_pendingDrawTag, static_cast<const uint8_t*>(posArray.data),
+                                                    posBytes, static_cast<uint16_t>(posArray.stride), g_pendingDrawPop);
+    ASSERT(indexedPosSample != 0, "failed to capture marked indexed position array");
+  }
+  if (s_prof) {
+    auto n = _pt();
+    sb_gx_prof_add(3, std::chrono::duration<double, std::micro>(n - _pa).count());
+    _pa = n;
+  }
   gfx::push_draw_command(DrawData{
       .pipeline = pipeline,
       .vertRange = vertRange,
@@ -4830,12 +5054,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .tag = g_pendingDrawTag,
       .pop = g_pendingDrawPop,
       .exact = g_pendingDrawExact,
+      .indexedPosSample = indexedPosSample,
+      .posArrayUniformOffset = g_lastUniformArrayOffset,
       // The block order is pnMtx.pos, then the texture matrices, then pnMtx.nrm — see build_uniform.
       // Spelled out with both counts rather than doubling one: MaxPnMtx and MaxTexMtx happen to be
       // equal today, and a change to either would silently misplace the normal matrices.
       .mtxPosOffset = g_lastUniformMtxOffset,
-      .mtxNrmOffset = g_lastUniformMtxOffset +
-                      (u32)((MaxPnMtx + MaxTexMtx) * sizeof(Mat3x4<float>)),
+      .mtxNrmOffset = g_lastUniformMtxOffset + (u32)((MaxPnMtx + MaxTexMtx) * sizeof(Mat3x4<float>)),
       .ortho = g_gxState.projType == GX_ORTHOGRAPHIC ? (u8)1 : (u8)0,
       .vtxStride = static_cast<u16>(g_gxState.lastVtxSize),
       .posOffset = posOffset,
@@ -4854,6 +5079,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   // to clear it — GXEnd is not a function in this build. Consuming it here is the semantic that
   // matches what the flag means.
   g_pendingDrawExact = 0;
+  g_pendingDrawIndexedDeform = 0;
   if (g_pendingDrawTag != 0) {
     ++g_taggedDrawCount;
   } else {
@@ -4870,7 +5096,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       }
     }
   }
-  if (s_prof) { auto n = _pt(); sb_gx_prof_add(4, std::chrono::duration<double, std::micro>(n - _pa).count()); }
+  if (s_prof) {
+    auto n = _pt();
+    sb_gx_prof_add(4, std::chrono::duration<double, std::micro>(n - _pa).count());
+  }
 }
 
 std::string read_string(const u8* data, u32& pos, u32 size, bool bigEndian) {
@@ -4946,7 +5175,8 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
       array.cachedRange = {};
       // The auto-derived extent belongs to the backing memory, not the slot:
       // keep it when only flags change, reset it when the pointer moves.
-      if (!sameBacking) array.sizeAuto = 0;
+      if (!sameBacking)
+        array.sizeAuto = 0;
       g_gxState.stateDirty = true;
     }
   } else if (subCmd == GX_AURORA_LOAD_TEXOBJ) {
@@ -5068,11 +5298,18 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     gfx::interp::set_view_matrix(m);
   } else if (subCmd == GX_AURORA_DRAW_TAG) {
     CHECK(pos + 8 <= size, "GX_AURORA_DRAW_TAG read overrun");
+    const uint64_t tag = read_u64(data + pos, bigEndian);
+    pos += 8;
+    if (tag == GX_AURORA_DRAW_TAG_INDEXED_DEFORM) {
+      g_pendingDrawIndexedDeform = 1;
+      // The next draw needs its own DrawData sample handle and cannot merge into an earlier draw.
+      g_gxState.stateDirty = true;
+      return;
+    }
     // Latched, not consumed: one tag covers every draw the tagged object emits, however many
     // elements and material passes that turns out to be. The emitter is responsible for tagging
     // again when it moves to the next object.
-    g_pendingDrawTag = read_u64(data + pos, bigEndian);
-    pos += 8;
+    g_pendingDrawTag = tag;
   } else if (subCmd == GX_AURORA_DRAW_POP) {
     CHECK(pos + 1 <= size, "GX_AURORA_DRAW_POP read overrun");
     g_pendingDrawPop = data[pos];
@@ -5172,10 +5409,11 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
       else
         hex += fmt::format(" {:02x}", data[i]);
     }
-    Log.error("Unknown Aurora subcommand: 0x{:04X} at pos {} -- caller likely mis-encoded "
-              "the GX_AURORA (0x50) opcode payload or fell out of frame from an earlier "
-              "extension. Hex dump (pos {}-{}, [] marks the subCmd bytes):{}",
-              subCmd, pos - 2, dumpStart, dumpEnd - 1, hex);
+    Log.error(
+        "Unknown Aurora subcommand: 0x{:04X} at pos {} -- caller likely mis-encoded "
+        "the GX_AURORA (0x50) opcode payload or fell out of frame from an earlier "
+        "extension. Hex dump (pos {}-{}, [] marks the subCmd bytes):{}",
+        subCmd, pos - 2, dumpStart, dumpEnd - 1, hex);
   }
 }
 
@@ -5196,34 +5434,40 @@ extern "C" uint32_t aurora_gx_scan_dl(const uint8_t* data, uint32_t size, uint32
   while (pos < size) {
     const u8 cmd = data[pos];
     const u8 opcode = cmd & 0xF8; // CP_OPCODE_MASK
-    if (cmd == 0x00) { // NOP
+    if (cmd == 0x00) {            // NOP
       pos += 1;
       continue;
     }
     if (cmd == 0x08) { // CP reg: opcode + addr + u32
-      if (pos + 6 > size) return pos;
+      if (pos + 6 > size)
+        return pos;
       pos += 6;
       continue;
     }
     if (cmd == 0x10) { // XF: opcode + u32 header + count*4
-      if (pos + 5 > size) return pos;
+      if (pos + 5 > size)
+        return pos;
       const u32 count = (rd16(pos + 1) & 0xFFFF) + 1;
-      if (pos + 5 + count * 4 > size) return pos;
+      if (pos + 5 + count * 4 > size)
+        return pos;
       pos += 5 + count * 4;
       continue;
     }
     if (cmd == 0x61) { // BP: opcode + u32
-      if (pos + 5 > size) return pos;
+      if (pos + 5 > size)
+        return pos;
       pos += 5;
       continue;
     }
     if (opcode == 0x20 || opcode == 0x28 || opcode == 0x30 || opcode == 0x38) { // indexed XF
-      if (pos + 5 > size) return pos;
+      if (pos + 5 > size)
+        return pos;
       pos += 5;
       continue;
     }
     if (cmd == 0x40) { // CALL_DL
-      if (pos + 9 > size) return pos;
+      if (pos + 9 > size)
+        return pos;
       pos += 9;
       continue;
     }
@@ -5232,19 +5476,28 @@ extern "C" uint32_t aurora_gx_scan_dl(const uint8_t* data, uint32_t size, uint32
       continue;
     }
     if (cmd == 0x50) { // GX_AURORA extension
-      if (pos + 3 > size) return pos;
+      if (pos + 3 > size)
+        return pos;
       const u32 sub = rd16(pos + 1);
       u32 payload;
-      if (sub == 0x0001) payload = 24;                       // LOAD_VIEWPORT_RENDER
-      else if (sub == 0x0002) payload = 16;                  // LOAD_SCISSOR_RENDER
-      else if (sub >= 0x0010 && sub <= 0x001F) payload = 13; // LOAD_ARRAYBASE
-      else if (sub == 0x0020 || sub == 0x0022) {             // debug group push / marker
-        if (pos + 5 > size) return pos;
+      if (sub == 0x0001)
+        payload = 24; // LOAD_VIEWPORT_RENDER
+      else if (sub == 0x0002)
+        payload = 16; // LOAD_SCISSOR_RENDER
+      else if (sub >= 0x0010 && sub <= 0x001F)
+        payload = 13;                            // LOAD_ARRAYBASE
+      else if (sub == 0x0020 || sub == 0x0022) { // debug group push / marker
+        if (pos + 5 > size)
+          return pos;
         payload = 2 + rd16(pos + 3);
-      } else if (sub == 0x0021) payload = 0;                 // debug group pop
-      else if (sub == 0x0030) payload = 34;                  // LOAD_TEXOBJ
-      else return pos;                                       // DRAW_SIZED/INDEXED etc: not in material DLs
-      if (pos + 3 + payload > size) return pos;
+      } else if (sub == 0x0021)
+        payload = 0; // debug group pop
+      else if (sub == 0x0030)
+        payload = 34; // LOAD_TEXOBJ
+      else
+        return pos; // DRAW_SIZED/INDEXED etc: not in material DLs
+      if (pos + 3 + payload > size)
+        return pos;
       pos += 3 + payload;
       continue;
     }

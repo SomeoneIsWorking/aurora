@@ -5,7 +5,9 @@
 #include <tracy/Tracy.hpp>
 
 namespace aurora::gx {
-namespace fifo { extern long g_sbPushedDrawCount; } // SB_UNIF_DUMP window (command_processor.cpp)
+namespace fifo {
+extern long g_sbPushedDrawCount;
+} // namespace fifo
 // TODO: remove, just for testing
 bool enableLodBias = true;
 
@@ -69,8 +71,8 @@ void color_arg_reg_info(GXTevColorArg arg, const TevStage& stage, ShaderInfo& in
     ASSERT(stage.texCoordId != GX_TEXCOORD_NULL,
            "tex coord not bound (color arg {}); texMapId={} channelId={} colorPass=({},{},{},{})",
            static_cast<u32>(arg), underlying(stage.texMapId), underlying(stage.channelId),
-           underlying(stage.colorPass.a), underlying(stage.colorPass.b),
-           underlying(stage.colorPass.c), underlying(stage.colorPass.d));
+           underlying(stage.colorPass.a), underlying(stage.colorPass.b), underlying(stage.colorPass.c),
+           underlying(stage.colorPass.d));
     info.sampledTexCoords.set(stage.texCoordId);
     info.sampledTextures.set(stage.texMapId);
     break;
@@ -391,6 +393,7 @@ static u32 line_texcoord_mask() noexcept {
 // and read immediately afterwards by the draw-record site — see the comment at the assignment for
 // why this is captured rather than computed.
 u32 g_lastUniformMtxOffset = 0;
+u32 g_lastUniformArrayOffset = 0;
 
 gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges) noexcept {
   ZoneScoped;
@@ -401,7 +404,8 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
   {
     static long s_lo = -2, s_hi = -2;
     if (s_lo == -2) {
-      s_lo = -1; s_hi = -1;
+      s_lo = -1;
+      s_hi = -1;
       if (const char* w = std::getenv("SB_UNIF_DUMP"); w != nullptr && w[0] != '\0') {
         char* endp = nullptr;
         s_lo = std::strtol(w, &endp, 0);
@@ -410,20 +414,17 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
     }
     if (s_lo >= 0 && fifo::g_sbPushedDrawCount >= s_lo && fifo::g_sbPushedDrawCount <= s_hi) {
       const float* P = reinterpret_cast<const float*>(&g_gxState.proj);
-      std::fprintf(stderr,
-                   "[unif] #%ld vtxStart=%u curPn=%u vp=(%.0fx%.0f log %.0fx%.0f) va0=%u va1=%u va2=%u va4=%u\n",
-                   fifo::g_sbPushedDrawCount, vtxStart, g_gxState.currentPnMtx,
-                   g_gxState.renderViewport.width, g_gxState.renderViewport.height,
-                   g_gxState.logicalViewport.width, g_gxState.logicalViewport.height,
-                   ranges.vaRanges[0].offset, ranges.vaRanges[1].offset, ranges.vaRanges[2].offset,
-                   ranges.vaRanges[4].offset);
-      std::fprintf(stderr, "[unif]   proj=[%g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g]\n",
-                   P[0], P[1], P[2], P[3], P[4], P[5], P[6], P[7], P[8], P[9], P[10], P[11], P[12], P[13],
-                   P[14], P[15]);
+      std::fprintf(
+          stderr, "[unif] #%ld vtxStart=%u curPn=%u vp=(%.0fx%.0f log %.0fx%.0f) va0=%u va1=%u va2=%u va4=%u\n",
+          fifo::g_sbPushedDrawCount, vtxStart, g_gxState.currentPnMtx, g_gxState.renderViewport.width,
+          g_gxState.renderViewport.height, g_gxState.logicalViewport.width, g_gxState.logicalViewport.height,
+          ranges.vaRanges[0].offset, ranges.vaRanges[1].offset, ranges.vaRanges[2].offset, ranges.vaRanges[4].offset);
+      std::fprintf(stderr, "[unif]   proj=[%g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g]\n", P[0], P[1], P[2],
+                   P[3], P[4], P[5], P[6], P[7], P[8], P[9], P[10], P[11], P[12], P[13], P[14], P[15]);
       for (int i = 0; i < MaxPnMtx; ++i) {
         const float* M = reinterpret_cast<const float*>(&g_gxState.pnMtx[i].pos);
-        std::fprintf(stderr, "[unif]   pn%d=[%.3f %.3f %.3f %.2f | %.3f %.3f %.3f %.2f | %.3f %.3f %.3f %.2f]\n",
-                     i, M[0], M[1], M[2], M[3], M[4], M[5], M[6], M[7], M[8], M[9], M[10], M[11]);
+        std::fprintf(stderr, "[unif]   pn%d=[%.3f %.3f %.3f %.2f | %.3f %.3f %.3f %.2f | %.3f %.3f %.3f %.2f]\n", i,
+                     M[0], M[1], M[2], M[3], M[4], M[5], M[6], M[7], M[8], M[9], M[10], M[11]);
       }
     }
   }
@@ -439,6 +440,7 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
   buf.append<f32>(g_gxState.logicalViewport.width);
   buf.append<f32>(g_gxState.logicalViewport.height);
   buf.append_zeroes(8); // pad
+  g_lastUniformArrayOffset = static_cast<u32>(buf.size());
   for (const auto& vaRange : ranges.vaRanges) {
     buf.append<u32>(vaRange.offset);
   }
@@ -528,8 +530,7 @@ gfx::Range build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRa
     buf.append(fog);
   }
   for (const auto& scale : g_gxState.texCoordScales) {
-    buf.append(
-        Vec4{static_cast<f32>(scale.scaleS) + 1.0f, static_cast<f32>(scale.scaleT) + 1.0f, 0.0f, 0.0f});
+    buf.append(Vec4{static_cast<f32>(scale.scaleS) + 1.0f, static_cast<f32>(scale.scaleT) + 1.0f, 0.0f, 0.0f});
   }
   if (info.usedIndTexMtxs.any()) {
     for (int i = 0; i < MaxIndTexMtxs; ++i) {

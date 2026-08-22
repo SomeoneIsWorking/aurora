@@ -26,6 +26,10 @@ struct DrawData {
   // geometry under a perspective projection, which the ortho test cannot see and the camera delta
   // must not touch.
   uint8_t exact;
+  // An explicitly opted-in indexed XYZ-f32 position array. These draws rebuild their vertex array
+  // under an identity matrix, so ordinary matrix interpolation cannot move them.
+  uint32_t indexedPosSample;
+  uint32_t posArrayUniformOffset;
   // Byte offset of pnMtx[0].pos within this draw's uniform block, and of pnMtx[0].nrm. Recorded at
   // build time because the layout is not fixed — an optional lineMode block shifts everything after
   // it by 16 bytes, and lineMode is not otherwise recoverable from a DrawData. Interpolation writes
