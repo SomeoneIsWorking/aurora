@@ -1087,7 +1087,11 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
         if (d.ortho == 0) {
           interp::patch_camera_only(snap.data() + d.uniformRange.offset, dst, d.uniformRange.size, d.mtxPosOffset,
                                     d.mtxNrmOffset, d.texMtxCamMask);
-          interp::note_disposition(d.pop, interp::Disposition::CameraOnly);
+          const interp::Disposition disposition =
+              indexed_interp::birth_only(d.indexedPosSample)          ? interp::Disposition::CameraOnlyBirth
+              : indexed_interp::reappearance_only(d.indexedPosSample) ? interp::Disposition::CameraOnlyReappearance
+                                                                      : interp::Disposition::CameraOnly;
+          interp::note_disposition(d.pop, disposition);
         }
         continue;
       }
