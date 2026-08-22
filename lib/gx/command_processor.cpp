@@ -1,4 +1,3 @@
-#include <chrono>
 #include "command_processor.hpp"
 
 #include <lucent/log.h>
@@ -49,17 +48,6 @@ static thread_local int g_sbMarkerDrawIdx = 0; // Nth draw since the current mar
 // Exposed for cross-TU diagnostics (e.g. copy_tex logging which J3D buffer/2D
 // element a GXCopyTex follows).
 extern "C" const char* sb_gx_last_marker() { return g_sbLastMarker.c_str(); }
-
-// SB_PROFILE_GFX per-draw build-phase accumulators (0=shaderinfo+config,
-// 1=bind_groups, 2=pipeline_ref, 3=build_uniform, 4=push_draw_command).
-// Printed and reset by the frame profiler in aurora.cpp.
-extern "C" {
-double g_sbGxProf[7] = {0, 0, 0, 0, 0, 0, 0};
-void sb_gx_prof_add(int slot, double us) {
-  if (slot >= 0 && slot < 7)
-    g_sbGxProf[slot] += us;
-}
-}
 
 // VIGetRetraceCount is defined game-side (sms-boot/runtime/sdk_stubs.cpp) and
 // advanced once per sb_frame_present (sms-boot/runtime/frame_seam.cpp) — same
@@ -478,8 +466,16 @@ static void sb_dump_recent_cmds(const char* why) {
 
 static thread_local size_t s_recentDrawHead = 0;
 
+uint64_t g_fifoProcessCalls = 0;
+uint64_t g_fifoInputBytes = 0;
+
 void process(const u8* data, u32 size, bool bigEndian) {
   ZoneScoped;
+  static const bool workStats = std::getenv("SB_DRAW_STATS") != nullptr;
+  if (workStats) {
+    ++g_fifoProcessCalls;
+    g_fifoInputBytes += size;
+  }
   u32 pos = 0;
 
   // Small ring buffer of recent (opcode, pos) — dumped on unknown-opcode fatal
@@ -2015,6 +2011,7 @@ static uint64_t calculate_deform_f32_layout(GXVtxFmt fmt) {
 
 static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
   u32 vtxSize = 0;
+  u8 indexedAttrCount = 0;
   const auto& vtxFmt = g_gxState.vtxFmts[fmt];
   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
     switch (g_gxState.vtxDesc[i]) {
@@ -2026,17 +2023,30 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
       vtxSize += comp_type_size(attr, attrFmt.type) * comp_cnt_count(attr, attrFmt.cnt);
       break;
     }
-    case GX_INDEX8:
-      vtxSize += (i == GX_VA_NRM && vtxFmt.attrs[i].cnt == GX_NRM_NBT3) ? 3 : 1;
+    case GX_INDEX8: {
+      const u8 count = (i == GX_VA_NRM && vtxFmt.attrs[i].cnt == GX_NRM_NBT3) ? 3 : 1;
+      for (u8 component = 0; component < count; ++component) {
+        g_gxState.lastIndexedAttrs[indexedAttrCount++] = {
+            .offset = static_cast<u16>(vtxSize + component), .width = 1, .attr = static_cast<u8>(i)};
+      }
+      vtxSize += count;
       break;
-    case GX_INDEX16:
-      vtxSize += (i == GX_VA_NRM && vtxFmt.attrs[i].cnt == GX_NRM_NBT3) ? 6 : 2;
+    }
+    case GX_INDEX16: {
+      const u8 count = (i == GX_VA_NRM && vtxFmt.attrs[i].cnt == GX_NRM_NBT3) ? 3 : 1;
+      for (u8 component = 0; component < count; ++component) {
+        g_gxState.lastIndexedAttrs[indexedAttrCount++] = {
+            .offset = static_cast<u16>(vtxSize + component * 2), .width = 2, .attr = static_cast<u8>(i)};
+      }
+      vtxSize += static_cast<u32>(count) * 2;
       break;
+    }
     }
   }
 
   g_gxState.lastVtxFmt = fmt;
   g_gxState.lastVtxSize = vtxSize;
+  g_gxState.lastIndexedAttrCount = indexedAttrCount;
 
   return vtxSize;
 }
@@ -2090,94 +2100,14 @@ long g_untaggedPerspDrawCount = 0;
 long g_untaggedPerspDirectCount = 0;
 long g_untaggedPerspIndexedCount = 0;
 
-// SB_PROFILE_DRAWPRIM=1 accounting. Reported per drain by the caller.
-static bool sb_drawprim_profile() {
+// Deterministic work accounting. Reported and reset once per drain by fifo.cpp.
+static bool sb_draw_stats() {
   static const bool on = [] {
-    const char* e = std::getenv("SB_PROFILE_DRAWPRIM");
+    const char* e = std::getenv("SB_DRAW_STATS");
     return e != nullptr && e[0] != '\0' && e[0] != '0';
   }();
   return on;
 }
-static int64_t sb_now_ns() {
-  timespec ts{};
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
-}
-
-// A free-running cycle counter, for probing INSIDE draw_prim.
-//
-// clock_gettime is ~20-25 ns even through the vDSO. draw_prim's whole body is ~340 ns, so the
-// two clock_gettime calls the original profiler used were already ~12% of what they measured,
-// and the two EXTRA ones around the max-index scan were charged to draw_prim's own total — the
-// reported "scan = 14% of draw_prim" was therefore partly a measurement of its own probes.
-// Splitting the body into seven phases with that probe would have cost more than the body.
-//
-// No x86 asm (this port targets x86-64 AND arm64); each arch's counter intrinsic, and a
-// clock_gettime fallback elsewhere that the report flags as too coarse to trust.
-#if defined(__x86_64__) || defined(__i386__)
-#include <x86intrin.h>
-static inline uint64_t sb_tsc() { return __rdtsc(); }
-static constexpr bool kSbTscIsCycleCounter = true;
-#elif defined(__aarch64__)
-static inline uint64_t sb_tsc() {
-  uint64_t v;
-  asm volatile("mrs %0, cntvct_el0" : "=r"(v));
-  return v;
-}
-static constexpr bool kSbTscIsCycleCounter = true;
-#else
-static inline uint64_t sb_tsc() { return static_cast<uint64_t>(sb_now_ns()); }
-static constexpr bool kSbTscIsCycleCounter = false;
-#endif
-
-// ns per tick, measured against CLOCK_MONOTONIC on first use.
-static double sb_tsc_ns_per_tick() {
-  static const double v = [] {
-    if (!kSbTscIsCycleCounter) {
-      return 1.0; // fallback counter already IS nanoseconds
-    }
-    const int64_t n0 = sb_now_ns();
-    const uint64_t t0 = sb_tsc();
-    // Busy-wait rather than sleep: a sleeping thread can be migrated, and this is a handful
-    // of milliseconds once per process.
-    while (sb_now_ns() - n0 < 20000000LL) {}
-    const uint64_t t1 = sb_tsc();
-    const int64_t n1 = sb_now_ns();
-    const uint64_t dt = t1 - t0;
-    return dt != 0 ? static_cast<double>(n1 - n0) / static_cast<double>(dt) : 1.0;
-  }();
-  return v;
-}
-
-// Per-phase accounting. The phases PARTITION draw_prim's body, so that a region without a probe
-// shows up as a non-zero "unattributed" in the report rather than being silently folded into a
-// neighbour.
-enum SbDpPhase {
-  SB_DP_PROLOGUE = 0, // vtx size + overrun check
-  SB_DP_DIAG_PRE,     // the gated diagnostic blocks before the indexed-array bookkeeping
-  SB_DP_ATTRENUM,     // enumerate indexed attributes (26 iterations, runs on EVERY call)
-  SB_DP_IDXSCAN,      // per-vertex max-referenced-index scan (only when nFields > 0)
-  SB_DP_DIAG_POST,    // the gated diagnostic blocks after it
-  SB_DP_PUSHVERTS,    // gfx::push_verts (vertex bytes -> frame packet)
-  SB_DP_MERGEIDX,     // prepare_idx_buffer + push_indices + merge bookkeeping
-  SB_DP_UNMERGED,     // handle_draw_unmerged
-  SB_DP_NPHASES,
-};
-// How many calls actually EXECUTED each phase. Dividing a phase by the total call count is what
-// made handle_draw_unmerged read as "293 ns/call" when it runs 1,289 times out of 45,912 and
-// really costs ~10 us per call — an average over calls that never entered it is not a per-call
-// cost, and here the two differ by 35x.
-long g_dpPhaseCalls[SB_DP_NPHASES] = {};
-
-// Per-call samples for the unmerged phase. A MEAN of 5.7 us over 1,312 calls has two completely
-// different explanations with different fixes: every draw costing ~5.7 us (a hot build path worth
-// restructuring), or a few dozen shader/pipeline compiles at ~1 ms each dragging up an otherwise
-// cheap path (a warm-up cost that vanishes after the first frames and must NOT be optimised for).
-// Percentiles separate them; a mean cannot.
-uint32_t g_dpUnmergedSamples[4096] = {};
-long g_dpUnmergedSampleCount = 0;
-long g_dpUnmergedSampleDropped = 0;
-uint64_t g_dpPhase[SB_DP_NPHASES] = {};
 // Indexed-array storage uploads, per frame. See the use site: total-vs-distinct is what separates
 // "uploads a lot of distinct geometry" from "uploads the same array over and over".
 uint64_t g_arrUploadCount = 0, g_arrUploadBytes = 0, g_arrUploadDistinctBytes = 0, g_arrCachedHits = 0;
@@ -2201,34 +2131,11 @@ uint64_t g_arrPersistUploads = 0, g_arrPersistHits = 0, g_arrArenaFull = 0;
 uint64_t sb_arena_used() { return gfx::persistent_storage_used(); }
 size_t sb_arena_entries() { return gfx::persistent_storage_entries(); }
 uint64_t g_arrPersistUploadBytes = 0, g_arrPersistHitBytes = 0;
+// Deterministic per-frame work units for the auto-array scan. These deliberately count inputs and
+// loop visits rather than elapsed host time, so runs remain comparable under CPU/GPU contention.
+uint64_t g_autoScanDraws = 0, g_autoScanVertices = 0, g_autoScanFieldVisits = 0, g_autoScanIndexBytes = 0;
+uint64_t g_autoLayoutFieldsChecked = 0;
 long g_dpMergedCalls = 0, g_dpUnmergedCalls = 0, g_dpEarlyReturns = 0;
-uint64_t g_dpWholeTicks = 0;
-// Control: two back-to-back reads with nothing between them. This is what ONE probe costs, and
-// it bounds how much of the split is the instrument measuring itself. If it is not small next
-// to the phases, the phase split is inadmissible and the report says so.
-static uint64_t sb_dp_probe_cost_ticks() {
-  static const uint64_t v = [] {
-    uint64_t best = ~0ull;
-    for (int i = 0; i < 4096; ++i) {
-      const uint64_t a = sb_tsc();
-      const uint64_t b = sb_tsc();
-      if (b - a < best) {
-        best = b - a;
-      }
-    }
-    return best;
-  }();
-  return v;
-}
-// Accessors for the reporter in fifo.cpp (the calibration and the probe-cost control are lazily
-// initialised statics local to this TU).
-double sb_dp_ns_per_tick_pub() { return sb_tsc_ns_per_tick(); }
-uint64_t sb_dp_probe_cost_ticks_pub() { return sb_dp_probe_cost_ticks(); }
-// 8 = the 7 DP_PHASE probes + the one dpWhole takes on exit. Both are charged inside the measured
-// body, so both belong in the overhead control.
-int sb_dp_probes_per_call_pub() { return SB_DP_NPHASES + 1; }
-
-int64_t g_dpTotalNs = 0;
 long g_dpCalls = 0;
 // Primitive SIZE distribution, because "46k primitives for 1314 merged draws" has two very
 // different explanations and the fix differs: a game emitting genuinely tiny primitives needs a
@@ -2239,48 +2146,15 @@ long g_dpVertTotal = 0;
 long g_dpPrimKind[8] = {}; // by GXPrimitive, indexed (prim >> 4) & 7
 
 static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* data, u32& pos, u32 size) {
-  const bool dpProf = sb_drawprim_profile();
-  const int64_t dpT0 = dpProf ? sb_now_ns() : 0;
-  if (dpProf) {
+  const bool workStats = sb_draw_stats();
+  if (workStats) {
     const u32 vc = vtxCount;
     int b = vc <= 2 ? 0 : vc == 3 ? 1 : vc == 4 ? 2 : vc <= 6 ? 3 : vc <= 12 ? 4 : vc <= 24 ? 5 : vc <= 48 ? 6 : 7;
+    ++g_dpCalls;
     ++g_dpVerts[b];
     g_dpVertTotal += vc;
     ++g_dpPrimKind[(static_cast<u32>(prim) >> 4) & 7u];
   }
-  struct DpScope {
-    bool on;
-    int64_t t0;
-    ~DpScope() {
-      if (on) {
-        g_dpTotalNs += sb_now_ns() - t0;
-        ++g_dpCalls;
-      }
-    }
-  } dpScope{dpProf, dpT0};
-
-  // Phase probes. `dpTick` is the timestamp of the previous probe; DP_PHASE(p) closes the region
-  // that ends here and charges it to p. Every exit path is covered by dpWhole's destructor, which
-  // also computes what NO phase claimed.
-  uint64_t dpTick = dpProf ? sb_tsc() : 0;
-  struct DpWhole {
-    bool on;
-    uint64_t t0;
-    ~DpWhole() {
-      if (on) {
-        g_dpWholeTicks += sb_tsc() - t0;
-      }
-    }
-  } dpWhole{dpProf, dpTick};
-#define DP_PHASE(p)                                                                                                    \
-  do {                                                                                                                 \
-    if (dpProf) {                                                                                                      \
-      const uint64_t _t = sb_tsc();                                                                                    \
-      g_dpPhase[(p)] += _t - dpTick;                                                                                   \
-      ++g_dpPhaseCalls[(p)];                                                                                           \
-      dpTick = _t;                                                                                                     \
-    }                                                                                                                  \
-  } while (0)
 
   ZoneScoped;
   u32 vtxSize;
@@ -2292,7 +2166,6 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   u32 totalVtxBytes = vtxCount * vtxSize;
   if (pos + totalVtxBytes > size)
     UNLIKELY { handle_draw_overrun(totalVtxBytes, data, pos, size); }
-  DP_PHASE(SB_DP_PROLOGUE);
 
   // SB_POS_PROBE=1: for INDEX16 + F32 position draws, decode the first
   // vertex's position index and fetch the XYZ it references — shows whether
@@ -3364,56 +3237,33 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   // from the maximum index this draw actually references and grow the
   // per-array upload budget. A growth invalidates the cached upload and
   // blocks merging (the merge head's uniform holds the old storage offset).
-  DP_PHASE(SB_DP_DIAG_PRE);
   {
-    const auto& vtxFmt = g_gxState.vtxFmts[fmt];
-    struct IdxField {
-      u16 off;
-      u8 wide; // index width in bytes (1 or 2)
-      u8 n;    // consecutive indices (3 for NBT3)
-      u8 attr;
-    };
-    IdxField fields[GX_VA_TEX7 + 1];
-    int nFields = 0;
-    u32 off = 0;
-    for (int a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7; ++a) {
-      const auto desc = g_gxState.vtxDesc[a];
-      if (desc == GX_NONE)
-        continue;
-      if (desc == GX_DIRECT) {
-        off += comp_type_size(static_cast<GXAttr>(a), vtxFmt.attrs[a].type) *
-               comp_cnt_count(static_cast<GXAttr>(a), vtxFmt.attrs[a].cnt);
-        continue;
-      }
-      const bool nbt3 = a == GX_VA_NRM && vtxFmt.attrs[a].cnt == GX_NRM_NBT3;
-      const u8 wide = desc == GX_INDEX16 ? 2 : 1;
-      const u8 cnt = nbt3 ? 3 : 1;
-      if (g_gxState.arrays[a].size == 0 && g_gxState.arrays[a].data != nullptr) {
-        fields[nFields++] = {static_cast<u16>(off), wide, cnt, static_cast<u8>(a)};
-      }
-      off += static_cast<u32>(wide) * cnt;
+    IndexedAttrLayout fields[MaxVtxAttr + 2];
+    u8 nFields = 0;
+    u32 indexBytesPerVertex = 0;
+    if (workStats) {
+      g_autoLayoutFieldsChecked += g_gxState.lastIndexedAttrCount;
     }
-    DP_PHASE(SB_DP_ATTRENUM);
-    if (nFields > 0) {
-      // The scan is per-vertex, per-indexed-attribute and runs on EVERY draw, so it is the obvious
-      // suspect for draw_prim's 45% share of render time — but "obvious suspect" is not a
-      // measurement, and the last two attributions in this arc were both wrong. It is now timed by
-      // the SB_DP_IDXSCAN phase probe rather than by a clock_gettime pair straddling this loop:
-      // that pair cost ~40 ns of the ~340 ns body and was charged to draw_prim's own total, so the
-      // old "scan = 14%" reading was in part the probe measuring itself.
-      u32 maxIdx[GX_VA_TEX7 + 1] = {};
-      for (u32 v = 0; v < vtxCount; ++v) {
-        const u8* vp = data + pos + v * vtxSize;
-        for (int f = 0; f < nFields; ++f) {
-          const auto& fl = fields[f];
-          for (u8 k = 0; k < fl.n; ++k) {
-            const u32 idx = fl.wide == 2 ? read_u16(vp + fl.off + k * 2, true) : vp[fl.off + k];
-            if (idx > maxIdx[fl.attr])
-              maxIdx[fl.attr] = idx;
-          }
+    for (u8 i = 0; i < g_gxState.lastIndexedAttrCount; ++i) {
+      const auto& field = g_gxState.lastIndexedAttrs[i];
+      const auto& array = g_gxState.arrays[field.attr];
+      if (array.size == 0 && array.data != nullptr) {
+        fields[nFields++] = field;
+        if (workStats) {
+          indexBytesPerVertex += field.width;
         }
       }
-      for (int f = 0; f < nFields; ++f) {
+    }
+    if (nFields > 0) {
+      if (workStats) {
+        ++g_autoScanDraws;
+        g_autoScanVertices += vtxCount;
+        g_autoScanFieldVisits += static_cast<uint64_t>(vtxCount) * nFields;
+        g_autoScanIndexBytes += static_cast<uint64_t>(vtxCount) * indexBytesPerVertex;
+      }
+      u32 maxIdx[GX_VA_TEX7 + 1] = {};
+      scan_auto_array_max_indices(fields, nFields, data + pos, vtxCount, vtxSize, maxIdx);
+      for (u8 f = 0; f < nFields; ++f) {
         auto& arr = g_gxState.arrays[fields[f].attr];
         const u32 need = (maxIdx[fields[f].attr] + 1) * arr.stride;
         if (need > arr.sizeAuto)
@@ -3423,7 +3273,6 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
           g_gxState.stateDirty = true;
         }
       }
-      DP_PHASE(SB_DP_IDXSCAN);
     }
   }
 
@@ -3510,8 +3359,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       if ((++n % 100) == 1)
         std::fprintf(stderr, "[skip-covering] dropped %ld covering draws\n", n);
       pos += totalVtxBytes;
-      if (dpProf) {
-        ++g_dpEarlyReturns; // no phase claims this exit; it shows up as unattributed
+      if (workStats) {
+        ++g_dpEarlyReturns;
       }
       return;
     }
@@ -3530,12 +3379,9 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
   auto* lastDraw = (!g_gxState.stateDirty && s_noMerge == 0) ? gfx::get_last_draw_command<DrawData>() : nullptr;
   const bool canMerge = lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
                         lastDraw->instanceCount == 1;
-  DP_PHASE(SB_DP_DIAG_POST);
-
   // Push raw vertex data to buffer. Merged draws must remain byte-contiguous with the previous range.
   gfx::Range vertRange = gfx::push_verts(data + pos, totalVtxBytes, canMerge ? 0 : 4);
   pos += totalVtxBytes;
-  DP_PHASE(SB_DP_PUSHVERTS);
 
   // Try to merge with previous draw call
   if (canMerge) {
@@ -3569,27 +3415,17 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
     lastDraw->vtxCount += vtxCount;
     lastDraw->indexCount += numIndices;
     ++gfx::g_mergedDrawCallCount;
-    DP_PHASE(SB_DP_MERGEIDX);
-    if (dpProf) {
+    if (workStats) {
       ++g_dpMergedCalls;
     }
     return;
   }
 
-  const uint64_t dpUnmT0 = dpProf ? dpTick : 0;
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange);
-  DP_PHASE(SB_DP_UNMERGED);
-  if (dpProf) {
+  if (workStats) {
     ++g_dpUnmergedCalls;
-    const uint64_t d = dpTick - dpUnmT0;
-    if (g_dpUnmergedSampleCount < (long)(sizeof(g_dpUnmergedSamples) / sizeof(g_dpUnmergedSamples[0]))) {
-      g_dpUnmergedSamples[g_dpUnmergedSampleCount++] = (uint32_t)(d > 0xFFFFFFFFull ? 0xFFFFFFFFull : d);
-    } else {
-      ++g_dpUnmergedSampleDropped; // reported, so a truncated distribution never reads as complete
-    }
   }
 }
-#undef DP_PHASE
 
 static void handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian) {
   GXVtxFmt fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
@@ -3844,17 +3680,11 @@ const char* sb_last_draw_desc() {
   return all;
 }
 
-uint64_t g_dpDescTicks = 0;
-
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices) {
-  const bool dpProf = sb_drawprim_profile();
-  const uint64_t dpDesc0 = dpProf ? sb_tsc() : 0;
+  const bool workStats = sb_draw_stats();
   sb_record_draw_desc((unsigned)prim, (int)fmt, (unsigned)vtxCount, (unsigned)numIndices, (unsigned)vertRange.size,
                       g_sbLastMarker, (long)g_sbPushedDrawCount);
-  if (dpProf) {
-    g_dpDescTicks += sb_tsc() - dpDesc0;
-  }
   // GX_CULL_ALL culls both faces: the draw produces no fragments at all. WebGPU has no
   // equivalent rasterizer state, so it cannot be expressed in the pipeline — drop the draw
   // here instead, which is what the hardware does with it.
@@ -4548,8 +4378,6 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
   }
   // Build pipeline, bind groups, and push draw command
-  static const bool s_profArr = std::getenv("SB_PROFILE_GFX") != nullptr;
-  auto _pArr = s_profArr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   BindGroupRanges ranges{};
   static int s_arrDbg = -1;
   if (s_arrDbg < 0) {
@@ -4573,7 +4401,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     bool cached = s_noArrCache == 0 && array.cachedRange.size > 0;
     if (cached) {
       ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
-      if (sb_drawprim_profile()) {
+      if (workStats) {
         ++g_arrCachedHits;
       }
     } else {
@@ -4589,7 +4417,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       gfx::Range range;
       if (hit != nullptr) {
         range = *hit;
-        if (sb_drawprim_profile()) {
+        if (workStats) {
           ++g_arrDataCacheHits;
         }
       } else {
@@ -4606,10 +4434,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         if (range.size == 0) {
           // Arena full — fall back to the per-frame path rather than binding a bogus range.
           range = gfx::push_storage(static_cast<const uint8_t*>(array.data), effSize);
-          if (sb_drawprim_profile()) {
+          if (workStats) {
             ++g_arrArenaFull;
           }
-        } else if (sb_drawprim_profile()) {
+        } else if (workStats) {
           if (uploaded) {
             ++g_arrPersistUploads;
             g_arrPersistUploadBytes += effSize;
@@ -4622,11 +4450,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       }
       ranges.vaRanges[i - GX_VA_POS] = range;
       array.cachedRange = range;
-      // SB_PROFILE_DRAWPRIM=1: volume, not just call count. SB_PROFILE_GFX says arrayUpload is
-      // the single largest per-draw item, and the only way to tell "uploads a lot of distinct
-      // data" from "uploads the SAME array repeatedly" is to measure both totals and compare.
-      // A call count alone cannot distinguish them, and the fix differs completely.
-      if (sb_drawprim_profile() && hit == nullptr) {
+      // Count volume as well as calls: that distinguishes many distinct arrays from redundant
+      // uploads of the same bytes without relying on host elapsed time.
+      if (workStats && hit == nullptr) {
         ++g_arrUploadCount;
         g_arrUploadBytes += effSize;
         const uint64_t key = (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(array.data)) << 8) ^ effSize;
@@ -4692,22 +4518,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
   }
 
-  // SB_PROFILE_GFX perf breakdown of the per-draw GPU-command build (sb_gx_prof_add defined above).
-  static const bool s_prof = std::getenv("SB_PROFILE_GFX") != nullptr;
-  auto _pt = [] { return std::chrono::steady_clock::now(); };
-  auto _pa = s_prof ? _pt() : std::chrono::steady_clock::time_point{};
-
-  if (s_profArr)
-    sb_gx_prof_add(5, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - _pArr).count());
-
   PipelineConfig config{};
   populate_pipeline_config(config, prim, fmt);
   const auto info = build_shader_info(config.shaderConfig);
-  if (s_prof) {
-    auto n = _pt();
-    sb_gx_prof_add(0, std::chrono::duration<double, std::micro>(n - _pa).count());
-    _pa = n;
-  }
   // SB_SKIP_HASH=<hex>: drop every draw whose shader-config hash matches (the same
   // hash SB_SHADER_HASH prints). The only way to isolate a specific draw on the raw
   // .dff replay path, where game-side markers are absent (mark=''). Multiple hashes
@@ -4754,14 +4567,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
   }
   g_sbDrawSamplesCopy = false;
-  if (s_prof)
-    _pa = _pt();
   resolve_sampled_textures(info);
-  if (s_prof) {
-    auto n = _pt();
-    sb_gx_prof_add(6, std::chrono::duration<double, std::micro>(n - _pa).count());
-    _pa = n;
-  }
   // SB_SKIP_COPY_QUAD=1 (diagnostic): drop draws that sample an EFB-copy
   // texture (the screen-texture repaint quads) — separates "scene hidden
   // under the quad overdraw" from "scene never rendered".
@@ -4984,20 +4790,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       }
     }
   }
-  if (s_prof)
-    _pa = _pt();
   const auto bindGroups = build_bind_groups(info);
-  if (s_prof) {
-    auto n = _pt();
-    sb_gx_prof_add(1, std::chrono::duration<double, std::micro>(n - _pa).count());
-    _pa = n;
-  }
   const auto pipeline = gfx::pipeline_ref(config);
-  if (s_prof) {
-    auto n = _pt();
-    sb_gx_prof_add(2, std::chrono::duration<double, std::micro>(n - _pa).count());
-    _pa = n;
-  }
 
   uint32_t instanceCount = 1;
   if (prim == GX_LINES) {
@@ -5007,8 +4801,6 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   } else if (prim == GX_POINTS) {
     instanceCount = vtxCount;
   }
-  if (s_prof)
-    _pa = _pt();
   // Where POS lives inside this draw's vertex record. Computed here because the descriptor state
   // that determines it is current NOW and gone by the time the recorded frame is interpolated.
   u16 posOffset = 0;
@@ -5035,11 +4827,6 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     indexedPosSample = gfx::indexed_interp::capture(g_pendingDrawTag, static_cast<const uint8_t*>(posArray.data),
                                                     posBytes, static_cast<uint16_t>(posArray.stride), g_pendingDrawPop);
     ASSERT(indexedPosSample != 0, "failed to capture marked indexed position array");
-  }
-  if (s_prof) {
-    auto n = _pt();
-    sb_gx_prof_add(3, std::chrono::duration<double, std::micro>(n - _pa).count());
-    _pa = n;
   }
   gfx::push_draw_command(DrawData{
       .pipeline = pipeline,
@@ -5095,10 +4882,6 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
         ++g_untaggedPerspDirectCount;
       }
     }
-  }
-  if (s_prof) {
-    auto n = _pt();
-    sb_gx_prof_add(4, std::chrono::duration<double, std::micro>(n - _pa).count());
   }
 }
 

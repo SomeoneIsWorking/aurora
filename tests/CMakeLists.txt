@@ -58,6 +58,7 @@ if (AURORA_ENABLE_GX)
     gtest
     gtest_main
     fmt::fmt
+    lucent::lucent
     xxhash
     absl::flat_hash_map
     absl::btree
@@ -89,6 +90,10 @@ if (AURORA_ENABLE_GX)
   add_executable(gx_prim_index_tests gx_prim_index_test.cpp)
   target_link_libraries(gx_prim_index_tests PRIVATE gtest gtest_main)
   gtest_discover_tests(gx_prim_index_tests)
+
+  add_executable(gx_auto_array_sizing_tests gx_auto_array_sizing_test.cpp)
+  target_link_libraries(gx_auto_array_sizing_tests PRIVATE gtest gtest_main)
+  gtest_discover_tests(gx_auto_array_sizing_tests)
 endif () # AURORA_ENABLE_GX
 
 # DVD API tests
