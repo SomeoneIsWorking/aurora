@@ -74,7 +74,6 @@ uint32_t end_display_list() {
 
 bool in_display_list() { return detail::sInDisplayList; }
 
-
 // --- Draw-pass idempotence probe (SB_DOUBLE_DRAW in MarDirectorDirect.cpp) -------------------
 //
 // Game-native 60fps interpolation renders the draw phases twice per logic tick, so those passes
@@ -148,17 +147,20 @@ extern "C" uint64_t sb_gx_fifo_hash(uint32_t from, uint32_t to) {
 }
 
 void drain() {
-  if (detail::sBufferSize == 0) {
-    return;
+  if (detail::sBufferSize != 0) {
+    process(detail::sBufferData, detail::sBufferSize, true);
   }
-  process(detail::sBufferData, detail::sBufferSize, true);
+  // drain() is also the end-of-frame accounting boundary for command streams processed
+  // synchronously through aurora_fifo_replay(). The recomp runtime uses that path, so its live
+  // FIFO is intentionally empty here while the draw counters are not. Returning on an empty live
+  // buffer used to suppress the report and carry replay counters across frames.
   // SB_DRAW_STATS=1: one line per drain (== one presented frame) with the
   // draw/vertex count — the cheap triage between "scene not drawn" (count
   // too low) and "drawn but invisible" (counts present; chase state).
   if (std::getenv("SB_DRAW_STATS") != nullptr) {
     static uint32_t s_frame = 0;
-    std::fprintf(stderr, "[draw-stats] frame=%u bytes=%u draws=%u verts=%u\n",
-                 s_frame++, detail::sBufferSize, detail::sDrainDraws, detail::sDrainVerts);
+    std::fprintf(stderr, "[draw-stats] frame=%u bytes=%u draws=%u verts=%u\n", s_frame++, detail::sBufferSize,
+                 detail::sDrainDraws, detail::sDrainVerts);
     std::fflush(stderr);
   }
   // SB_PROFILE_DRAWPRIM=1: report draw_prim's own share of the drain, broken down by phase.
@@ -178,14 +180,13 @@ void drain() {
       std::fprintf(stderr,
                    "[drawprim] verts/prim: 1-2:%ld 3:%ld 4:%ld 5-6:%ld 7-12:%ld 13-24:%ld "
                    "25-48:%ld 49+:%ld | total verts=%ld mean=%.1f\n",
-                   g_dpVerts[0], g_dpVerts[1], g_dpVerts[2], g_dpVerts[3], g_dpVerts[4],
-                   g_dpVerts[5], g_dpVerts[6], g_dpVerts[7], g_dpVertTotal,
-                   (double)g_dpVertTotal / (double)g_dpCalls);
+                   g_dpVerts[0], g_dpVerts[1], g_dpVerts[2], g_dpVerts[3], g_dpVerts[4], g_dpVerts[5], g_dpVerts[6],
+                   g_dpVerts[7], g_dpVertTotal, (double)g_dpVertTotal / (double)g_dpCalls);
 
       // Phase breakdown. The phases partition the body, so anything they do not claim is a region
       // with no probe on some path — printed as `unattributed` rather than folded into a neighbour.
-      static const char* kPhaseName[8] = {"prologue",   "diag-pre",  "attr-enum", "idx-scan",
-                                          "diag-post",  "push-verts", "merge-idx", "unmerged"};
+      static const char* kPhaseName[8] = {"prologue",  "diag-pre",   "attr-enum", "idx-scan",
+                                          "diag-post", "push-verts", "merge-idx", "unmerged"};
       const double nsPerTick = sb_dp_ns_per_tick_pub();
       uint64_t sum = 0;
       for (int i = 0; i < 8; ++i) {
@@ -199,13 +200,12 @@ void drain() {
         // average, and averaging over all calls hides exactly the expensive-but-rare case.
         const long n = g_dpPhaseCalls[i];
         std::fprintf(stderr, "[drawprim]   %-10s %7.3fms  %5.1f%%  %8.1f ns/call  n=%ld (%.0f%% of calls)\n",
-                     kPhaseName[i], ns / 1e6, wholeNs > 0 ? 100.0 * ns / wholeNs : 0.0,
-                     n > 0 ? ns / (double)n : 0.0, n,
+                     kPhaseName[i], ns / 1e6, wholeNs > 0 ? 100.0 * ns / wholeNs : 0.0, n > 0 ? ns / (double)n : 0.0, n,
                      g_dpCalls > 0 ? 100.0 * (double)n / (double)g_dpCalls : 0.0);
       }
       const double unattrNs = wholeNs - (double)sum * nsPerTick;
-      std::fprintf(stderr, "[drawprim]   %-10s %7.3fms  %5.1f%%   <- CONTROL: regions no phase claimed\n",
-                   "unattr", unattrNs / 1e6, wholeNs > 0 ? 100.0 * unattrNs / wholeNs : 0.0);
+      std::fprintf(stderr, "[drawprim]   %-10s %7.3fms  %5.1f%%   <- CONTROL: regions no phase claimed\n", "unattr",
+                   unattrNs / 1e6, wholeNs > 0 ? 100.0 * unattrNs / wholeNs : 0.0);
 
       // CONTROL: what the probes themselves cost. A phase split whose probe overhead is comparable
       // to the phases is measuring itself, exactly as the clock_gettime version did. Say so rather
@@ -213,8 +213,7 @@ void drain() {
       const double probeNs = (double)sb_dp_probe_cost_ticks_pub() * nsPerTick;
       const double probeTotalNs = probeNs * (double)sb_dp_probes_per_call_pub() * (double)g_dpCalls;
       const double probePct = wholeNs > 0 ? 100.0 * probeTotalNs / wholeNs : 0.0;
-      std::fprintf(stderr,
-                   "[drawprim]   probe cost %.1f ns x %d probes/call = %.1f%% of the measured body%s\n",
+      std::fprintf(stderr, "[drawprim]   probe cost %.1f ns x %d probes/call = %.1f%% of the measured body%s\n",
                    probeNs, sb_dp_probes_per_call_pub(), probePct,
                    probePct > 25.0 ? "  <- TOO HIGH: phase split is NOT admissible" : "");
       std::fprintf(stderr, "[drawprim]   paths: merged=%ld unmerged=%ld early-return=%ld (sum must equal calls=%ld)\n",
@@ -229,10 +228,8 @@ void drain() {
           long i = (long)(p * (double)(g_dpUnmergedSampleCount - 1));
           return (double)g_dpUnmergedSamples[i] * nsPerTick;
         };
-        std::fprintf(stderr,
-                     "[drawprim]   unmerged ns: p50=%.0f p90=%.0f p99=%.0f max=%.0f  (n=%ld%s)\n",
-                     pct(0.50), pct(0.90), pct(0.99),
-                     (double)g_dpUnmergedSamples[g_dpUnmergedSampleCount - 1] * nsPerTick,
+        std::fprintf(stderr, "[drawprim]   unmerged ns: p50=%.0f p90=%.0f p99=%.0f max=%.0f  (n=%ld%s)\n", pct(0.50),
+                     pct(0.90), pct(0.99), (double)g_dpUnmergedSamples[g_dpUnmergedSampleCount - 1] * nsPerTick,
                      g_dpUnmergedSampleCount,
                      g_dpUnmergedSampleDropped > 0 ? " TRUNCATED - distribution incomplete" : "");
       }
@@ -242,8 +239,7 @@ void drain() {
         extern uint64_t g_dpDescTicks;
         const double ns = (double)g_dpDescTicks * nsPerTick;
         std::fprintf(stderr, "[drawprim]   of which draw-desc snprintf: %.3fms  %.1f%% of unmerged  %.0f ns/draw\n",
-                     ns / 1e6,
-                     g_dpPhase[7] > 0 ? 100.0 * ns / ((double)g_dpPhase[7] * nsPerTick) : 0.0,
+                     ns / 1e6, g_dpPhase[7] > 0 ? 100.0 * ns / ((double)g_dpPhase[7] * nsPerTick) : 0.0,
                      g_dpUnmergedCalls > 0 ? ns / (double)g_dpUnmergedCalls : 0.0);
         g_dpDescTicks = 0;
       }
@@ -259,8 +255,7 @@ void drain() {
                      "redundancy=%.1fx  cache-hits=%llu\n",
                      (unsigned long long)g_arrUploadCount, (double)g_arrUploadBytes / 1048576.0,
                      g_arrUploadDistinct.size(), (double)g_arrUploadDistinctBytes / 1048576.0,
-                     g_arrUploadDistinctBytes > 0
-                         ? (double)g_arrUploadBytes / (double)g_arrUploadDistinctBytes : 0.0,
+                     g_arrUploadDistinctBytes > 0 ? (double)g_arrUploadBytes / (double)g_arrUploadDistinctBytes : 0.0,
                      (unsigned long long)g_arrCachedHits);
         std::fprintf(stderr, "[drawprim]   arrays: data-keyed cache hits (uploads avoided)=%llu\n",
                      (unsigned long long)g_arrDataCacheHits);
@@ -277,38 +272,31 @@ void drain() {
                        "full-fallbacks=%llu  arena used=%.2f MB in %zu entries\n",
                        (unsigned long long)g_arrPersistHits, (double)g_arrPersistHitBytes / 1048576.0,
                        (unsigned long long)g_arrPersistUploads, (double)g_arrPersistUploadBytes / 1048576.0,
-                       (unsigned long long)g_arrArenaFull,
-                       (double)sb_arena_used() / 1048576.0,
-                       sb_arena_entries());
+                       (unsigned long long)g_arrArenaFull, (double)sb_arena_used() / 1048576.0, sb_arena_entries());
           g_arrPersistUploads = g_arrPersistHits = g_arrArenaFull = 0;
           g_arrPersistUploadBytes = g_arrPersistHitBytes = 0;
         }
         // The precondition for caching uploads by DATA identity rather than by slot registration.
-        std::fprintf(stderr,
-                     "[drawprim]   arrays: in-frame content changes under an unchanged (ptr,size): %llu%s\n",
+        std::fprintf(stderr, "[drawprim]   arrays: in-frame content changes under an unchanged (ptr,size): %llu%s\n",
                      (unsigned long long)g_arrContentChanged,
-                     g_arrContentChanged == 0
-                         ? "  <- a data-keyed upload cache is SAFE"
-                         : "  <- a data-keyed upload cache would serve STALE data");
+                     g_arrContentChanged == 0 ? "  <- a data-keyed upload cache is SAFE"
+                                              : "  <- a data-keyed upload cache would serve STALE data");
         // Ceiling on what a persistent (cross-frame) geometry buffer could remove.
         {
           extern std::unordered_map<uint64_t, uint64_t> g_arrHashPrevFrame;
           extern uint64_t g_arrSameAsPrevBytes, g_arrChangedVsPrevBytes, g_arrNewVsPrevBytes;
           const double tot = (double)(g_arrSameAsPrevBytes + g_arrChangedVsPrevBytes + g_arrNewVsPrevBytes);
-          std::fprintf(stderr,
-                       "[drawprim]   arrays vs PREVIOUS frame: unchanged=%.2f MB (%.0f%%)  changed=%.2f MB  new=%.2f MB\n",
-                       (double)g_arrSameAsPrevBytes / 1048576.0,
-                       tot > 0 ? 100.0 * (double)g_arrSameAsPrevBytes / tot : 0.0,
-                       (double)g_arrChangedVsPrevBytes / 1048576.0,
-                       (double)g_arrNewVsPrevBytes / 1048576.0);
+          std::fprintf(
+              stderr,
+              "[drawprim]   arrays vs PREVIOUS frame: unchanged=%.2f MB (%.0f%%)  changed=%.2f MB  new=%.2f MB\n",
+              (double)g_arrSameAsPrevBytes / 1048576.0, tot > 0 ? 100.0 * (double)g_arrSameAsPrevBytes / tot : 0.0,
+              (double)g_arrChangedVsPrevBytes / 1048576.0, (double)g_arrNewVsPrevBytes / 1048576.0);
           extern std::unordered_map<uint64_t, uint32_t> g_arrOffsetPrevFrame, g_arrOffsetThisFrame;
           extern uint64_t g_arrOffsetStable, g_arrOffsetMoved;
-          std::fprintf(stderr,
-                       "[drawprim]   arrays: storage offset vs prev frame: stable=%llu moved=%llu%s\n",
+          std::fprintf(stderr, "[drawprim]   arrays: storage offset vs prev frame: stable=%llu moved=%llu%s\n",
                        (unsigned long long)g_arrOffsetStable, (unsigned long long)g_arrOffsetMoved,
-                       g_arrOffsetMoved == 0
-                           ? "  <- deterministic; the GPU buffer already holds these bytes"
-                           : "  <- offsets move; skipping the copy needs a persistent allocator");
+                       g_arrOffsetMoved == 0 ? "  <- deterministic; the GPU buffer already holds these bytes"
+                                             : "  <- offsets move; skipping the copy needs a persistent allocator");
           g_arrOffsetPrevFrame = g_arrOffsetThisFrame;
           g_arrOffsetThisFrame.clear();
           g_arrOffsetStable = g_arrOffsetMoved = 0;
@@ -328,8 +316,14 @@ void drain() {
       g_dpVertTotal = 0;
       g_dpWholeTicks = 0;
       g_dpMergedCalls = g_dpUnmergedCalls = g_dpEarlyReturns = 0;
-      for (int i = 0; i < 8; ++i) { g_dpPhase[i] = 0; g_dpPhaseCalls[i] = 0; }
-      for (int i = 0; i < 8; ++i) { g_dpVerts[i] = 0; g_dpPrimKind[i] = 0; }
+      for (int i = 0; i < 8; ++i) {
+        g_dpPhase[i] = 0;
+        g_dpPhaseCalls[i] = 0;
+      }
+      for (int i = 0; i < 8; ++i) {
+        g_dpVerts[i] = 0;
+        g_dpPrimKind[i] = 0;
+      }
     }
   }
   // The staging-overflow fatal in gfx/common.hpp names the runaway draw by calling
@@ -343,8 +337,7 @@ void drain() {
       // Same namespace (aurora::gx::fifo) and the same function the fatal reaches through
       // aurora_gfx_last_draw_desc().
       extern const char* sb_last_draw_desc();
-      lucent::debug(chDrawDesc, "last draws (as the overflow fatal would print them):{}",
-                    sb_last_draw_desc());
+      lucent::debug(chDrawDesc, "last draws (as the overflow fatal would print them):{}", sb_last_draw_desc());
     }
   }
   detail::sDrainDraws = 0;
