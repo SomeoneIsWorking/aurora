@@ -60,6 +60,18 @@ TEST(RenderWorkerQueue, PushBlocksWhenFull) {
   EXPECT_TRUE(pushed.load(std::memory_order_acquire));
 }
 
+TEST(RenderWorkerQueue, PushTimesOutWhenFull) {
+  BoundedQueue queue{1, 20ms};
+  ASSERT_TRUE(queue.push(QueueItem{.type = ItemType::BeginFrame}));
+
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_FALSE(queue.push(QueueItem{.type = ItemType::EncodePass}));
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+
+  EXPECT_GE(elapsed, 15ms);
+  EXPECT_LT(elapsed, 1s);
+}
+
 TEST_F(RenderWorkerTest, SyncWaitsForPriorWork) {
   std::vector<int> order;
   aurora::gfx::render_worker::initialize();
@@ -103,5 +115,13 @@ TEST(RenderWorkerFrameSlots, RecyclesReleasedSlots) {
   future.wait();
   slots.release(second);
   EXPECT_EQ(slots.free_count(), 1u);
+}
+
+TEST(RenderWorkerFrameSlots, AcquireTimesOutFatally) {
+  FrameSlotPool slots{1, 20ms};
+  static_cast<void>(slots.acquire());
+
+  EXPECT_DEATH(static_cast<void>(slots.acquire()),
+               "Timed out after 20ms waiting to acquire a render-worker frame slot");
 }
 } // namespace

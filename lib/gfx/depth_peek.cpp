@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <string>
 
@@ -20,7 +21,6 @@ namespace {
 Module Log("aurora::gfx::depth_peek");
 
 using webgpu::g_device;
-using webgpu::g_instance;
 using webgpu::g_queue;
 
 using Clock = std::chrono::steady_clock;
@@ -30,6 +30,7 @@ constexpr uint32_t WorkgroupSizeX = 8;
 constexpr uint32_t WorkgroupSizeY = 8;
 constexpr uint32_t DepthPeekSnapshotHz = 30;
 constexpr auto SnapshotInterval = std::chrono::nanoseconds{1'000'000'000 / DepthPeekSnapshotHz};
+constexpr auto ShutdownTimeout = std::chrono::seconds{5};
 
 struct Params {
   uint32_t dstWidth = 0;
@@ -62,11 +63,13 @@ struct Slot {
   uint32_t width = 0;
   uint32_t height = 0;
   uint64_t byteSize = 0;
+  uint64_t lifecycleGeneration = 0;
   SlotState state = SlotState::Available;
 };
 
 struct PendingMap {
   size_t slotIdx = 0;
+  uint64_t lifecycleGeneration = 0;
   wgpu::Buffer readbackBuffer;
   uint64_t byteSize = 0;
 };
@@ -80,6 +83,9 @@ bool g_snapshotRequested = false;
 Clock::time_point g_nextSnapshotTime;
 LatestSnapshot g_latest;
 std::mutex g_mutex;
+std::condition_variable g_callbacksSettled;
+uint64_t g_lifecycleGeneration = 0;
+size_t g_pendingCallbacks = 0;
 
 constexpr std::string_view ShaderPreamble = R"(
 struct Params {
@@ -285,9 +291,17 @@ Slot* find_available_slot(uint32_t width, uint32_t height) {
   return nullptr;
 }
 
-void complete_slot(size_t slotIdx, wgpu::MapAsyncStatus status, wgpu::StringView message) {
+void complete_slot(size_t slotIdx, uint64_t lifecycleGeneration, wgpu::MapAsyncStatus status,
+                   wgpu::StringView message) {
   std::lock_guard lock{g_mutex};
+  ASSERT(g_pendingCallbacks != 0, "Depth Peek received an untracked MapAsync callback");
+  ASSERT(lifecycleGeneration == g_lifecycleGeneration,
+         "Depth Peek MapAsync callback crossed a lifecycle boundary (callback {}, current {})", lifecycleGeneration,
+         g_lifecycleGeneration);
   auto& slot = g_slots[slotIdx];
+  ASSERT(slot.state == SlotState::MapPending && slot.lifecycleGeneration == lifecycleGeneration,
+         "Depth Peek MapAsync callback does not own slot {} (state {}, callback generation {}, slot generation {})",
+         slotIdx, magic_enum::enum_name(slot.state), lifecycleGeneration, slot.lifecycleGeneration);
   if (status == wgpu::MapAsyncStatus::Success) {
     const auto valueCount = static_cast<size_t>(slot.width) * static_cast<size_t>(slot.height);
     const auto* mapped =
@@ -302,6 +316,10 @@ void complete_slot(size_t slotIdx, wgpu::MapAsyncStatus status, wgpu::StringView
     Log.warn("Depth Peek readback mapping failed {}: {}", magic_enum::enum_name(status), message);
   }
   slot.state = SlotState::Available;
+  --g_pendingCallbacks;
+  if (g_pendingCallbacks == 0) {
+    g_callbacksSettled.notify_all();
+  }
 }
 } // namespace
 
@@ -309,25 +327,44 @@ void initialize() {
   if (!webgpu::g_hasCoreFeatures) {
     return;
   }
-  g_bindGroupLayout = create_bind_group_layout("Depth Peek Bind Group Layout");
-  g_pipeline = create_pipeline(g_bindGroupLayout, "Depth Peek Pipeline");
+  const auto bindGroupLayout = create_bind_group_layout("Depth Peek Bind Group Layout");
+  const auto pipeline = create_pipeline(bindGroupLayout, "Depth Peek Pipeline");
+
+  std::lock_guard lock{g_mutex};
+  ASSERT(!g_enabled, "Depth Peek initialized twice without shutdown");
+  ASSERT(g_pendingCallbacks == 0, "Depth Peek initialized with {} pending MapAsync callbacks", g_pendingCallbacks);
+  ++g_lifecycleGeneration;
+  g_bindGroupLayout = bindGroupLayout;
+  g_pipeline = pipeline;
   g_enabled = true;
 }
 
 void shutdown() {
-  testing::reset();
+  std::unique_lock lock{g_mutex};
+  g_enabled = false;
+  g_snapshotRequested = false;
+
+  if (!g_callbacksSettled.wait_for(lock, ShutdownTimeout, [] { return g_pendingCallbacks == 0; })) {
+    FATAL("Timed out after {}s waiting for {} Depth Peek MapAsync callbacks during shutdown", ShutdownTimeout.count(),
+          g_pendingCallbacks);
+  }
+
   g_pipeline = {};
   g_bindGroupLayout = {};
   for (auto& slot : g_slots) {
     slot = {};
   }
+  g_nextSlot = 0;
+  g_nextSnapshotTime = {};
+  g_latest = {};
+  ++g_lifecycleGeneration;
 }
 
 void request_snapshot() noexcept {
+  std::lock_guard lock{g_mutex};
   if (!g_enabled) {
     return;
   }
-  std::lock_guard lock{g_mutex};
   g_snapshotRequested = true;
 }
 
@@ -342,15 +379,11 @@ bool read_latest(uint16_t x, uint16_t y, uint32_t& z) noexcept {
 
 void encode_frame_snapshot(const wgpu::CommandEncoder& cmd, const wgpu::TextureView& depthView,
                            wgpu::Extent3D sourceSize, uint32_t msaaSamples) noexcept {
-  if (!g_enabled) {
-    return;
-  }
-
   ZoneScoped;
   const auto now = Clock::now();
   {
     std::lock_guard lock{g_mutex};
-    if (!g_snapshotRequested || now < g_nextSnapshotTime) {
+    if (!g_enabled || !g_snapshotRequested || now < g_nextSnapshotTime) {
       return;
     }
     g_snapshotRequested = false;
@@ -425,21 +458,23 @@ void encode_frame_snapshot(const wgpu::CommandEncoder& cmd, const wgpu::TextureV
 }
 
 void after_submit() noexcept {
-  if (!g_enabled) {
-    return;
-  }
-
   std::vector<PendingMap> pendingMaps;
   {
     std::lock_guard lock{g_mutex};
+    if (!g_enabled) {
+      return;
+    }
     for (size_t i = 0; i < g_slots.size(); ++i) {
       auto& slot = g_slots[i];
       if (slot.state != SlotState::CopySubmitted) {
         continue;
       }
       slot.state = SlotState::MapPending;
+      slot.lifecycleGeneration = g_lifecycleGeneration;
+      ++g_pendingCallbacks;
       pendingMaps.push_back({
           .slotIdx = i,
+          .lifecycleGeneration = g_lifecycleGeneration,
           .readbackBuffer = slot.readbackBuffer,
           .byteSize = slot.byteSize,
       });
@@ -447,17 +482,18 @@ void after_submit() noexcept {
   }
 
   for (const auto& pending : pendingMaps) {
-    pending.readbackBuffer.MapAsync(
-        wgpu::MapMode::Read, 0, pending.byteSize, wgpu::CallbackMode::AllowSpontaneous,
-        [slotIdx = pending.slotIdx](wgpu::MapAsyncStatus status, wgpu::StringView message) {
-          complete_slot(slotIdx, status, message);
-        });
+    pending.readbackBuffer.MapAsync(wgpu::MapMode::Read, 0, pending.byteSize, wgpu::CallbackMode::AllowSpontaneous,
+                                    [slotIdx = pending.slotIdx, lifecycleGeneration = pending.lifecycleGeneration](
+                                        wgpu::MapAsyncStatus status, wgpu::StringView message) {
+                                      complete_slot(slotIdx, lifecycleGeneration, status, message);
+                                    });
   }
 }
 
 namespace testing {
 void reset() noexcept {
   std::lock_guard lock{g_mutex};
+  ASSERT(g_pendingCallbacks == 0, "Cannot reset Depth Peek with {} pending MapAsync callbacks", g_pendingCallbacks);
   g_snapshotRequested = false;
   g_nextSlot = 0;
   g_nextSnapshotTime = {};

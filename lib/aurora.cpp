@@ -26,6 +26,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -56,6 +57,7 @@ Module Log("aurora");
 // On-screen picture aspect (see aurora_set_present_aspect). 4:3 = the GameCube TV picture.
 static uint32_t g_presentAspectW = 640;
 static uint32_t g_presentAspectH = 480;
+static std::atomic_bool g_presentationEnabled = true;
 
 void set_present_aspect(uint32_t width, uint32_t height) {
   if (width == 0 || height == 0) {
@@ -64,6 +66,21 @@ void set_present_aspect(uint32_t width, uint32_t height) {
   }
   g_presentAspectW = width;
   g_presentAspectH = height;
+}
+
+bool presentation_enabled_impl() noexcept { return g_presentationEnabled.load(std::memory_order_acquire); }
+
+void set_presentation_enabled_impl(bool enabled) noexcept {
+  if (g_presentationEnabled.exchange(enabled, std::memory_order_acq_rel) == enabled) {
+    return;
+  }
+#ifdef AURORA_ENABLE_GX
+  gfx::render_worker::synchronize();
+  if (!enabled) {
+    webgpu::release_surface();
+  }
+#endif
+  Log.info("operating-system presentation {}", enabled ? "enabled" : "disabled; rendering offscreen as oracle");
 }
 
 // ---- SB_RDOC: RenderDoc in-application capture trigger ----------------------
@@ -184,6 +201,7 @@ constexpr std::array<AuroraBackend, 0> PreferredBackendOrder{};
 bool g_initialFrame = false;
 
 AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexcept {
+  g_presentationEnabled.store(true, std::memory_order_release);
   g_config = config;
   Log.info("Aurora initializing");
   log_system_information();
@@ -325,11 +343,12 @@ const AuroraEvent* update() noexcept {
 bool begin_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
-  if (window::is_headless()) {
+  if (window::is_headless() || !presentation_enabled_impl()) {
     // Headless: the surface/swapchain is never touched (see is_headless()) --
     // just gate on pause and fall through to render into the offscreen
     // target. is_presentable()/refresh_surface()/release_surface() all deal
-    // with the WSI surface and must not run here.
+    // with the WSI surface and must not run here. Presentation-disabled hosts keep a real window
+    // for their own swapchain while Aurora remains an offscreen oracle.
     if (window::is_paused()) {
       return false;
     }
@@ -341,9 +360,9 @@ bool begin_frame() noexcept {
     if (window::is_paused()) {
       return false;
     }
-    if (!g_surface) {
+    if (!webgpu::surface_available()) {
       webgpu::refresh_surface(true);
-      if (!g_surface) {
+      if (!webgpu::surface_available()) {
         return false;
       }
     }
@@ -650,10 +669,11 @@ void end_frame_impl(bool replayEmission) noexcept {
       s_dumpAwaitingMap.push_back(std::move(job));
     }
     const bool headless = window::is_headless();
+    const bool presentationEnabled = presentation_enabled_impl();
     wgpu::Texture currentTexture;
     wgpu::TextureView currentView;
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
-    if (!headless) {
+    if (!headless && presentationEnabled) {
       // Headless never acquires a swapchain texture at all -- GetCurrentTexture
       // on a hidden window's surface is what deadlocks in the Vulkan WSI's
       // explicit-sync release wait when the compositor never displays it.
@@ -670,7 +690,7 @@ void end_frame_impl(bool replayEmission) noexcept {
       }
     }
 
-    const bool canPresent = !headless && currentTexture && currentView;
+    const bool canPresent = !headless && presentationEnabled && currentTexture && currentView;
     if (canPresent) {
       wgpu::BindGroup presentBindGroup;
       if (rmlBindGroup && !rmlOverlay) {
@@ -728,7 +748,7 @@ void end_frame_impl(bool replayEmission) noexcept {
         imgui::render(pass, imguiDrawData);
         pass.End();
       }
-    } else if (!headless) {
+    } else if (!headless && presentationEnabled) {
       Log.info("Skipping present; window not presentable");
     }
     webgpu::gpu_prof::frame_end(encoder);
@@ -748,17 +768,19 @@ void end_frame_impl(bool replayEmission) noexcept {
       wgpu::ConvertibleStatus status = wgpu::Status::Error;
       {
         window::SurfaceLock surfaceLock;
-        if (window::is_presentable()) {
-          status = g_surface.Present();
-        }
+        // Acquisition owns a surface texture that must be released through Present before the
+        // surface can be unconfigured. A minimize event can race this callback after acquisition;
+        // rechecking presentability here used to skip Present and unconfigure while the live
+        // texture/view were still referenced by submitted work.
+        status = g_surface.Present();
       }
       if (status) {
         gfx::after_present();
       } else {
-        Log.warn("Surface present failed");
-        webgpu::release_surface();
+        Log.warn("Surface present failed; deferring surface recreation to the next frame boundary");
+        webgpu::invalidate_surface();
       }
-    } else if (g_surface) {
+    } else if (presentationEnabled && webgpu::surface_available()) {
       switch (surfaceStatus) {
       case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
         Log.warn("Surface texture acquisition timed out");
@@ -769,16 +791,16 @@ void end_frame_impl(bool replayEmission) noexcept {
         window::push_custom_event(window::CustomEvent::RefreshSurface);
         break;
       case wgpu::SurfaceGetCurrentTextureStatus::Lost:
-        Log.warn("Surface texture is {}, releasing surface", magic_enum::enum_name(surfaceStatus));
-        webgpu::release_surface();
+        Log.warn("Surface texture is {}; deferring recreation", magic_enum::enum_name(surfaceStatus));
+        webgpu::invalidate_surface();
         break;
       case wgpu::SurfaceGetCurrentTextureStatus::Error:
-        Log.warn("Surface texture is {}, dropping surface", magic_enum::enum_name(surfaceStatus));
-        g_surface = {};
+        Log.warn("Surface texture is {}; deferring recreation", magic_enum::enum_name(surfaceStatus));
+        webgpu::invalidate_surface();
         break;
       default:
         if (!window::is_presentable()) {
-          webgpu::release_surface();
+          webgpu::invalidate_surface();
         } else {
           Log.error("Failed to get surface texture: {}", magic_enum::enum_name(surfaceStatus));
         }
@@ -845,6 +867,10 @@ void end_frame() noexcept {
 #endif
 }
 } // namespace
+
+bool presentation_enabled() noexcept { return presentation_enabled_impl(); }
+
+void set_presentation_enabled(bool enabled) noexcept { set_presentation_enabled_impl(enabled); }
 } // namespace aurora
 
 // C API bindings
@@ -856,6 +882,7 @@ double aurora_display_refresh_rate() { return aurora::window::display_refresh_ra
 const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(); }
 void aurora_end_frame() { aurora::end_frame(); }
+void aurora_set_presentation_enabled(bool enabled) { aurora::set_presentation_enabled(enabled); }
 void aurora_set_present_aspect(uint32_t width, uint32_t height) { aurora::set_present_aspect(width, height); }
 
 void aurora_discard_frame() {

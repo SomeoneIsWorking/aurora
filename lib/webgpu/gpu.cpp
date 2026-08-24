@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -62,14 +64,29 @@ static wgpu::Adapter g_adapter;
 wgpu::Instance g_instance;
 wgpu::AdapterInfo g_adapterInfo;
 static wgpu::SurfaceCapabilities g_surfaceCapabilities;
+static std::atomic_bool g_surfaceAvailable = false;
 bool g_hasCoreFeatures = false;
 bool g_depthClipControlSupported = false;
 bool g_bcTexturesSupported = false;
 bool g_astcTexturesSupported = false;
 bool g_textureComponentSwizzleSupported = false;
-static std::atomic_bool g_initialized = false;
 
 namespace {
+
+enum class DeviceLifecycle : uint8_t {
+  Initializing,
+  InitializationFailed,
+  Running,
+  Destroying,
+  Inactive,
+};
+
+struct DeviceLifecycleState {
+  std::atomic<DeviceLifecycle> lifecycle{DeviceLifecycle::Initializing};
+  std::atomic_bool intentionalDestruction{false};
+};
+
+static std::shared_ptr<DeviceLifecycleState> g_deviceLifecycle;
 
 AuroraLogLevel wgpu_log_level(wgpu::LoggingType type) {
   switch (type) {
@@ -363,8 +380,8 @@ const TextureWithSampler& present_source() noexcept {
   if (g_sbDisplayPresent.view != nullptr && std::getenv("SB_NO_COPYDISP") == nullptr) {
     return g_sbDisplayPresent;
   }
-  if (g_sbPass1Present.view != nullptr && (std::getenv("SB_PRESENT_PASS1") != nullptr ||
-                                           std::getenv("SB_PRESENT_COPY") != nullptr)) {
+  if (g_sbPass1Present.view != nullptr &&
+      (std::getenv("SB_PRESENT_PASS1") != nullptr || std::getenv("SB_PRESENT_COPY") != nullptr)) {
     return g_sbPass1Present;
   }
   return g_graphicsConfig.msaaSamples > 1 ? g_frameBufferResolved : g_frameBuffer;
@@ -782,7 +799,96 @@ static void release_surface_locked() noexcept {
     g_surface.Unconfigure();
   }
   g_surface = {};
+  g_surfaceAvailable.store(false, std::memory_order_release);
 }
+
+static void reset_device_state(bool resetInstance) noexcept {
+  gpu_prof::shutdown();
+  g_CopyBindGroupLayout = {};
+  g_CopyPipeline = {};
+  g_CopyPremultipliedAlphaPipeline = {};
+  g_CopyBindGroup = {};
+  g_ResampleBindGroupLayout = {};
+  g_ResamplePipeline = {};
+  g_ResampleUniformBuffer = {};
+  g_resampledFrameBuffer = {};
+  g_frameBuffer = {};
+  g_frameBufferResolved = {};
+  g_sbPass1Present = {};
+  g_sbDisplayPresent = {};
+  g_depthBuffer = {};
+  {
+    window::SurfaceLock surfaceLock;
+    release_surface_locked();
+  }
+  g_queue = {};
+  g_device = {};
+  g_adapter = {};
+  g_adapterInfo = {};
+  g_surfaceCapabilities = {};
+  g_graphicsConfig = {};
+  g_backendType = wgpu::BackendType::Undefined;
+  g_hasCoreFeatures = false;
+  g_depthClipControlSupported = false;
+  g_bcTexturesSupported = false;
+  g_astcTexturesSupported = false;
+  g_textureComponentSwizzleSupported = false;
+  if (resetInstance) {
+    g_instance = {};
+  }
+}
+
+static void destroy_device_state(const std::shared_ptr<DeviceLifecycleState>& lifecycle, bool resetInstance) noexcept {
+  if (lifecycle) {
+    lifecycle->intentionalDestruction.store(true, std::memory_order_release);
+    lifecycle->lifecycle.store(DeviceLifecycle::Destroying, std::memory_order_release);
+  }
+  reset_device_state(resetInstance);
+  if (lifecycle) {
+    lifecycle->lifecycle.store(DeviceLifecycle::Inactive, std::memory_order_release);
+  }
+}
+
+class InitializationAttempt {
+public:
+  InitializationAttempt() : m_lifecycle(std::make_shared<DeviceLifecycleState>()) {}
+
+  ~InitializationAttempt() {
+    if (!m_committed) {
+      destroy_device_state(m_lifecycle, false);
+    }
+  }
+
+  InitializationAttempt(const InitializationAttempt&) = delete;
+  InitializationAttempt& operator=(const InitializationAttempt&) = delete;
+
+  const std::shared_ptr<DeviceLifecycleState>& lifecycle() const noexcept { return m_lifecycle; }
+
+  bool check() const noexcept {
+    if (g_instance) {
+      g_instance.ProcessEvents();
+    }
+    return m_lifecycle->lifecycle.load(std::memory_order_acquire) == DeviceLifecycle::Initializing;
+  }
+
+  bool commit() noexcept {
+    if (!check()) {
+      return false;
+    }
+    auto expected = DeviceLifecycle::Initializing;
+    if (!m_lifecycle->lifecycle.compare_exchange_strong(expected, DeviceLifecycle::Running,
+                                                        std::memory_order_acq_rel)) {
+      return false;
+    }
+    g_deviceLifecycle = m_lifecycle;
+    m_committed = true;
+    return true;
+  }
+
+private:
+  std::shared_ptr<DeviceLifecycleState> m_lifecycle;
+  bool m_committed = false;
+};
 
 static bool create_surface() {
   SDL_Window* window = window::get_sdl_window();
@@ -806,10 +912,12 @@ static bool create_surface() {
     Log.error("Failed to create surface");
     return false;
   }
+  g_surfaceAvailable.store(true, std::memory_order_release);
   return true;
 }
 
 bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+  InitializationAttempt attempt;
   if (!g_instance) {
     Log.info("Creating WebGPU instance");
     const std::array requiredInstanceFeatures{
@@ -855,41 +963,44 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     Log.info("Requesting adapter\n  Feature level: {}\n  Power preference: {}\n  Backend: {}\n  Compatible surface: {}",
              magic_enum::enum_name(options.featureLevel), magic_enum::enum_name(options.powerPreference),
              magic_enum::enum_name(options.backendType), static_cast<bool>(options.compatibleSurface));
-    bool requestAdapterCallbackCompleted = false;
-    wgpu::RequestAdapterStatus requestAdapterStatus = wgpu::RequestAdapterStatus::CallbackCancelled;
-    std::string requestAdapterMessage;
+    struct AdapterRequestResult {
+      bool callbackCompleted = false;
+      wgpu::RequestAdapterStatus status = wgpu::RequestAdapterStatus::CallbackCancelled;
+      std::string message;
+      wgpu::Adapter adapter;
+    };
+    const auto requestResult = std::make_shared<AdapterRequestResult>();
     const auto future = g_instance.RequestAdapter(
         &options, wgpu::CallbackMode::WaitAnyOnly,
-        [&](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
-          requestAdapterCallbackCompleted = true;
-          requestAdapterStatus = status;
-          requestAdapterMessage = std::string{std::string_view{message}};
+        [requestResult](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
+          requestResult->callbackCompleted = true;
+          requestResult->status = status;
+          requestResult->message = std::string{std::string_view{message}};
           if (status == wgpu::RequestAdapterStatus::Success) {
-            g_adapter = std::move(adapter);
-          } else {
-            Log.warn("Adapter request failed: {}: {}", magic_enum::enum_name(status), message);
+            requestResult->adapter = std::move(adapter);
           }
         });
     const auto status = g_instance.WaitAny(future, 5000000000);
     if (status != wgpu::WaitStatus::Success) {
-      if (requestAdapterCallbackCompleted) {
+      if (requestResult->callbackCompleted) {
         Log.error("Failed to create adapter: wait status {}, request status {}, message: {}",
-                  magic_enum::enum_name(status), magic_enum::enum_name(requestAdapterStatus), requestAdapterMessage);
+                  magic_enum::enum_name(status), magic_enum::enum_name(requestResult->status), requestResult->message);
       } else {
         Log.error("Failed to create adapter: wait status {}, request callback did not complete",
                   magic_enum::enum_name(status));
       }
       return false;
     }
-    if (!g_adapter) {
-      if (requestAdapterCallbackCompleted) {
+    if (!requestResult->adapter) {
+      if (requestResult->callbackCompleted) {
         Log.error("Failed to create adapter: request status {}, message: {}",
-                  magic_enum::enum_name(requestAdapterStatus), requestAdapterMessage);
+                  magic_enum::enum_name(requestResult->status), requestResult->message);
       } else {
         Log.error("Failed to create adapter: request callback did not complete");
       }
       return false;
     }
+    g_adapter = std::move(requestResult->adapter);
   }
   g_adapter.GetInfo(&g_adapterInfo);
   auto adapterName = g_adapterInfo.device;
@@ -953,14 +1064,14 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     g_bcTexturesSupported = false;
     g_astcTexturesSupported = false;
     g_textureComponentSwizzleSupported = false;
+    g_depthClipControlSupported = false;
     wgpu::SupportedFeatures supportedFeatures;
     g_adapter.GetFeatures(&supportedFeatures);
     for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
       const auto feature = supportedFeatures.features[i];
       if (feature == wgpu::FeatureName::CoreFeaturesAndLimits || feature == wgpu::FeatureName::TextureCompressionBC ||
           feature == wgpu::FeatureName::TextureCompressionASTC ||
-          feature == wgpu::FeatureName::TextureComponentSwizzle ||
-          feature == wgpu::FeatureName::DepthClipControl) {
+          feature == wgpu::FeatureName::TextureComponentSwizzle || feature == wgpu::FeatureName::DepthClipControl) {
         if (feature == wgpu::FeatureName::CoreFeaturesAndLimits) {
           g_hasCoreFeatures = true;
         } else if (feature == wgpu::FeatureName::TextureCompressionBC) {
@@ -1035,41 +1146,80 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         .requiredFeatures = requiredFeatures.data(),
         .requiredLimits = &requiredLimits,
     });
+    const auto& lifecycle = attempt.lifecycle();
     deviceDescriptor.SetUncapturedErrorCallback(
-        [](const wgpu::Device& device, wgpu::ErrorType type, wgpu::StringView message) {
-          if (g_initialized) {
+        [](const wgpu::Device& device, wgpu::ErrorType type, wgpu::StringView message,
+           DeviceLifecycleState* lifecycle) {
+          auto expected = DeviceLifecycle::Initializing;
+          if (lifecycle->lifecycle.compare_exchange_strong(expected, DeviceLifecycle::InitializationFailed,
+                                                           std::memory_order_acq_rel)) {
+            Log.error("WebGPU initialization error {}: {}", underlying(type), message);
+          } else if (expected == DeviceLifecycle::Running) {
             FATAL("WebGPU error {}: {}", underlying(type), message);
           } else {
-            Log.warn("WebGPU error {}: {}", underlying(type), message);
+            Log.error("WebGPU error while device lifecycle is {}: {}", underlying(expected), message);
           }
-        });
+        },
+        lifecycle.get());
     deviceDescriptor.SetDeviceLostCallback(
         wgpu::CallbackMode::AllowSpontaneous,
-        [](const wgpu::Device& device, wgpu::DeviceLostReason reason, wgpu::StringView message) {
-          if (g_initialized) {
+        [lifecycle](const wgpu::Device& device, wgpu::DeviceLostReason reason, wgpu::StringView message) {
+          if (lifecycle->intentionalDestruction.load(std::memory_order_acquire) &&
+              reason == wgpu::DeviceLostReason::Destroyed) {
+            return;
+          }
+          auto expected = DeviceLifecycle::Initializing;
+          if (lifecycle->lifecycle.compare_exchange_strong(expected, DeviceLifecycle::InitializationFailed,
+                                                           std::memory_order_acq_rel)) {
+            Log.error("Device lost during WebGPU initialization: {}", message);
+          } else if (expected == DeviceLifecycle::Running) {
             FATAL("Device lost: {}", message);
           } else {
-            Log.warn("Device lost: {}", message);
+            Log.error("Device lost while device lifecycle is {}: {}", underlying(expected), message);
           }
         });
-    const auto future =
-        g_adapter.RequestDevice(&deviceDescriptor, wgpu::CallbackMode::WaitAnyOnly,
-                                [](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
-                                  if (status == wgpu::RequestDeviceStatus::Success) {
-                                    g_device = std::move(device);
-                                  } else {
-                                    Log.warn("Device request failed: {}", message);
-                                  }
-                                });
+    struct DeviceRequestResult {
+      bool callbackCompleted = false;
+      wgpu::RequestDeviceStatus status = wgpu::RequestDeviceStatus::CallbackCancelled;
+      std::string message;
+      wgpu::Device device;
+    };
+    const auto requestResult = std::make_shared<DeviceRequestResult>();
+    const auto future = g_adapter.RequestDevice(
+        &deviceDescriptor, wgpu::CallbackMode::WaitAnyOnly,
+        [requestResult](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
+          requestResult->callbackCompleted = true;
+          requestResult->status = status;
+          requestResult->message = std::string{std::string_view{message}};
+          if (status == wgpu::RequestDeviceStatus::Success) {
+            requestResult->device = std::move(device);
+          }
+        });
     const auto status = g_instance.WaitAny(future, 5000000000);
     if (status != wgpu::WaitStatus::Success) {
-      Log.error("Failed to create device: {}", magic_enum::enum_name(status));
+      if (requestResult->callbackCompleted) {
+        Log.error("Failed to create device: wait status {}, request status {}, message: {}",
+                  magic_enum::enum_name(status), magic_enum::enum_name(requestResult->status), requestResult->message);
+      } else {
+        Log.error("Failed to create device: wait status {}, request callback did not complete",
+                  magic_enum::enum_name(status));
+      }
       return false;
     }
-    if (!g_device) {
+    if (!requestResult->device) {
+      if (requestResult->callbackCompleted) {
+        Log.error("Failed to create device: request status {}, message: {}",
+                  magic_enum::enum_name(requestResult->status), requestResult->message);
+      } else {
+        Log.error("Failed to create device: request callback did not complete");
+      }
       return false;
     }
+    g_device = std::move(requestResult->device);
     g_device.SetLoggingCallback(wgpu_log);
+    if (!attempt.check()) {
+      return false;
+    }
   }
   g_queue = g_device.GetQueue();
 
@@ -1112,30 +1262,13 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   create_resample_pipeline();
   gpu_prof::initialize();
   resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);
-  g_initialized = true;
-  return true;
+  return attempt.commit();
 }
 
 void shutdown() {
-  g_initialized = false;
   gfx::gpu_synchronize();
-  gpu_prof::shutdown();
-  g_CopyBindGroupLayout = {};
-  g_CopyPipeline = {};
-  g_CopyPremultipliedAlphaPipeline = {};
-  g_CopyBindGroup = {};
-  g_ResampleBindGroupLayout = {};
-  g_ResamplePipeline = {};
-  g_ResampleUniformBuffer = {};
-  g_resampledFrameBuffer = {};
-  g_frameBuffer = {};
-  g_frameBufferResolved = {};
-  g_depthBuffer = {};
-  g_queue = {};
-  g_surface = {};
-  g_device = {};
-  g_adapter = {};
-  g_instance = {};
+  destroy_device_state(g_deviceLifecycle, true);
+  g_deviceLifecycle.reset();
   cache_shutdown();
 }
 
@@ -1146,6 +1279,10 @@ void release_surface() noexcept {
     release_surface_locked();
   }
 }
+
+void invalidate_surface() noexcept { g_surfaceAvailable.store(false, std::memory_order_release); }
+
+bool surface_available() noexcept { return g_surfaceAvailable.load(std::memory_order_acquire); }
 
 static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight,
                                       bool force) {

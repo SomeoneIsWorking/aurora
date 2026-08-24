@@ -25,8 +25,10 @@ extern "C" {
 #define GX_AURORA_LOAD_SCISSOR_RENDER 0x0002
 
 /**
- * Aurora equivalent of CP_REG_ARRAYBASE_ID: sets the base address and size of a vertex array.
- * This command must be followed by a 64-bit memory address, 32-bit size, and 1-byte little-endian flag.
+ * Aurora equivalent of CP_REG_ARRAYBASE_ID: sets a vertex array's base, upload extent, and backing
+ * capacity. This command must be followed by a 64-bit memory address, 32-bit upload size, 32-bit
+ * backing capacity, and 1-byte little-endian flag. Upload size 0 enables index-derived sizing;
+ * capacity remains the independent safety bound and must never be inferred from the upload size.
  * The index of the vertex array is given by the lowest 4 bits of the command ID,
  * e.g. writing GX_AURORA_LOAD_ARRAYBASE + 5 will set the vertex array for the sixth vertex attribute.
  * To set strides, use the normal CP_REG_ARRAYSTRIDE_ID register.

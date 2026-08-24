@@ -132,6 +132,11 @@ double aurora_display_refresh_rate();
 const AuroraEvent* aurora_update();
 bool aurora_begin_frame();
 void aurora_end_frame();
+
+/* Select whether Aurora owns operating-system presentation. Disabling presentation releases its
+ * WSI surface while preserving FIFO consumption, offscreen rendering, and frame-sink readback so
+ * Aurora can serve as an oracle beside a host-owned presenter. */
+void aurora_set_presentation_enabled(bool enabled);
 /* Drop GX commands queued since the last frame without rendering them. For
  * frames produced while the surface was unpresentable (minimized window):
  * begin_frame returned false, end_frame must not run, but the fifo still has

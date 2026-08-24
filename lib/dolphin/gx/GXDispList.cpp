@@ -120,7 +120,7 @@ static const u8* sanitize_dl(const u8* src, u32 nbytes, u32& outLen) {
       u32 payload;
       if (sub == 0x0001) payload = 24;                       // LOAD_VIEWPORT_RENDER
       else if (sub == 0x0002) payload = 16;                  // LOAD_SCISSOR_RENDER
-      else if (sub >= 0x0010 && sub <= 0x001F) payload = 13; // LOAD_ARRAYBASE
+      else if (sub >= 0x0010 && sub <= 0x001F) payload = 17; // LOAD_ARRAYBASE
       else if (sub == 0x0020 || sub == 0x0022) {             // debug group push / marker
         payload = pos + 5 <= nbytes ? 2 + (static_cast<u32>(src[pos + 3]) << 8 | src[pos + 4]) : 2;
       } else if (sub == 0x0021) payload = 0;                 // debug group pop
