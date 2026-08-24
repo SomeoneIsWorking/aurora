@@ -59,6 +59,7 @@ static wgpu::BindGroupLayout g_ResampleBindGroupLayout;
 static wgpu::RenderPipeline g_ResamplePipeline;
 static wgpu::Buffer g_ResampleUniformBuffer;
 static TextureWithSampler g_resampledFrameBuffer;
+static std::atomic_uint64_t g_submitId = 1;
 
 static wgpu::Adapter g_adapter;
 wgpu::Instance g_instance;
@@ -72,6 +73,12 @@ bool g_astcTexturesSupported = false;
 bool g_textureComponentSwizzleSupported = false;
 
 namespace {
+
+void emit_gpu_probe(AuroraGpuProbePhase phase, const AuroraGpuSubmitInfo* info, wgpu::StringView message = {}) {
+  if (g_config.gpuProbeCallback != nullptr) {
+    g_config.gpuProbeCallback(phase, info, message.data, message.length, g_config.gpuProbeUser);
+  }
+}
 
 enum class DeviceLifecycle : uint8_t {
   Initializing,
@@ -285,6 +292,27 @@ uint32_t viewport_extent(float value) noexcept {
 
 } // namespace
 
+void submit_command_buffer(const wgpu::CommandBuffer& buffer, AuroraGpuSubmitInfo info) {
+  info.structSize = sizeof(info);
+  info.version = 1;
+  info.submitId = g_submitId.fetch_add(1, std::memory_order_relaxed);
+  emit_gpu_probe(AURORA_GPU_PROBE_SUBMIT_BEGIN, &info);
+  g_queue.Submit(1, &buffer);
+  emit_gpu_probe(AURORA_GPU_PROBE_SUBMIT_RETURN, &info);
+
+  const AuroraGpuProbeCallback callback = g_config.gpuProbeCallback;
+  void* const user = g_config.gpuProbeUser;
+  if (callback != nullptr) {
+    g_queue.OnSubmittedWorkDone(wgpu::CallbackMode::AllowSpontaneous,
+                                [callback, user, info](wgpu::QueueWorkDoneStatus status, wgpu::StringView message) {
+                                  auto completed = info;
+                                  completed.status = static_cast<uint32_t>(status);
+                                  callback(AURORA_GPU_PROBE_SUBMIT_COMPLETE, &completed, message.data, message.length,
+                                           user);
+                                });
+  }
+}
+
 TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled) {
   const wgpu::Extent3D size{
       .width = width,
@@ -376,7 +404,7 @@ TextureWithSampler g_sbPass1Present;
 // raw-EFB present, kept for A/B diagnosis; do not remove.
 TextureWithSampler g_sbDisplayPresent;
 
-const TextureWithSampler& present_source() noexcept {
+TextureWithSampler present_source() noexcept {
   if (g_sbDisplayPresent.view != nullptr && std::getenv("SB_NO_COPYDISP") == nullptr) {
     return g_sbDisplayPresent;
   }
@@ -711,8 +739,8 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
   return g_device.CreateBindGroup(&bindGroupDescriptor);
 }
 
-const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& encoder, const Viewport& viewport) {
-  const auto& source = present_source();
+const TextureWithSampler& resample_present_source(const wgpu::CommandEncoder& encoder, const Viewport& viewport,
+                                                  const TextureWithSampler& source) {
   const uint32_t width = viewport_extent(viewport.width);
   const uint32_t height = viewport_extent(viewport.height);
   if (!g_resampledFrameBuffer.view || g_resampledFrameBuffer.size.width != width ||
@@ -1173,6 +1201,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
                                                            std::memory_order_acq_rel)) {
             Log.error("Device lost during WebGPU initialization: {}", message);
           } else if (expected == DeviceLifecycle::Running) {
+            emit_gpu_probe(AURORA_GPU_PROBE_DEVICE_LOST, nullptr, message);
             FATAL("Device lost: {}", message);
           } else {
             Log.error("Device lost while device lifecycle is {}: {}", underlying(expected), message);

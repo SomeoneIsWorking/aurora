@@ -76,6 +76,71 @@ typedef struct AuroraEvent AuroraEvent;
 typedef void (*AuroraLogCallback)(AuroraLogLevel level, const char* module, const char* message, unsigned int len);
 typedef void (*AuroraImGuiInitCallback)(const AuroraWindowSize* size);
 
+/* A submit flight record is deliberately POD and bounded: a device loss callback may arrive on a
+ * driver thread after the graphics device is already unusable. Hosts can persist these records
+ * without allocating, querying the device, or running a helper process. `SUBMIT_RETURN` only means
+ * the queue API returned; `SUBMIT_COMPLETE` is the separate GPU-completion watermark. */
+typedef enum {
+  AURORA_GPU_PROBE_SUBMIT_BEGIN,
+  AURORA_GPU_PROBE_SUBMIT_RETURN,
+  AURORA_GPU_PROBE_SUBMIT_COMPLETE,
+  AURORA_GPU_PROBE_DEVICE_LOST,
+} AuroraGpuProbePhase;
+
+typedef enum {
+  AURORA_GPU_SUBMIT_FRAME,
+  AURORA_GPU_SUBMIT_IMGUI_UPLOAD,
+} AuroraGpuSubmitKind;
+
+#define AURORA_GPU_PROBE_MAX_PASSES 16
+
+typedef struct {
+  uint64_t labelHash;
+  uint64_t commandHash;
+  uint64_t pipelineHash;
+  uint32_t commandCount;
+  uint32_t drawCount;
+  uint32_t targetWidth;
+  uint32_t targetHeight;
+  uint32_t flags;
+} AuroraGpuPassProbe;
+
+typedef struct {
+  uint32_t structSize;
+  uint32_t version;
+  AuroraGpuSubmitKind kind;
+  uint32_t replayEmission;
+  uint64_t submitId;
+  uint64_t frameId;
+  uint32_t frameIndex;
+  uint32_t passCount;
+  uint32_t recordedPassCount;
+  uint32_t drawCount;
+  uint32_t operationCount;
+  uint32_t textureUploadCount;
+  uint32_t textureCopyCount;
+  uint32_t vertexBytes;
+  uint32_t uniformBytes;
+  uint32_t indexBytes;
+  uint32_t storageBytes;
+  uint32_t textureUploadBytes;
+  uint32_t cachedTextureObjects;
+  uint32_t cachedTlutObjects;
+  uint32_t cachedCopyTextures;
+  uint32_t cachedBindGroups;
+  uint32_t persistentStorageEntries;
+  uint32_t persistentStorageBytes;
+  uint32_t presentEnabled;
+  uint32_t headless;
+  uint32_t status;
+  uint64_t commandHash;
+  uint64_t pipelineHash;
+  AuroraGpuPassProbe passes[AURORA_GPU_PROBE_MAX_PASSES];
+} AuroraGpuSubmitInfo;
+
+typedef void (*AuroraGpuProbeCallback)(AuroraGpuProbePhase phase, const AuroraGpuSubmitInfo* info, const char* message,
+                                       size_t messageLen, void* user);
+
 #define MEM1_DEFAULT_SIZE (24 * 1024 * 1024)
 #define ARAM_DEFAULT_SIZE (16 * 1024 * 1024)
 
@@ -103,6 +168,8 @@ typedef struct {
   AuroraLogCallback logCallback;
   AuroraLogLevel logLevel;
   AuroraImGuiInitCallback imGuiInitCallback;
+  AuroraGpuProbeCallback gpuProbeCallback;
+  void* gpuProbeUser;
 
   /*
    * The size of the GameCube's main memory, or MEM1 on the Wii.

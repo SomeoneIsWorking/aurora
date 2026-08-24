@@ -156,7 +156,7 @@ enum class BufferMapState {
 static std::array<wgpu::Buffer, StagingBufferCount> g_stagingBuffers;
 static std::array<std::atomic<BufferMapState>, StagingBufferCount> s_mappingStates;
 static wgpu::Limits g_cachedLimits;
-static uint32_t g_frameIndex = UINT32_MAX;
+static std::atomic_uint32_t g_frameIndex = UINT32_MAX;
 static PipelineRef g_currentPipeline;
 wgpu::BindGroupLayout g_staticBindGroupLayout;
 wgpu::BindGroup g_staticBindGroup;
@@ -464,6 +464,133 @@ static StagingHighWater current_high_water(const FramePacket& frame) noexcept {
       .textureUpload = static_cast<uint32_t>(frame.textureUpload.size()),
       .textureUploadCount = frame.textureUploads.size(),
   };
+}
+
+template <typename T>
+static void probe_hash(Hasher& hasher, const T& value) {
+  hasher.update(&value, sizeof(value));
+}
+
+static void probe_hash_range(Hasher& hasher, const Range& range) {
+  probe_hash(hasher, range.offset);
+  probe_hash(hasher, range.size);
+}
+
+static PipelineRef probe_hash_draw(Hasher& commandHasher, const ShaderDrawCommand& draw) {
+  probe_hash(commandHasher, draw.type);
+  switch (draw.type) {
+  case ShaderType::Clear:
+    probe_hash(commandHasher, draw.clear.pipeline);
+    probe_hash(commandHasher, draw.clear.color);
+    probe_hash(commandHasher, draw.clear.depth);
+    probe_hash(commandHasher, draw.clear.rectEnabled);
+    probe_hash(commandHasher, draw.clear.rect);
+    return draw.clear.pipeline;
+  case ShaderType::GX:
+    probe_hash(commandHasher, draw.gx.pipeline);
+    probe_hash_range(commandHasher, draw.gx.vertRange);
+    probe_hash_range(commandHasher, draw.gx.idxRange);
+    probe_hash_range(commandHasher, draw.gx.uniformRange);
+    probe_hash(commandHasher, draw.gx.vtxCount);
+    probe_hash(commandHasher, draw.gx.indexCount);
+    probe_hash(commandHasher, draw.gx.instanceCount);
+    probe_hash(commandHasher, draw.gx.bindGroups);
+    probe_hash(commandHasher, draw.gx.dstAlpha);
+    probe_hash(commandHasher, draw.gx.tag);
+    probe_hash(commandHasher, draw.gx.pop);
+    probe_hash(commandHasher, draw.gx.exact);
+    probe_hash(commandHasher, draw.gx.vtxStride);
+    probe_hash(commandHasher, draw.gx.posOffset);
+    return draw.gx.pipeline;
+#ifdef AURORA_ENABLE_RMLUI
+  case ShaderType::Rml:
+    probe_hash(commandHasher, draw.rml.pipeline);
+    probe_hash_range(commandHasher, draw.rml.vertexRange);
+    probe_hash_range(commandHasher, draw.rml.indexRange);
+    probe_hash_range(commandHasher, draw.rml.uniformRange);
+    probe_hash(commandHasher, draw.rml.bindGroup1);
+    probe_hash(commandHasher, draw.rml.bindGroup2);
+    probe_hash(commandHasher, draw.rml.vertexCount);
+    probe_hash(commandHasher, draw.rml.indexCount);
+    probe_hash(commandHasher, draw.rml.stencilRef);
+    return draw.rml.pipeline;
+#endif
+  }
+  return 0;
+}
+
+static AuroraGpuSubmitInfo build_submit_probe(const FramePacket& frame) {
+  AuroraGpuSubmitInfo info{};
+  info.structSize = sizeof(info);
+  info.version = 1;
+  info.kind = AURORA_GPU_SUBMIT_FRAME;
+  info.replayEmission = frame.replayEmission ? 1u : 0u;
+  info.frameId = frame.frameId;
+  info.frameIndex = frame.frameIndex;
+  info.passCount = static_cast<uint32_t>(frame.renderPasses.size());
+  info.recordedPassCount = std::min<uint32_t>(info.passCount, AURORA_GPU_PROBE_MAX_PASSES);
+  info.operationCount = static_cast<uint32_t>(frame.ops.size());
+  info.textureUploadCount = static_cast<uint32_t>(frame.textureUploads.size());
+  info.textureCopyCount = static_cast<uint32_t>(frame.textureCopies.size());
+  info.vertexBytes = static_cast<uint32_t>(frame.verts.size());
+  info.uniformBytes = static_cast<uint32_t>(frame.uniforms.size());
+  info.indexBytes = static_cast<uint32_t>(frame.indices.size());
+  info.storageBytes = static_cast<uint32_t>(frame.storage.size());
+  info.textureUploadBytes = static_cast<uint32_t>(frame.textureUpload.size());
+  const auto textureCaches = gx::texture_cache_counts();
+  info.cachedTextureObjects = textureCaches.textureObjects;
+  info.cachedTlutObjects = textureCaches.tlutObjects;
+  info.cachedCopyTextures = textureCaches.copyTextures;
+  {
+    std::lock_guard lock{g_bindGroupCacheMutex};
+    info.cachedBindGroups = static_cast<uint32_t>(g_cachedBindGroups.size());
+  }
+  info.persistentStorageEntries = static_cast<uint32_t>(persistent_storage_entries());
+  info.persistentStorageBytes = static_cast<uint32_t>(persistent_storage_used());
+
+  Hasher frameCommands;
+  Hasher framePipelines;
+  for (uint32_t passIndex = 0; passIndex < info.recordedPassCount; ++passIndex) {
+    const auto& pass = frame.renderPasses[passIndex];
+    auto& out = info.passes[passIndex];
+    out.labelHash = xxh3_hash_s(pass.label.data(), pass.label.size());
+    out.commandCount = static_cast<uint32_t>(pass.commands.size());
+    out.targetWidth = pass.targetSize.width;
+    out.targetHeight = pass.targetSize.height;
+    out.flags = (pass.observable ? 1u : 0u) | (pass.offscreen ? 1u << 1 : 0u) | (pass.resolveTarget ? 1u << 2 : 0u) |
+                (pass.hasDepth ? 1u << 3 : 0u) | (pass.clearColor ? 1u << 4 : 0u) | (pass.clearDepth ? 1u << 5 : 0u) |
+                ((pass.msaaSamples & 0xffu) << 8);
+
+    Hasher passCommands;
+    Hasher passPipelines;
+    for (const auto& command : pass.commands) {
+      probe_hash(passCommands, command.type);
+      switch (command.type) {
+      case CommandType::SetViewport:
+        probe_hash(passCommands, command.data.setViewport);
+        break;
+      case CommandType::SetScissor:
+        probe_hash(passCommands, command.data.setScissor);
+        break;
+      case CommandType::Draw: {
+        const PipelineRef pipeline = probe_hash_draw(passCommands, command.data.draw);
+        probe_hash(passPipelines, pipeline);
+        ++out.drawCount;
+      } break;
+      case CommandType::DebugMarker:
+        probe_hash(passCommands, command.data.debugMarkerIndex);
+        break;
+      }
+    }
+    info.drawCount += out.drawCount;
+    out.commandHash = passCommands.digest();
+    out.pipelineHash = passPipelines.digest();
+    probe_hash(frameCommands, out.commandHash);
+    probe_hash(framePipelines, out.pipelineHash);
+  }
+  info.commandHash = frameCommands.digest();
+  info.pipelineHash = framePipelines.digest();
+  return info;
 }
 
 static FrameOp capture_frame_op(FramePacket& frame, FrameOpType type, uint32_t index) {
@@ -2222,13 +2349,14 @@ void end_frame(EndFrameCallback callback) {
 #endif
 
   const size_t stagingSlot = frame.stagingBuffer;
+  const AuroraGpuSubmitInfo submitProbe = build_submit_probe(frame);
   // A replay emission pushes no verts/indices/storage and records no draws, so publishing its
   // stats would make every second sample read zero — Tracy plots and the imgui overlay would
   // alternate real/zero and read exactly like a frame-dropping defect. The numbers the user cares
   // about belong to the frame the game actually drew, so leave the last real publish standing.
   const bool publishStats = !frame.replayEmission;
   render_worker::enqueue_end_frame(
-      frameId, [frameSlot, stagingSlot, publishStats, callback = std::move(callback)]() mutable {
+      frameId, [frameSlot, stagingSlot, publishStats, submitProbe, callback = std::move(callback)]() mutable {
         auto& packet = g_framePackets[frameSlot];
         g_stagingBuffers[stagingSlot].Unmap();
         s_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
@@ -2245,7 +2373,7 @@ void end_frame(EndFrameCallback callback) {
           g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
         }
         if (callback) {
-          callback(encoder);
+          callback(encoder, submitProbe);
         }
         g_frameSlots.release(frameSlot);
         expire_cached_bind_groups();

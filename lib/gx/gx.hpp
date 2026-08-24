@@ -47,6 +47,13 @@ constexpr float GX_LARGE_NUMBER = -1048576.0f;
 #endif
 
 namespace aurora::gx {
+struct TextureCacheCounts {
+  uint32_t textureObjects;
+  uint32_t tlutObjects;
+  uint32_t copyTextures;
+};
+
+TextureCacheCounts texture_cache_counts() noexcept;
 constexpr bool EnableNormalVisualization = false;
 constexpr bool EnableDebugPrints = false;
 constexpr bool UsePerPixelLighting = false;
