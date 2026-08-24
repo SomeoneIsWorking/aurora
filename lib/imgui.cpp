@@ -236,7 +236,11 @@ static void enqueue_texture_upload(wgpu::Buffer buffer, wgpu::TexelCopyTextureIn
         .label = "imgui texture upload command buffer",
     };
     auto commandBuffer = encoder.Finish(&commandBufferDesc);
-    webgpu::g_queue.Submit(1, &commandBuffer);
+    AuroraGpuSubmitInfo probe{};
+    probe.kind = AURORA_GPU_SUBMIT_IMGUI_UPLOAD;
+    probe.textureUploadCount = 1;
+    probe.textureUploadBytes = static_cast<uint32_t>(layout.bytesPerRow * size.height);
+    webgpu::submit_command_buffer(commandBuffer, probe);
   });
 }
 
@@ -280,7 +284,8 @@ ImTextureID add_texture(uint32_t width, uint32_t height, const uint8_t* data) no
         .bytesPerRow = copyBytesPerRow,
         .rowsPerImage = height,
     };
-    enqueue_texture_upload(create_texture_upload_buffer(width, height, data, copyBytesPerRow), dstView, dataLayout, size);
+    enqueue_texture_upload(create_texture_upload_buffer(width, height, data, copyBytesPerRow), dstView, dataLayout,
+                           size);
   }
   g_wgpuTextures.push_back(texture);
   return reinterpret_cast<ImTextureID>(textureView.MoveToCHandle());

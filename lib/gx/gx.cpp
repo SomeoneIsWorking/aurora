@@ -197,8 +197,8 @@ gfx::TextureHandle resolve_static_texture(const GXTexObj_& obj) {
     const auto nameStr = "GX Static Texture";
 #endif
     static const lucent::Channel chTexDbg{"texresolve"};
-    lucent::debug(chTexDbg, "static {}x{} mips={} fmt={} data={}", obj.width(), obj.height(),
-                  obj.mip_count(), static_cast<unsigned>(obj.format()), obj.data);
+    lucent::debug(chTexDbg, "static {}x{} mips={} fmt={} data={}", obj.width(), obj.height(), obj.mip_count(),
+                  static_cast<unsigned>(obj.format()), obj.data);
     handle = gfx::new_static_texture_2d(obj.width(), obj.height(), obj.mip_count(), obj.format(),
                                         {static_cast<const uint8_t*>(obj.data), UINT32_MAX}, false, nameStr);
   }
@@ -375,6 +375,14 @@ void set_render_scissor(const gfx::ClipRect& scissor) noexcept {
   gfx::set_scissor(scissor);
 }
 
+TextureCacheCounts texture_cache_counts() noexcept {
+  return {
+      .textureObjects = static_cast<uint32_t>(s_textureObjectCaches.size()),
+      .tlutObjects = static_cast<uint32_t>(s_tlutObjectCaches.size()),
+      .copyTextures = static_cast<uint32_t>(g_gxState.copyTextureCache.size()),
+  };
+}
+
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept { return g_gxState.textures[static_cast<size_t>(id)]; }
 
 void evict_texture_object(u32 texObjId) noexcept {
@@ -508,8 +516,7 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
         // line would bury the run even with the channel deliberately on.
         static long n = 0;
         if ((++n % 200) == 0 || n <= 4)
-          lucent::debug(chCopyBind, "n={} texmap={} data={} {}x{}", n, i, obj.data, obj.width(),
-                        obj.height());
+          lucent::debug(chCopyBind, "n={} texmap={} data={} {}x{}", n, i, obj.data, obj.width(), obj.height());
       }
     } else if (obj.has_data()) {
       handle = resolve_static_texture(obj);
@@ -529,9 +536,9 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
         static long n = 0;
         if (++n <= 400)
           std::fprintf(stderr,
-                       "[texbind] n=%ld map=%u data=%p hasData=%d isCopy=%d handleNull=%d %ux%u fmt=%u mark='%s'\n",
-                       n, i, obj.data, obj.has_data() ? 1 : 0, copyRef != nullptr ? 1 : 0, handle ? 0 : 1,
-                       obj.width(), obj.height(), static_cast<unsigned>(obj.format()), sb_gx_last_marker());
+                       "[texbind] n=%ld map=%u data=%p hasData=%d isCopy=%d handleNull=%d %ux%u fmt=%u mark='%s'\n", n,
+                       i, obj.data, obj.has_data() ? 1 : 0, copyRef != nullptr ? 1 : 0, handle ? 0 : 1, obj.width(),
+                       obj.height(), static_cast<unsigned>(obj.format()), sb_gx_last_marker());
       }
     }
 
@@ -573,11 +580,14 @@ static inline wgpu::BlendFactor to_blend_factor(GXBlendFactor fac, bool isDst) {
 // SB_NO_ZWRITE_DRAWS=<lo>[:<hi>] (diagnostic): suppress depth WRITES for draws
 // whose post-merge index (g_sbPushedDrawCount, command_processor.cpp) falls in
 // the window — bisects WHICH earlier z-writer buries a depth-killed draw.
-namespace fifo { extern long g_sbPushedDrawCount; }
+namespace fifo {
+extern long g_sbPushedDrawCount;
+}
 static bool sb_no_zwrite_this_draw() {
   static long s_lo = -2, s_hi = -2;
   if (s_lo == -2) {
-    s_lo = -1; s_hi = -1;
+    s_lo = -1;
+    s_hi = -1;
     if (const char* w = std::getenv("SB_NO_ZWRITE_DRAWS"); w != nullptr && w[0] != '\0') {
       char* endp = nullptr;
       s_lo = std::strtol(w, &endp, 0);
@@ -592,7 +602,8 @@ static bool sb_no_zwrite_this_draw() {
 static bool sb_no_ztest_this_draw() {
   static long s_lo = -2, s_hi = -2;
   if (s_lo == -2) {
-    s_lo = -1; s_hi = -1;
+    s_lo = -1;
+    s_hi = -1;
     if (const char* w = std::getenv("SB_NO_ZTEST_DRAWS"); w != nullptr && w[0] != '\0') {
       char* endp = nullptr;
       s_lo = std::strtol(w, &endp, 0);
@@ -753,9 +764,7 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
   ZoneScoped;
   const float depthBias = (UseReversedZ ? -1.0f : 1.0f) * std::bit_cast<float>(config.polygonOffsetBits);
   const float depthBiasSlopeScale = (UseReversedZ ? -1.0f : 1.0f) * std::bit_cast<float>(config.polygonOffsetScaleBits);
-  const float depthBiasClamp = webgpu::g_hasCoreFeatures
-                                   ? std::bit_cast<float>(config.polygonOffsetClampBits)
-                                   : 0.0f;
+  const float depthBiasClamp = webgpu::g_hasCoreFeatures ? std::bit_cast<float>(config.polygonOffsetClampBits) : 0.0f;
   // SB_NO_DEPTH=1 (diagnostic): force depth test Always / no depth writes on
   // every pipeline — isolates "fragments killed by the depth test" (stale or
   // mis-cleared depth buffer) from raster/shading causes.
@@ -782,8 +791,7 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
   // (debug_journal duotone TEV investigation): filter on the title glyph's
   // narrow texture-size band so this doesn't spam every draw.
   static const lucent::Channel chBlend{"pipeblend"};
-  lucent::debug(chBlend,
-                "mode={} src={} dst={} -> color(op={} src={} dst={}) alpha(op={} src={} dst={}) label={}",
+  lucent::debug(chBlend, "mode={} src={} dst={} -> color(op={} src={} dst={}) alpha(op={} src={} dst={}) label={}",
                 static_cast<int>(config.blendMode), static_cast<int>(config.blendFacSrc),
                 static_cast<int>(config.blendFacDst), static_cast<int>(blendState.color.operation),
                 static_cast<int>(blendState.color.srcFactor), static_cast<int>(blendState.color.dstFactor),
@@ -1177,7 +1185,6 @@ wgpu::SamplerDescriptor aurora::gfx::TextureBind::get_descriptor() const noexcep
   };
 } // namespace aurora::gx
 
-
 // Does aurora hold a GPU-side copy surface for this guest address? EFB copy destinations are
 // serviced entirely on the GPU and never written back to guest memory, so a texture bound at such
 // an address decodes to zeros from RAM while aurora samples a real rendered surface. A port that
@@ -1186,7 +1193,8 @@ wgpu::SamplerDescriptor aurora::gfx::TextureBind::get_descriptor() const noexcep
 extern "C" int sbr_aurora_has_copy_texture(unsigned int guestAddr) {
   for (const auto& [ptr, ref] : aurora::gx::g_gxState.copyTextures) {
     const uintptr_t p = reinterpret_cast<uintptr_t>(ptr);
-    if ((unsigned int)(p & 0x01FFFFFFu) == (guestAddr & 0x01FFFFFFu)) return 1;
+    if ((unsigned int)(p & 0x01FFFFFFu) == (guestAddr & 0x01FFFFFFu))
+      return 1;
   }
   return (int)aurora::gx::g_gxState.copyTextures.size() > 0 ? 0 : -1;
 }

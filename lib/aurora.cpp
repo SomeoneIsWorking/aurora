@@ -412,7 +412,12 @@ void end_frame_impl(bool replayEmission) noexcept {
   }
   auto imguiDrawData = imgui::freeze();
 
-  const auto& presentSource = webgpu::present_source();
+  // Snapshot the complete refcounted source on the game thread. GXCopyDisp replaces the global
+  // display-copy texture on this thread while the render worker encodes the previous packet. The
+  // old code took an unused reference here and reread the mutable global inside the worker, racing
+  // WebGPU handle assignment/destruction. A value copy keeps this frame's texture/view/sampler
+  // alive and makes the worker consume exactly the source selected at this frame boundary.
+  const auto presentSource = webgpu::present_source();
   // Aspect from the TV's fixed 4:3 picture, NOT presentSource's own texel
   // size: VI scan-out stretches whatever XFB the display copy produced
   // across the physical picture, erasing the XFB's own aspect by design.
@@ -438,8 +443,9 @@ void end_frame_impl(bool replayEmission) noexcept {
   }
 #endif
 
-  gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
-                  imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder) {
+  gfx::end_frame([presentSource, rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
+                  imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder,
+                                                            const AuroraGpuSubmitInfo& submitProbe) mutable {
     // SB_DUMP_FRAME=/path/to.raw : one-shot raw dump of the framebuffer, taken
     // SB_DUMP_FRAME_AFTER frames in (default 60). The OUTPUT is always normalized
     // to true RGBA8 (R,G,B,A byte order) regardless of the host surface format, so
@@ -582,7 +588,7 @@ void end_frame_impl(bool replayEmission) noexcept {
     if (s_dumpFramesLeft > 0) {
       --s_dumpFramesLeft;
     } else if (s_dumpFramesLeft == 0) {
-      const auto& src = webgpu::present_source();
+      const auto& src = presentSource;
       auto job = std::make_shared<SbDumpJob>();
       job->width = src.size.width;
       job->height = src.size.height;
@@ -640,7 +646,7 @@ void end_frame_impl(bool replayEmission) noexcept {
     }
     if (g_frameSink != nullptr && g_frameSinkEvery > 0 && --s_sinkCountdown <= 0) {
       s_sinkCountdown = g_frameSinkEvery;
-      const auto& src = webgpu::present_source();
+      const auto& src = presentSource;
       auto job = std::make_shared<SbDumpJob>();
       job->width = src.size.width;
       job->height = src.size.height;
@@ -696,7 +702,7 @@ void end_frame_impl(bool replayEmission) noexcept {
       if (rmlBindGroup && !rmlOverlay) {
         presentBindGroup = rmlBindGroup;
       } else {
-        const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
+        const auto& resampledSource = webgpu::resample_present_source(encoder, viewport, presentSource);
         presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
       }
       {
@@ -754,9 +760,12 @@ void end_frame_impl(bool replayEmission) noexcept {
     webgpu::gpu_prof::frame_end(encoder);
     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
     const auto buffer = encoder.Finish(&cmdBufDescriptor);
+    auto probe = submitProbe;
+    probe.presentEnabled = presentationEnabled ? 1u : 0u;
+    probe.headless = headless ? 1u : 0u;
     {
       ZoneScopedN("Queue Submit");
-      g_queue.Submit(1, &buffer);
+      webgpu::submit_command_buffer(buffer, probe);
     }
     webgpu::gpu_prof::after_submit();
     if (headless) {
