@@ -260,6 +260,7 @@ void GDSetArraySized(GXAttr attr, void* base_ptr, u32 size, u8 stride, bool le) 
   GDWriteAuroraCmd(cpAttr + GX_AURORA_LOAD_ARRAYBASE);
   GDWrite_u64((u64)base_ptr);
   GDWrite_u32(size);
+  GDWrite_u32(size);
   GDWrite_u8(le ? 1 : 0);
 
   GDWriteCPCmd(cpAttr + CP_REG_ARRAYSTRIDE_ID, stride);
@@ -284,7 +285,7 @@ void GDSetArraySized(GXAttr attr, void* base_ptr, u32 size, u8 stride, bool le) 
 //
 // FIX: bake the same Aurora-native GX_AURORA_LOAD_ARRAYBASE extension
 // GDSetArraySized() already emits for the live per-frame POS/NRM/CLR0 refresh
-// (J3DLoadArrayBasePtr), with size=0 ("trust": AUTO ARRAY SIZING derives the real
+// (J3DLoadArrayBasePtr), with size/capacity=0 ("trust": AUTO ARRAY SIZING derives the real
 // upload extent from the max index each draw actually references — the same
 // mechanism already proven for POS/NRM/CLR0). This is baked ONCE into the shape's
 // mGDCommands DL exactly like GC's real hardware bake, and needs no per-frame calls.

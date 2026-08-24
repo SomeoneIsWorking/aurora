@@ -63,6 +63,8 @@ extern bool g_textureComponentSwizzleSupported;
 bool initialize(AuroraBackend backend, bool allowCpu);
 void shutdown();
 void release_surface() noexcept;
+void invalidate_surface() noexcept;
+bool surface_available() noexcept;
 bool refresh_surface(bool recreate = true);
 void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight, bool force = false);
 TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled);

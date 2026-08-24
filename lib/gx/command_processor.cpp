@@ -596,7 +596,18 @@ void process(const u8* data, u32 size, bool bigEndian) {
       auto const& array = g_gxState.arrays[arrayType];
       ASSERT(array.data != nullptr, "indexed XF load (opcode 0x{:02X}) with no array base for attr {}", opcode,
              arrayType);
-      const u8* srcData = ((const u8*)array.data) + srcArrayIdx * array.stride;
+      CHECK(array.stride != 0, "indexed XF load (opcode 0x{:02X}) has zero stride for attr {}", opcode, arrayType);
+      CHECK(array.capacity != 0,
+            "indexed XF load (opcode 0x{:02X}) has no known source-array capacity for attr {}; "
+            "the producer must declare the backing byte size",
+            opcode, arrayType);
+      const u32 srcOffset = static_cast<u32>(srcArrayIdx) * array.stride;
+      const u32 srcBytes = static_cast<u32>(len) * sizeof(u32);
+      CHECK(srcOffset <= array.capacity && srcBytes <= array.capacity - srcOffset,
+            "indexed XF load (opcode 0x{:02X}) source overrun for attr {}: index {} stride {} needs bytes [{}..{}), "
+            "capacity {}",
+            opcode, arrayType, srcArrayIdx, array.stride, srcOffset, srcOffset + srcBytes, array.capacity);
+      const u8* srcData = static_cast<const u8*>(array.data) + srcOffset;
       // The source endianness is the ARRAY's, not the command stream's:
       // runtime-computed pools (J3D draw/normal matrices) are host-endian
       // even when referenced from a big-endian display list.
@@ -1610,6 +1621,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
         break;
       case 0x09:
         // numChans
+        CHECK(val <= MaxColorChannels, "XF numChans {} exceeds capacity {}", val, MaxColorChannels);
         g_gxState.numChans = val;
         g_gxState.stateDirty = true;
         break;
@@ -1790,6 +1802,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
       }
       case 0x3F:
         // numTexGens
+        CHECK(val <= MaxTexCoord, "XF numTexGens {} exceeds capacity {}", val, MaxTexCoord);
         g_gxState.numTexGens = val;
         g_gxState.stateDirty = true;
         break;
@@ -3266,7 +3279,13 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* da
       scan_auto_array_max_indices(fields, nFields, data + pos, vtxCount, vtxSize, maxIdx);
       for (u8 f = 0; f < nFields; ++f) {
         auto& arr = g_gxState.arrays[fields[f].attr];
-        const u32 need = (maxIdx[fields[f].attr] + 1) * arr.stride;
+        const uint64_t needWide = (static_cast<uint64_t>(maxIdx[fields[f].attr]) + 1) * arr.stride;
+        CHECK(needWide <= UINT32_MAX, "indexed array extent overflow for attr {}: max index {} stride {}",
+              fields[f].attr, maxIdx[fields[f].attr], arr.stride);
+        const u32 need = static_cast<u32>(needWide);
+        CHECK(arr.capacity == 0 || need <= arr.capacity,
+              "indexed array source overrun for attr {}: max index {} stride {} needs {} bytes, capacity {}",
+              fields[f].attr, maxIdx[fields[f].attr], arr.stride, need, arr.capacity);
         if (need > arr.sizeAuto)
           arr.sizeAuto = need;
         if (arr.cachedRange.size < arr.sizeAuto) {
@@ -4947,22 +4966,29 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     pos += 4;
     set_render_scissor({left, top, width, height});
   } else if (subCmd >= GX_AURORA_LOAD_ARRAYBASE && subCmd <= (GX_AURORA_LOAD_ARRAYBASE | 0x0f)) {
-    CHECK(pos + 13 <= size, "GX_AURORA_LOAD_ARRAYBASE read overrun");
+    CHECK(pos + 17 <= size, "GX_AURORA_LOAD_ARRAYBASE read overrun");
     u32 attrIdx = subCmd - GX_AURORA_LOAD_ARRAYBASE + GX_VA_POS;
 
     u64 arrayAddr = read_u64(data + pos, bigEndian);
     pos += 8;
     u32 arraySize = read_u32(data + pos, bigEndian);
     pos += 4;
+    u32 arrayCapacity = read_u32(data + pos, bigEndian);
+    pos += 4;
     bool le = data[pos] == 1;
     pos += 1;
 
+    CHECK(arraySize == 0 || (arrayCapacity != 0 && arraySize <= arrayCapacity),
+          "GX_AURORA_LOAD_ARRAYBASE upload size {} exceeds backing capacity {} for attr {}", arraySize, arrayCapacity,
+          attrIdx);
+
     auto& array = g_gxState.arrays[attrIdx];
     const auto newData = reinterpret_cast<void*>(arrayAddr);
-    if (array.data != newData || array.size != arraySize || array.le != le) {
+    if (array.data != newData || array.size != arraySize || array.capacity != arrayCapacity || array.le != le) {
       const bool sameBacking = array.data == newData;
       array.data = newData;
       array.size = arraySize;
+      array.capacity = arrayCapacity;
       array.le = le;
       // Only drop the cached upload when the backing array actually changes.
       array.cachedRange = {};
@@ -5173,8 +5199,15 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     const GXPrimitive prim = static_cast<GXPrimitive>(cmd & CP_OPCODE_MASK);
     ASSERT(prim == GX_TRIANGLES, "GX_AURORA_DRAW_INDEXED: primitive must be GX_TRIANGLES, got {}",
            static_cast<u32>(prim));
+    CHECK(indexCount <= (size - pos) / sizeof(u16),
+          "GX_AURORA_DRAW_INDEXED index data overrun: {} indices need {} bytes at pos {}, have {}", indexCount,
+          static_cast<uint64_t>(indexCount) * sizeof(u16), pos, size - pos);
     const u32 idxBytes = indexCount * static_cast<u32>(sizeof(u16));
-    CHECK(pos + idxBytes <= size, "GX_AURORA_DRAW_INDEXED index data overrun");
+    for (u32 i = 0; i < indexCount; ++i) {
+      const u16 index = read_u16(data + pos + i * sizeof(u16), false);
+      CHECK(index < vtxCount, "GX_AURORA_DRAW_INDEXED index {} at element {} exceeds vertex count {}", index, i,
+            vtxCount);
+    }
     // Index data is always host-endian; push it to the GPU buffer as-is
     const gfx::Range idxRange = gfx::push_indices(data + pos, idxBytes, 4);
     pos += idxBytes;
@@ -5184,8 +5217,11 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     } else {
       vtxSize = calculate_last_vtx_size(fmt);
     }
-    const u32 totalVtxBytes = vtxCount * vtxSize;
-    CHECK(pos + totalVtxBytes <= size, "GX_AURORA_DRAW_INDEXED vertex data overrun");
+    CHECK(vtxCount == 0 || vtxSize != 0, "GX_AURORA_DRAW_INDEXED has {} vertices with zero vertex size", vtxCount);
+    CHECK(vtxSize == 0 || vtxCount <= (size - pos) / vtxSize,
+          "GX_AURORA_DRAW_INDEXED vertex data overrun: {} vertices of {} bytes at pos {}, have {}", vtxCount, vtxSize,
+          pos, size - pos);
+    const u32 totalVtxBytes = static_cast<u32>(vtxCount) * vtxSize;
     const gfx::Range vertRange = gfx::push_verts(data + pos, totalVtxBytes, 4);
     pos += totalVtxBytes;
     if (indexCount != 0) {
@@ -5218,11 +5254,11 @@ void handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
       else
         hex += fmt::format(" {:02x}", data[i]);
     }
-    Log.error(
+    FATAL(
         "Unknown Aurora subcommand: 0x{:04X} at pos {} -- caller likely mis-encoded "
         "the GX_AURORA (0x50) opcode payload or fell out of frame from an earlier "
         "extension. Hex dump (pos {}-{}, [] marks the subCmd bytes):{}",
-        subCmd, pos - 2, dumpStart, dumpEnd - 1, hex);
+        subCmd, pos - 2, dumpStart, dumpEnd - 1, hex)
   }
 }
 
@@ -5294,7 +5330,7 @@ extern "C" uint32_t aurora_gx_scan_dl(const uint8_t* data, uint32_t size, uint32
       else if (sub == 0x0002)
         payload = 16; // LOAD_SCISSOR_RENDER
       else if (sub >= 0x0010 && sub <= 0x001F)
-        payload = 13;                            // LOAD_ARRAYBASE
+        payload = 17;                            // LOAD_ARRAYBASE
       else if (sub == 0x0020 || sub == 0x0022) { // debug group push / marker
         if (pos + 5 > size)
           return pos;

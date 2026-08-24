@@ -275,6 +275,9 @@ static_assert(sizeof(Fog) == 32);
 struct AttrArray {
   const void* data;
   u32 size;
+  // Bytes actually backed by the producer. Separate from size because size=0 asks Aurora to derive
+  // the upload extent from referenced indices; that does not make the source pointer unbounded.
+  u32 capacity;
   u8 stride;
   bool le = true;
   gfx::Range cachedRange;
@@ -556,6 +559,8 @@ namespace fifo {
 // Draw identity supplied by the emitter via GX_AURORA_DRAW_TAG, stamped onto every DrawData until
 // the next tag; 0 = untagged. Reset once per frame in gfx::end_frame — see the comment there.
 extern uint64_t g_pendingDrawTag;
+extern uint8_t g_pendingDrawExact;
+extern std::vector<uint64_t> g_pendingDrawIndexedKeys;
 extern uint8_t g_pendingDrawPop;
 extern uint8_t g_pendingDrawIndexedDeform;
 // Coverage counters, so an emitter that has silently stopped tagging is visible as a number rather

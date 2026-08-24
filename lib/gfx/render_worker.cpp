@@ -1,5 +1,7 @@
 #include "render_worker.hpp"
 
+#include "../internal.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -7,6 +9,8 @@
 #include <tracy/Tracy.hpp>
 
 namespace aurora::gfx::render_worker {
+static Module Log("aurora::gfx::render_worker");
+
 namespace {
 constexpr size_t QueueCapacity = 256;
 constexpr auto IdlePumpInterval = std::chrono::milliseconds{1};
@@ -80,16 +84,21 @@ void enqueue(QueueItem item) {
   g_pendingItems.fetch_add(1, std::memory_order_acq_rel);
   if (!g_queue.push(std::move(item))) {
     g_pendingItems.fetch_sub(1, std::memory_order_acq_rel);
+    FATAL("Timed out after {}ms waiting to enqueue render-worker work", DefaultWorkerWaitTimeout.count());
   }
 }
 } // namespace
 
-BoundedQueue::BoundedQueue(size_t capacity) : m_capacity(capacity) {}
+BoundedQueue::BoundedQueue(size_t capacity, std::chrono::milliseconds waitTimeout)
+: m_capacity(capacity), m_waitTimeout(waitTimeout) {}
 
 bool BoundedQueue::push(QueueItem item) {
   ZoneScoped;
   std::unique_lock lock{m_mutex};
-  m_notFull.wait(lock, [&] { return m_closed || m_items.size() < m_capacity; });
+  const bool ready = m_notFull.wait_for(lock, m_waitTimeout, [&] { return m_closed || m_items.size() < m_capacity; });
+  if (!ready) {
+    return false;
+  }
   if (m_closed) {
     return false;
   }
@@ -136,11 +145,12 @@ size_t BoundedQueue::size() const {
   return m_items.size();
 }
 
-FrameSlotPool::FrameSlotPool(size_t slotCount) : m_freeSlots(slotCount, true) {}
+FrameSlotPool::FrameSlotPool(size_t slotCount, std::chrono::milliseconds waitTimeout)
+: m_waitTimeout(waitTimeout), m_freeSlots(slotCount, true) {}
 
 size_t FrameSlotPool::acquire() {
   std::unique_lock lock{m_mutex};
-  m_cv.wait(lock, [&] {
+  const bool acquired = m_cv.wait_for(lock, m_waitTimeout, [&] {
     for (const bool free : m_freeSlots) {
       if (free) {
         return true;
@@ -148,6 +158,9 @@ size_t FrameSlotPool::acquire() {
     }
     return false;
   });
+  if (!acquired) {
+    FATAL("Timed out after {}ms waiting to acquire a render-worker frame slot", m_waitTimeout.count());
+  }
   for (size_t i = 0; i < m_freeSlots.size(); ++i) {
     if (m_freeSlots[i]) {
       m_freeSlots[i] = false;
@@ -260,7 +273,9 @@ void synchronize() {
       .sync = sync,
   });
   std::unique_lock lock{sync->mutex};
-  sync->cv.wait(lock, [&] { return sync->complete; });
+  if (!sync->cv.wait_for(lock, DefaultWorkerWaitTimeout, [&] { return sync->complete; })) {
+    FATAL("Timed out after {}ms waiting for render-worker synchronization", DefaultWorkerWaitTimeout.count());
+  }
 }
 
 bool is_worker_thread() noexcept { return g_workerThreadId == std::this_thread::get_id(); }

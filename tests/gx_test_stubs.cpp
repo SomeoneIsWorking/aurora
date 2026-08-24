@@ -6,6 +6,8 @@
 #include "gfx/clear.hpp"
 #include "gfx/common.hpp"
 #include "gfx/depth_peek.hpp"
+#include "gfx/indexed_interp.hpp"
+#include "gfx/interp.hpp"
 #include "gfx/tex_copy_conv.hpp"
 #include "gfx/tex_palette_conv.hpp"
 #include "gfx/texture.hpp"
@@ -44,15 +46,35 @@ wgpu::Buffer g_indexBuffer;
 wgpu::Buffer g_storageBuffer;
 uint32_t g_drawCallCount = 0;
 uint32_t g_mergedDrawCallCount = 0;
+uint64_t persistent_storage_used() { return 0; }
+size_t persistent_storage_entries() { return 0; }
+Range push_storage_persistent(const uint8_t*, size_t, ArrayUploadKey, uint64_t, bool* outUploaded) {
+  *outUploaded = false;
+  return {};
+}
 } // namespace aurora::gfx
+
+namespace aurora {
+const char* aurora_gfx_staging_region_name(size_t) { return "test staging buffer"; }
+} // namespace aurora
 
 namespace aurora::webgpu {
 GraphicsConfig g_graphicsConfig{};
+TextureWithSampler g_frameBuffer{};
+TextureWithSampler g_frameBufferResolved{};
+TextureWithSampler g_sbPass1Present{};
+TextureWithSampler g_sbDisplayPresent{};
 } // namespace aurora::webgpu
 
 // --- GXState (the real instance -- tests validate this) ---
 namespace aurora::gx {
 GXState g_gxState{};
+bool g_sbDrawSamplesCopy = false;
+u32 g_lastUniformMtxOffset = 0;
+u32 g_lastUniformArrayOffset = 0;
+
+const gfx::Range* array_upload_lookup(ArrayUploadKey) { return nullptr; }
+void array_upload_store(ArrayUploadKey, gfx::Range) {}
 } // namespace aurora::gx
 
 namespace aurora::vi {
@@ -182,11 +204,20 @@ void queue_texture_upload_data(const uint8_t* data, size_t length, uint32_t byte
                                wgpu::TexelCopyTextureInfo tex, wgpu::Extent3D size) {}
 void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
                   Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat) {}
+void note_copy_resolve_dest(const void*) {}
 void queue_palette_conv(tex_palette_conv::ConvRequest req) {}
 void begin_offscreen(uint32_t width, uint32_t height) {}
 void end_offscreen() {}
 bool is_offscreen() noexcept { return false; }
 } // namespace aurora::gfx
+
+namespace aurora::gfx::interp {
+void set_view_matrix(const float[12]) {}
+} // namespace aurora::gfx::interp
+
+namespace aurora::gfx::indexed_interp {
+uint32_t capture(uint64_t, const uint8_t*, uint32_t, uint16_t, uint8_t, std::span<const uint64_t>) { return 1; }
+} // namespace aurora::gfx::indexed_interp
 
 namespace aurora::gfx::depth_peek {
 namespace {
@@ -273,6 +304,7 @@ void wgpuSurfaceAddRef(WGPUSurface) {}
 void wgpuBufferAddRef(WGPUBuffer) {}
 void wgpuTextureAddRef(WGPUTexture) {}
 void wgpuTextureViewAddRef(WGPUTextureView) {}
+void wgpuSamplerAddRef(WGPUSampler) {}
 void wgpuInstanceAddRef(WGPUInstance) {}
 }
 

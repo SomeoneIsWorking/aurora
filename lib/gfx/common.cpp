@@ -67,6 +67,8 @@ constexpr uint64_t StagingBufferSize = UniformBufferSize + VertexBufferSize + In
 // to queue an entire high-refresh tick at once.
 constexpr size_t FrameSlotCount = 3;
 constexpr size_t StagingBufferCount = FrameSlotCount + 3;
+constexpr auto GpuWaitTimeout =
+    std::chrono::duration_cast<std::chrono::seconds>(render_worker::DefaultWorkerWaitTimeout);
 
 struct StagingHighWater {
   uint32_t verts = 0;
@@ -1804,8 +1806,38 @@ void initialize() {
   initialize_pipeline_cache();
 }
 
+static void settle_staging_maps_for_shutdown() {
+  const auto deadline = PresentClock::now() + GpuWaitTimeout;
+  for (;;) {
+    bool mapping = false;
+    for (const auto& state : s_mappingStates) {
+      mapping |= state.load(std::memory_order_acquire) == BufferMapState::Mapping;
+    }
+    if (!mapping) {
+      break;
+    }
+    if (PresentClock::now() >= deadline) {
+      FATAL("Timed out after {}s waiting for staging-buffer map callbacks during shutdown", GpuWaitTimeout.count());
+    }
+    render_worker::enqueue_work(process_events);
+    render_worker::synchronize();
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+
+  // Mapped-at-rest is the steady-state pool policy. Explicitly unmap before dropping the handles;
+  // destroying a buffer with MapAsync still pending produced an Aborted callback and a synthetic
+  // device-loss warning on every otherwise-clean recomp shutdown.
+  for (size_t slot = 0; slot < g_stagingBuffers.size(); ++slot) {
+    if (s_mappingStates[slot].load(std::memory_order_acquire) == BufferMapState::Mapped) {
+      g_stagingBuffers[slot].Unmap();
+      s_mappingStates[slot].store(BufferMapState::Unmapped, std::memory_order_release);
+    }
+  }
+}
+
 void shutdown() {
   render_worker::synchronize();
+  settle_staging_maps_for_shutdown();
   render_worker::shutdown();
   g_processEventsQueued.store(false, std::memory_order_release);
   g_lastPresentNs.store(0, std::memory_order_release);
@@ -1861,6 +1893,7 @@ void shutdown() {
 
 static bool wait_for_staging_buffer(size_t slot) {
   ZoneScopedN("Wait for buffer map");
+  const auto deadline = PresentClock::now() + GpuWaitTimeout;
   map_staging_buffer(slot);
   while (true) {
     const auto mappingState = s_mappingStates[slot].load(std::memory_order_acquire);
@@ -1870,6 +1903,9 @@ static bool wait_for_staging_buffer(size_t slot) {
     if (mappingState == BufferMapState::Unmapped) {
       return false;
     }
+    if (PresentClock::now() >= deadline) {
+      FATAL("Timed out after {}s waiting for staging-buffer slot {} to map", GpuWaitTimeout.count(), slot);
+    }
     wait_for_gpu_progress(std::chrono::milliseconds{1});
   }
 }
@@ -1877,6 +1913,7 @@ static bool wait_for_staging_buffer(size_t slot) {
 static size_t acquire_frame_slot() {
   ZoneScopedN("Acquire frame slot");
   const auto waitStart = PresentClock::now();
+  const auto deadline = waitStart + GpuWaitTimeout;
   while (true) {
     if (const auto slot = g_frameSlots.try_acquire()) {
       const auto waitDuration = PresentClock::now() - waitStart;
@@ -1884,12 +1921,16 @@ static size_t acquire_frame_slot() {
       TracyPlot("aurora: frameSlotWaitMs", waitMs);
       return *slot;
     }
+    if (PresentClock::now() >= deadline) {
+      FATAL("Timed out after {}s waiting to acquire a GPU frame slot", GpuWaitTimeout.count());
+    }
     wait_for_gpu_progress(std::chrono::microseconds{100});
   }
 }
 
 static std::optional<size_t> acquire_mapped_staging_buffer() {
   ZoneScopedN("Acquire mapped staging buffer");
+  const auto deadline = PresentClock::now() + GpuWaitTimeout;
   while (true) {
     if (auto slot = g_stagingSlots.try_acquire()) {
       if (wait_for_staging_buffer(*slot)) {
@@ -1897,6 +1938,9 @@ static std::optional<size_t> acquire_mapped_staging_buffer() {
       }
       g_stagingSlots.release(*slot);
       return std::nullopt;
+    }
+    if (PresentClock::now() >= deadline) {
+      FATAL("Timed out after {}s waiting to acquire a staging-buffer slot", GpuWaitTimeout.count());
     }
     wait_for_gpu_progress(std::chrono::microseconds{100});
   }
@@ -2151,6 +2195,13 @@ void end_frame(EndFrameCallback callback) {
   // The draw tag must not survive a frame. If the emitter stops tagging, a leaked tag would keep
   // stamping the previous object's identity onto every later draw, and interpolation would then
   // pair those draws with the wrong object's matrices — wrong, plausible, and silent.
+  CHECK(gx::fifo::g_pendingDrawExact == 0,
+        "frame ended with an unconsumed GX_AURORA_DRAW_EXACT marker and no following draw");
+  CHECK(gx::fifo::g_pendingDrawIndexedKeys.empty(),
+        "frame ended with {} unconsumed GX_AURORA_DRAW_INDEXED_KEYS and no following draw",
+        gx::fifo::g_pendingDrawIndexedKeys.size());
+  CHECK(gx::fifo::g_pendingDrawIndexedDeform == 0,
+        "frame ended with an unconsumed indexed-deform marker and no following draw");
   gx::fifo::g_pendingDrawTag = 0;
   gx::fifo::g_pendingDrawIndexedDeform = 0;
   end_pipeline_frame();

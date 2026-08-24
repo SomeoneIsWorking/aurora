@@ -71,6 +71,8 @@ if (AURORA_ENABLE_GX)
 
   add_executable(render_worker_tests
     render_worker_test.cpp
+    os_test_globals.cpp
+    ../lib/logging.cpp
     ../lib/gfx/render_worker.cpp
   )
   target_include_directories(render_worker_tests PRIVATE
@@ -81,6 +83,7 @@ if (AURORA_ENABLE_GX)
   target_link_libraries(render_worker_tests PRIVATE
     gtest
     gtest_main
+    fmt::fmt
     TracyClient
   )
   gtest_discover_tests(render_worker_tests)

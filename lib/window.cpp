@@ -92,6 +92,16 @@ void resize_swapchain() noexcept {
     }
   }
   g_windowSize = size;
+  if (size.fb_width == 0 || size.fb_height == 0 || size.native_fb_width == 0 || size.native_fb_height == 0) {
+#ifdef AURORA_ENABLE_GX
+    if (aurora::presentation_enabled()) {
+      // The main/event thread owns WSI reconfiguration. Synchronize the render worker and release
+      // the old surface only after the last acquired texture has left its callback.
+      webgpu::release_surface();
+    }
+#endif
+    return;
+  }
   if (g_renderer != nullptr) {
     SDL_SetRenderLogicalPresentation(g_renderer, static_cast<int>(size.native_fb_width),
                                      static_cast<int>(size.native_fb_height), SDL_LOGICAL_PRESENTATION_DISABLED);
@@ -117,14 +127,20 @@ void set_window_icon() noexcept {
 
 bool SDLCALL lifecycle_event_watch(void*, SDL_Event* event) {
   switch (event->type) {
-#if defined(SDL_PLATFORM_ANDROID) || defined(SDL_PLATFORM_APPLE)
   case SDL_EVENT_WINDOW_MINIMIZED:
+  case SDL_EVENT_WINDOW_HIDDEN:
+    g_surfaceReady.store(false, std::memory_order_release);
+#if defined(SDL_PLATFORM_ANDROID) || defined(SDL_PLATFORM_APPLE)
     g_backgrounded.store(true, std::memory_order_relaxed);
+#endif
     break;
   case SDL_EVENT_WINDOW_RESTORED:
+  case SDL_EVENT_WINDOW_SHOWN:
+    g_surfaceReady.store(true, std::memory_order_release);
+#if defined(SDL_PLATFORM_ANDROID) || defined(SDL_PLATFORM_APPLE)
     g_backgrounded.store(false, std::memory_order_relaxed);
-    break;
 #endif
+    break;
   default:
     break;
   }
@@ -209,7 +225,9 @@ void process_event(SDL_Event& event) {
     } else if (event.type == g_sdlCustomEventsStart + CustomEvent::RefreshSurface) {
       // Refresh surface (vsync changed)
 #ifdef AURORA_ENABLE_GX
-      webgpu::refresh_surface(false);
+      if (aurora::presentation_enabled()) {
+        webgpu::refresh_surface(false);
+      }
 #endif
     }
     break;
@@ -350,8 +368,9 @@ bool is_headless() noexcept {
     const char* e = std::getenv("SB_HEADLESS");
     const bool headless = e != nullptr && e[0] != '\0' && e[0] != '0';
     if (headless) {
-      Log.info("SB_HEADLESS: surface/swapchain will never be touched -- rendering "
-               "offscreen only, present is a no-op");
+      Log.info(
+          "SB_HEADLESS: surface/swapchain will never be touched -- rendering "
+          "offscreen only, present is a no-op");
     }
     return headless ? 1 : 0;
   }();
@@ -403,6 +422,22 @@ AuroraWindowSize get_window_size() {
   ASSERT(SDL_GetWindowSizeInPixels(g_window, &native_fb_w, &native_fb_h), "Failed to get window size in pixels: {}",
          SDL_GetError());
 
+  const float scale = SDL_GetWindowDisplayScale(g_window);
+  if (native_fb_w <= 0 || native_fb_h <= 0) {
+    // Minimized/hidden windows can have no drawable pixel extent. Preserve that state explicitly;
+    // feeding 0/0 through aspect fitting produces NaN and can reach lround before the WebGPU
+    // resize guard sees it.
+    return {
+        .width = static_cast<uint32_t>(std::max(width, 0)),
+        .height = static_cast<uint32_t>(std::max(height, 0)),
+        .fb_width = 0,
+        .fb_height = 0,
+        .native_fb_width = 0,
+        .native_fb_height = 0,
+        .scale = scale,
+    };
+  }
+
   int fb_w = native_fb_w;
   int fb_h = native_fb_h;
   // SB_FB_SCALE: pin the render framebuffer to configured_fb (GC 640x480) *
@@ -439,7 +474,6 @@ AuroraWindowSize get_window_size() {
     }
   }
 
-  const float scale = SDL_GetWindowDisplayScale(g_window);
   return {
       .width = static_cast<uint32_t>(width),
       .height = static_cast<uint32_t>(height),
@@ -466,8 +500,7 @@ double display_refresh_rate() {
     return 0.0;
   }
   if (mode->refresh_rate_numerator > 0 && mode->refresh_rate_denominator > 0) {
-    return static_cast<double>(mode->refresh_rate_numerator) /
-           static_cast<double>(mode->refresh_rate_denominator);
+    return static_cast<double>(mode->refresh_rate_numerator) / static_cast<double>(mode->refresh_rate_denominator);
   }
   return static_cast<double>(mode->refresh_rate);
 }

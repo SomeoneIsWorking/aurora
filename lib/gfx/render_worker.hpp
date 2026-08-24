@@ -14,6 +14,8 @@
 
 namespace aurora::gfx::render_worker {
 
+inline constexpr auto DefaultWorkerWaitTimeout = std::chrono::milliseconds{5000};
+
 enum class ItemType : uint8_t {
   BeginFrame,
   EncodePass,
@@ -40,7 +42,7 @@ struct QueueItem {
 
 class BoundedQueue {
 public:
-  explicit BoundedQueue(size_t capacity);
+  explicit BoundedQueue(size_t capacity, std::chrono::milliseconds waitTimeout = DefaultWorkerWaitTimeout);
 
   bool push(QueueItem item);
   std::optional<QueueItem> pop_for(std::chrono::milliseconds timeout, bool& closed);
@@ -50,6 +52,7 @@ public:
 
 private:
   size_t m_capacity = 0;
+  std::chrono::milliseconds m_waitTimeout;
   mutable std::mutex m_mutex;
   std::condition_variable m_notEmpty;
   std::condition_variable m_notFull;
@@ -59,7 +62,7 @@ private:
 
 class FrameSlotPool {
 public:
-  explicit FrameSlotPool(size_t slotCount);
+  explicit FrameSlotPool(size_t slotCount, std::chrono::milliseconds waitTimeout = DefaultWorkerWaitTimeout);
 
   size_t acquire();
   std::optional<size_t> try_acquire();
@@ -68,6 +71,7 @@ public:
   [[nodiscard]] size_t free_count() const;
 
 private:
+  std::chrono::milliseconds m_waitTimeout;
   mutable std::mutex m_mutex;
   std::condition_variable m_cv;
   std::vector<bool> m_freeSlots;
