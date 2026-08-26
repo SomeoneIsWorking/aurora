@@ -39,6 +39,8 @@
 
 #include "tracy/Tracy.hpp"
 
+#include "debug_group_snapshots.hpp"
+
 extern "C" void sb_timeline_frame();
 extern "C" void sb_timeline_log(const char* fmt, ...);
 
@@ -52,6 +54,7 @@ using webgpu::g_queue;
 #ifdef AURORA_GFX_DEBUG_GROUPS
 std::vector<std::string> g_debugGroupStack;
 std::vector<std::string> g_debugMarkers;
+uint64_t g_debugGroupRevision = 0;
 #endif
 
 static std::string pass_label(std::string_view kind) {
@@ -102,7 +105,7 @@ enum class CommandType {
 struct Command {
   CommandType type;
 #ifdef AURORA_GFX_DEBUG_GROUPS
-  std::vector<std::string> debugGroupStack;
+  uint32_t debugGroupStackIndex = DebugGroupSnapshots::NoStack;
 #endif
   union Data {
     Viewport setViewport;
@@ -203,6 +206,9 @@ struct RenderPass {
   wgpu::LoadOp stencilLoadOp = wgpu::LoadOp::Undefined;
   wgpu::StoreOp stencilStoreOp = wgpu::StoreOp::Undefined;
   uint32_t stencilClearValue = 0;
+#ifdef AURORA_GFX_DEBUG_GROUPS
+  DebugGroupSnapshots debugGroupSnapshots;
+#endif
   CommandList commands;
   bool clearColor = true;
   bool clearDepth = true;
@@ -930,11 +936,7 @@ bool capture_replay_snapshot() {
   static_assert(std::is_trivially_copyable_v<Command::Data>,
                 "Command::Data is a union; a non-trivially-copyable member makes the replay's "
                 "CommandList copy wrong. Give Command a real copy constructor before enabling it.");
-#if !defined(AURORA_GFX_DEBUG_GROUPS)
-  // Command itself is trivially copyable only without the debug-group string vector; that vector
-  // copies correctly (it is not in the union), it is just not free.
   static_assert(std::is_trivially_copyable_v<Command>, "Command is expected to be a POD command record");
-#endif
   if (g_recordingFrame == nullptr) {
     Log.error("capture_replay_snapshot: no frame is recording; nothing to snapshot");
     return false;
@@ -1488,7 +1490,7 @@ static inline void push_command(CommandType type, const Command::Data& data) {
   renderPass.commands.push_back({
       .type = type,
 #ifdef AURORA_GFX_DEBUG_GROUPS
-      .debugGroupStack = g_debugGroupStack,
+      .debugGroupStackIndex = renderPass.debugGroupSnapshots.capture(g_debugGroupStack, g_debugGroupRevision),
 #endif
       .data = data,
   });
@@ -2356,6 +2358,7 @@ void end_frame(EndFrameCallback callback) {
       Log.warn("Debug group was not popped at end of frame: {}", it);
     }
     g_debugGroupStack.clear();
+    ++g_debugGroupRevision;
   }
 
   if (g_debugMarkers.size() > 0) {
@@ -2694,6 +2697,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
   g_currentPipeline = UINTPTR_MAX;
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> lastDebugGroupStack;
+  uint32_t lastDebugGroupStackIndex = DebugGroupSnapshots::NoStack;
 #endif
 
   // Bind static bind group for the whole pass
@@ -2702,10 +2706,14 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
 
   for (const auto& cmd : passInfo.commands) {
 #ifdef AURORA_GFX_DEBUG_GROUPS
-    {
+    if (cmd.debugGroupStackIndex != lastDebugGroupStackIndex) {
+      CHECK(passInfo.debugGroupSnapshots.contains(cmd.debugGroupStackIndex),
+            "command references debug-group snapshot {}, but this pass retained only {}", cmd.debugGroupStackIndex,
+            passInfo.debugGroupSnapshots.size());
+      const auto& debugGroupStack = passInfo.debugGroupSnapshots.resolve(cmd.debugGroupStackIndex);
       size_t firstDiff = lastDebugGroupStack.size();
       for (size_t i = 0; i < lastDebugGroupStack.size(); ++i) {
-        if (i >= cmd.debugGroupStack.size() || cmd.debugGroupStack[i] != lastDebugGroupStack[i]) {
+        if (i >= debugGroupStack.size() || debugGroupStack[i] != lastDebugGroupStack[i]) {
           firstDiff = i;
           break;
         }
@@ -2713,10 +2721,11 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
       for (size_t i = firstDiff; i < lastDebugGroupStack.size(); ++i) {
         pass.PopDebugGroup();
       }
-      for (size_t i = firstDiff; i < cmd.debugGroupStack.size(); ++i) {
-        pass.PushDebugGroup(cmd.debugGroupStack[i].c_str());
+      for (size_t i = firstDiff; i < debugGroupStack.size(); ++i) {
+        pass.PushDebugGroup(debugGroupStack[i].c_str());
       }
-      lastDebugGroupStack = cmd.debugGroupStack;
+      lastDebugGroupStack = debugGroupStack;
+      lastDebugGroupStackIndex = cmd.debugGroupStackIndex;
     }
 #endif
     switch (cmd.type) {
@@ -3024,11 +3033,13 @@ void insert_debug_marker(std::string label) {
 void aurora::gfx::push_debug_group(std::string label) {
 #if defined(AURORA_GFX_DEBUG_GROUPS)
   g_debugGroupStack.push_back(std::move(label));
+  ++g_debugGroupRevision;
 #endif
 }
 void push_debug_group(const char* label) {
 #ifdef AURORA_GFX_DEBUG_GROUPS
   aurora::gfx::g_debugGroupStack.emplace_back(label);
+  ++aurora::gfx::g_debugGroupRevision;
 #endif
 }
 void pop_debug_group() {
@@ -3039,6 +3050,7 @@ void pop_debug_group() {
   }
 
   aurora::gfx::g_debugGroupStack.pop_back();
+  ++aurora::gfx::g_debugGroupRevision;
 #endif
 }
 

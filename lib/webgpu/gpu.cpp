@@ -988,6 +988,13 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   InitializationAttempt attempt;
   if (!g_instance) {
     Log.info("Creating WebGPU instance");
+#if defined(AURORA_GPU_DIAGNOSTICS_FULL)
+    Log.info("GPU diagnostics: backend-validation=full api-validation=on robustness=on debug-groups=on");
+#elif defined(AURORA_GPU_DIAGNOSTICS_STANDARD)
+    Log.info("GPU diagnostics: backend-validation=requested-partial api-validation=on robustness=on debug-groups=on");
+#else
+    Log.info("GPU diagnostics: backend-validation=disabled api-validation=off robustness=off debug-groups=off");
+#endif
     const std::array requiredInstanceFeatures{
         wgpu::InstanceFeatureName::TimedWaitAny,
     };
@@ -997,7 +1004,13 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     };
 #ifdef WEBGPU_DAWN
     dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
+#if defined(AURORA_GPU_DIAGNOSTICS_FULL)
+    dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Full;
+#elif defined(AURORA_GPU_DIAGNOSTICS_STANDARD)
+    dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Partial;
+#else
     dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
+#endif
     dawnInstanceDescriptor.SetLoggingCallback(wgpu_log);
 #ifdef TRACY_ENABLE
     dawnInstanceDescriptor.platform = tracy_dawn_platform();
@@ -1179,11 +1192,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     constexpr std::array enableToggles{
 #if _WIN32
         "use_dxc",
-#ifndef NDEBUG
+#if defined(AURORA_GPU_DIAGNOSTICS_STANDARD) || defined(AURORA_GPU_DIAGNOSTICS_FULL)
         "emit_hlsl_debug_symbols",
 #endif
 #endif
-#ifdef NDEBUG
+#if !defined(AURORA_GPU_DIAGNOSTICS_STANDARD) && !defined(AURORA_GPU_DIAGNOSTICS_FULL)
         "skip_validation",
         "disable_robustness",
 #endif

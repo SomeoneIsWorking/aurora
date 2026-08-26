@@ -13,6 +13,15 @@ option(AURORA_ENABLE_CARD "Enable CARD implementation based on kabufuda" ON)
 option(AURORA_ENABLE_RMLUI "Enable HTML/CSS Based UI Library for use in end-user UI development." OFF)
 option(AURORA_CACHE_USE_ZSTD "Compress WebGPU cache entries with zstd" ON)
 option(AURORA_BUILD_TESTS "Build Aurora's own test suite" ${PROJECT_IS_TOP_LEVEL})
+set(AURORA_GPU_DIAGNOSTICS "standard" CACHE STRING
+  "GPU diagnostics: off, standard (minimum backend validation), or full")
+set_property(CACHE AURORA_GPU_DIAGNOSTICS PROPERTY STRINGS off standard full)
+set(_aurora_gpu_diagnostic_modes off standard full)
+if (NOT AURORA_GPU_DIAGNOSTICS IN_LIST _aurora_gpu_diagnostic_modes)
+    message(FATAL_ERROR
+      "AURORA_GPU_DIAGNOSTICS must be one of: off, standard, full (got '${AURORA_GPU_DIAGNOSTICS}')")
+endif ()
+unset(_aurora_gpu_diagnostic_modes)
 
 # Specifies a cache string and previous values to forcibly migrate from
 macro(_aurora_dependency_version name value doc)
