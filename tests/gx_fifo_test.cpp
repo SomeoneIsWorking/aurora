@@ -2512,7 +2512,9 @@ TEST_F(GXFifoTest, ChanCtrl_Color1_SpecularLighting) {
   EXPECT_TRUE(cfg.lightingEnabled);
   EXPECT_EQ(cfg.matSrc, GX_SRC_REG);
   EXPECT_EQ(cfg.ambSrc, GX_SRC_REG);
-  EXPECT_EQ(cfg.diffFn, GX_DF_SIGN);
+  // The retail XF encoding has no independent diffuse-function field for
+  // specular attenuation; GXSetChanCtrl must encode it as GX_DF_NONE.
+  EXPECT_EQ(cfg.diffFn, GX_DF_NONE);
   EXPECT_EQ(cfg.attnFn, GX_AF_SPEC);
 
   auto& state = g_gxState.colorChannelState[GX_COLOR1];
