@@ -15,6 +15,8 @@
 #include "../rmlui/pipeline.hpp"
 #endif
 #include "pipeline_cache.hpp"
+#include "persistent_upload.hpp"
+#include "replay_draw_validation.hpp"
 #include "render_worker.hpp"
 #include "tex_copy_conv.hpp"
 #include "tex_palette_conv.hpp"
@@ -76,6 +78,7 @@ struct StagingHighWater {
   uint32_t uniforms = 0;
   uint32_t indices = 0;
   uint32_t storage = 0;
+  uint32_t persistentStorage = 0;
   uint32_t textureUpload = 0;
   size_t textureUploadCount = 0;
 };
@@ -462,6 +465,7 @@ static StagingHighWater current_high_water(const FramePacket& frame) noexcept {
       .uniforms = static_cast<uint32_t>(frame.uniforms.size()),
       .indices = static_cast<uint32_t>(frame.indices.size()),
       .storage = static_cast<uint32_t>(frame.storage.size()),
+      .persistentStorage = static_cast<uint32_t>(persistent_storage_used()),
       .textureUpload = static_cast<uint32_t>(frame.textureUpload.size()),
       .textureUploadCount = frame.textureUploads.size(),
   };
@@ -2474,7 +2478,60 @@ static void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& f
   }
 }
 
+static void validate_replay_draws(const FramePacket& frame, const FrameOp& op) {
+  if (!frame.replayEmission || op.type != FrameOpType::RenderPass || op.renderPass == nullptr) {
+    return;
+  }
+
+  const replay_draw_validation::FrameBounds bounds{
+      .vertices = {op.highWater.verts, frame.replayPrefix.verts, static_cast<uint32_t>(VertexBufferSize)},
+      .uniforms = {op.highWater.uniforms, 0, static_cast<uint32_t>(UniformBufferSize)},
+      .indices = {op.highWater.indices, frame.replayPrefix.indices, static_cast<uint32_t>(IndexBufferSize)},
+      .storage = {op.highWater.storage, frame.replayPrefix.storage, static_cast<uint32_t>(StorageBufferSize)},
+      .persistentStorageEnd = static_cast<uint32_t>(StorageBufferSize) + op.highWater.persistentStorage,
+      .uniformOffsetAlignment = static_cast<uint32_t>(g_cachedLimits.minUniformBufferOffsetAlignment),
+  };
+  const std::span<const uint8_t> uniforms{frame.uniforms.data(), frame.uniforms.size()};
+  for (const auto& command : op.renderPass->commands) {
+    if (command.type != CommandType::Draw) {
+      continue;
+    }
+    switch (command.data.draw.type) {
+    case ShaderType::Clear:
+      break;
+    case ShaderType::GX:
+      replay_draw_validation::record_unchecked(
+          replay_draw_validation::validate_gx(command.data.draw.gx, uniforms, bounds));
+      break;
+#ifdef AURORA_ENABLE_RMLUI
+    case ShaderType::Rml: {
+      const auto& draw = command.data.draw.rml;
+      replay_draw_validation::record_unchecked(replay_draw_validation::validate_rml(
+          {
+              .vertexRange = draw.vertexRange,
+              .indexRange = draw.indexRange,
+              .uniformRange = draw.uniformRange,
+              .bindGroup1 = draw.bindGroup1,
+              .bindGroup2 = draw.bindGroup2,
+              .bindGroup1DynamicOffset = draw.bindGroup1DynamicOffset,
+              .bindGroup2DynamicOffset = draw.bindGroup2DynamicOffset,
+              .dynamicBindGroupMask = draw.dynamicBindGroupMask,
+              .drawKind = draw.drawKind,
+              .vertexCount = draw.vertexCount,
+              .indexCount = draw.indexCount,
+              .vertexStride = sizeof(Rml::Vertex),
+              .requiredUniformSize = sizeof(rmlui::UniformBlock),
+          },
+          bounds));
+      break;
+    }
+#endif
+    }
+  }
+}
+
 static void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op) {
+  validate_replay_draws(frame, op);
   copy_staging_to_high_water(cmd, frame, op);
   switch (op.type) {
   case FrameOpType::RenderPass:
@@ -2842,7 +2899,8 @@ uint64_t sPersistentTop = StorageBufferSize;
 uint64_t persistent_storage_used() { return sPersistentTop - StorageBufferSize; }
 size_t persistent_storage_entries() { return sPersistentArrays.size(); }
 
-static void write_storage_region(uint64_t offset, const uint8_t* data, size_t length) {
+static void write_storage_region_on_worker(uint64_t offset, const uint8_t* data, size_t length) {
+  CHECK(render_worker::is_worker_thread(), "Persistent storage write at offset {} bypassed the render worker", offset);
   // WriteBuffer requires a 4-byte multiple size and offset. Array extents are not guaranteed to
   // be one, and rounding the size UP would read past the end of the game's array — so the tail is
   // copied through a small padded scratch instead of over-reading guest memory.
@@ -2875,7 +2933,7 @@ Range push_storage_persistent(const uint8_t* data, size_t length, ArrayUploadKey
     if (it->second.hash != contentHash) {
       // Same array, rewritten in place by the game: refresh the SAME region so every draw that
       // already resolved this offset stays correct.
-      write_storage_region(it->second.offset, data, length);
+      persistent_upload::schedule(it->second.offset, data, length, write_storage_region_on_worker);
       it->second.hash = contentHash;
       if (outUploaded != nullptr) {
         *outUploaded = true;
@@ -2892,7 +2950,7 @@ Range push_storage_persistent(const uint8_t* data, size_t length, ArrayUploadKey
     return {0, 0}; // full — caller falls back
   }
   sPersistentTop = off + reserved;
-  write_storage_region(off, data, length);
+  persistent_upload::schedule(off, data, length, write_storage_region_on_worker);
   sPersistentArrays[key] = {static_cast<uint32_t>(off), static_cast<uint32_t>(length), contentHash};
   if (outUploaded != nullptr) {
     *outUploaded = true;

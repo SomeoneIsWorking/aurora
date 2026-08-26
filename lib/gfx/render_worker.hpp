@@ -19,6 +19,7 @@ inline constexpr auto DefaultWorkerWaitTimeout = std::chrono::milliseconds{5000}
 enum class ItemType : uint8_t {
   BeginFrame,
   EncodePass,
+  PersistentUpload,
   EndFrame,
   Sync,
   Shutdown,
@@ -82,6 +83,7 @@ void shutdown();
 
 void enqueue_begin_frame(uint64_t frameId, WorkCallback work);
 void enqueue_encode_pass(uint64_t frameId, uint32_t passIndex, WorkCallback work);
+void enqueue_persistent_upload(WorkCallback work);
 void enqueue_end_frame(uint64_t frameId, WorkCallback work);
 void enqueue_work(WorkCallback work);
 void synchronize();

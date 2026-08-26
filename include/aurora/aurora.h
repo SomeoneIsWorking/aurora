@@ -85,6 +85,8 @@ typedef enum {
   AURORA_GPU_PROBE_SUBMIT_RETURN,
   AURORA_GPU_PROBE_SUBMIT_COMPLETE,
   AURORA_GPU_PROBE_DEVICE_LOST,
+  /* Appended after DEVICE_LOST to preserve the persisted numeric values above. */
+  AURORA_GPU_PROBE_UNCAPTURED_ERROR,
 } AuroraGpuProbePhase;
 
 typedef enum {
@@ -104,6 +106,7 @@ typedef enum {
 
 #define AURORA_GPU_PROBE_MAX_PASSES 16
 #define AURORA_GPU_PROBE_MAX_DRAWS 9
+#define AURORA_GPU_PROBE_MAX_MESSAGE 432
 #define AURORA_GPU_PROBE_VERSION 2
 
 /* Values stored in AuroraGpuDrawProbe::shaderType. Keep these synchronized with Aurora's
