@@ -246,6 +246,13 @@ void enqueue_encode_pass(uint64_t frameId, uint32_t passIndex, WorkCallback work
   });
 }
 
+void enqueue_persistent_upload(WorkCallback work) {
+  enqueue({
+      .type = ItemType::PersistentUpload,
+      .work = std::move(work),
+  });
+}
+
 void enqueue_end_frame(uint64_t frameId, WorkCallback work) {
   enqueue({
       .type = ItemType::EndFrame,

@@ -88,6 +88,48 @@ if (AURORA_ENABLE_GX)
   )
   gtest_discover_tests(render_worker_tests)
 
+  add_executable(persistent_upload_tests
+    persistent_upload_test.cpp
+    os_test_globals.cpp
+    ../lib/logging.cpp
+    ../lib/gfx/persistent_upload.cpp
+    ../lib/gfx/render_worker.cpp
+  )
+  target_include_directories(persistent_upload_tests PRIVATE
+    ../include
+    ../lib
+  )
+  target_compile_definitions(persistent_upload_tests PRIVATE AURORA TARGET_PC)
+  target_link_libraries(persistent_upload_tests PRIVATE
+    gtest
+    gtest_main
+    fmt::fmt
+    TracyClient
+  )
+  gtest_discover_tests(persistent_upload_tests)
+
+  add_executable(replay_draw_validation_tests
+    replay_draw_validation_test.cpp
+    os_test_globals.cpp
+    ../lib/logging.cpp
+    ../lib/gfx/replay_draw_validation.cpp
+  )
+  target_include_directories(replay_draw_validation_tests PRIVATE
+    ../include
+    ../lib
+  )
+  target_compile_definitions(replay_draw_validation_tests PRIVATE AURORA TARGET_PC)
+  target_link_libraries(replay_draw_validation_tests PRIVATE
+    gtest
+    gtest_main
+    fmt::fmt
+    dawn::dawncpp_headers
+    TracyClient
+    xxhash
+    absl::flat_hash_map
+  )
+  gtest_discover_tests(replay_draw_validation_tests)
+
   add_executable(frame_readback_flight_tests frame_readback_flight_test.cpp)
   target_include_directories(frame_readback_flight_tests PRIVATE ../lib)
   target_link_libraries(frame_readback_flight_tests PRIVATE gtest gtest_main)

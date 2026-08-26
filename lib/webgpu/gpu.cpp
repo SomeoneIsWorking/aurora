@@ -6,7 +6,9 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -74,10 +76,48 @@ bool g_textureComponentSwizzleSupported = false;
 
 namespace {
 
-void emit_gpu_probe(AuroraGpuProbePhase phase, const AuroraGpuSubmitInfo* info, wgpu::StringView message = {}) {
-  if (g_config.gpuProbeCallback != nullptr) {
-    g_config.gpuProbeCallback(phase, info, message.data, message.length, g_config.gpuProbeUser);
+std::size_t resolved_message_length(wgpu::StringView message) noexcept {
+  // StringView::length may be kStrlen for a NUL-terminated Dawn callback message. The generated
+  // API resolves that sentinel with strlen; passing it as a byte count would over-read in the host.
+  if (message.data == nullptr) {
+    return 0;
   }
+  return message.length == wgpu::kStrlen ? std::char_traits<char>::length(message.data) : message.length;
+}
+
+void invoke_gpu_probe(AuroraGpuProbeCallback callback, void* user, AuroraGpuProbePhase phase,
+                      const AuroraGpuSubmitInfo* info, wgpu::StringView message = {}) {
+  if (callback != nullptr) {
+    callback(phase, info, message.data, resolved_message_length(message), user);
+  }
+}
+
+void emit_gpu_probe(AuroraGpuProbePhase phase, const AuroraGpuSubmitInfo* info, wgpu::StringView message = {}) {
+  invoke_gpu_probe(g_config.gpuProbeCallback, g_config.gpuProbeUser, phase, info, message);
+}
+
+void emit_uncaptured_error_probe(wgpu::ErrorType type, wgpu::StringView message) {
+  if (g_config.gpuProbeCallback == nullptr) {
+    return;
+  }
+
+  // The uncaptured-error callback is immediately followed by FATAL. Keep the diagnostic bounded
+  // and allocation-free so the host recorder can synchronize it before process termination.
+  std::array<char, AURORA_GPU_PROBE_MAX_MESSAGE> diagnostic{};
+  const std::string_view typeName = magic_enum::enum_name(type);
+  const std::string_view printableTypeName = typeName.empty() ? std::string_view{"Unknown"} : typeName;
+  // Resolve kStrlen before applying the incident-format byte cap.
+  const std::size_t messageLength = resolved_message_length(message);
+  const int prefixLength = std::snprintf(diagnostic.data(), diagnostic.size(),
+                                         "type=%u(%.*s) message=", static_cast<unsigned>(underlying(type)),
+                                         static_cast<int>(printableTypeName.size()), printableTypeName.data());
+  const std::size_t prefixSize = prefixLength <= 0 ? 0 : std::min<std::size_t>(prefixLength, diagnostic.size() - 1);
+  const std::size_t copiedMessageSize = std::min(messageLength, diagnostic.size() - prefixSize);
+  if (copiedMessageSize != 0) {
+    std::memcpy(diagnostic.data() + prefixSize, message.data, copiedMessageSize);
+  }
+  g_config.gpuProbeCallback(AURORA_GPU_PROBE_UNCAPTURED_ERROR, nullptr, diagnostic.data(),
+                            prefixSize + copiedMessageSize, g_config.gpuProbeUser);
 }
 
 enum class DeviceLifecycle : uint8_t {
@@ -307,8 +347,8 @@ void submit_command_buffer(const wgpu::CommandBuffer& buffer, AuroraGpuSubmitInf
                                 [callback, user, info](wgpu::QueueWorkDoneStatus status, wgpu::StringView message) {
                                   auto completed = info;
                                   completed.status = static_cast<uint32_t>(status);
-                                  callback(AURORA_GPU_PROBE_SUBMIT_COMPLETE, &completed, message.data, message.length,
-                                           user);
+                                  invoke_gpu_probe(callback, user, AURORA_GPU_PROBE_SUBMIT_COMPLETE, &completed,
+                                                   message);
                                 });
   }
 }
@@ -1183,6 +1223,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
                                                            std::memory_order_acq_rel)) {
             Log.error("WebGPU initialization error {}: {}", underlying(type), message);
           } else if (expected == DeviceLifecycle::Running) {
+            emit_uncaptured_error_probe(type, message);
             FATAL("WebGPU error {}: {}", underlying(type), message);
           } else {
             Log.error("WebGPU error while device lifecycle is {}: {}", underlying(expected), message);
