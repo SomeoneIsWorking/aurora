@@ -294,7 +294,7 @@ uint32_t viewport_extent(float value) noexcept {
 
 void submit_command_buffer(const wgpu::CommandBuffer& buffer, AuroraGpuSubmitInfo info) {
   info.structSize = sizeof(info);
-  info.version = 1;
+  info.version = AURORA_GPU_PROBE_VERSION;
   info.submitId = g_submitId.fetch_add(1, std::memory_order_relaxed);
   emit_gpu_probe(AURORA_GPU_PROBE_SUBMIT_BEGIN, &info);
   g_queue.Submit(1, &buffer);
