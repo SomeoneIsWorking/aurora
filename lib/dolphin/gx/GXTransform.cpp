@@ -278,8 +278,12 @@ void GXSetViewportJitter(float left, float top, float width, float height, float
 
   sx = width / 2.0f;
   sy = -height / 2.0f;
-  ox = 340.0f + (left + width / 2.0f);
-  oy = 340.0f + (top + height / 2.0f);
+  // The retail SDK encodes the XF viewport origin relative to 342. Keep this
+  // paired with command_processor.cpp's FIFO decode so SDK calls and replayed
+  // command streams reconstruct the same logical viewport.
+  constexpr float kViewportOriginBias = 342.0f;
+  ox = kViewportOriginBias + (left + width / 2.0f);
+  oy = kViewportOriginBias + (top + height / 2.0f);
   zmin = 1.6777215e7f * nearZ;
   zmax = 1.6777215e7f * farZ;
   sz = zmax - zmin;
