@@ -9,10 +9,6 @@ extern "C" {
 #include "stdint.h"
 #endif
 
-#if !defined(NDEBUG) && !defined(AURORA_GFX_DEBUG_GROUPS)
-#define AURORA_GFX_DEBUG_GROUPS
-#endif
-
 void push_debug_group(const char* label);
 void pop_debug_group();
 

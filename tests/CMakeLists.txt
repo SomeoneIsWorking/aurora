@@ -153,6 +153,10 @@ if (AURORA_ENABLE_GX)
   )
   gtest_discover_tests(gpu_submit_probe_tests)
 
+  add_executable(debug_group_snapshots_tests debug_group_snapshots_test.cpp)
+  target_link_libraries(debug_group_snapshots_tests PRIVATE gtest gtest_main)
+  gtest_discover_tests(debug_group_snapshots_tests)
+
   # Triangle-index generation. Header-only, so this needs no GX/WebGPU link — which is the point:
   # the code it covers used to be static inside command_processor.cpp and therefore untestable.
   add_executable(gx_prim_index_tests gx_prim_index_test.cpp)
