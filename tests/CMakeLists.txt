@@ -88,6 +88,29 @@ if (AURORA_ENABLE_GX)
   )
   gtest_discover_tests(render_worker_tests)
 
+  add_executable(frame_readback_flight_tests frame_readback_flight_test.cpp)
+  target_include_directories(frame_readback_flight_tests PRIVATE ../lib)
+  target_link_libraries(frame_readback_flight_tests PRIVATE gtest gtest_main)
+  gtest_discover_tests(frame_readback_flight_tests)
+
+  add_executable(gpu_submit_probe_tests
+    gpu_submit_probe_test.cpp
+    os_test_globals.cpp
+    ../lib/gfx/gpu_submit_probe.cpp
+    ../lib/logging.cpp
+  )
+  target_include_directories(gpu_submit_probe_tests PRIVATE ../include ../lib)
+  target_compile_definitions(gpu_submit_probe_tests PRIVATE AURORA TARGET_PC WEBGPU_DAWN)
+  target_link_libraries(gpu_submit_probe_tests PRIVATE
+    gtest
+    gtest_main
+    fmt::fmt
+    xxhash
+    dawn::dawncpp_headers
+    TracyClient
+  )
+  gtest_discover_tests(gpu_submit_probe_tests)
+
   # Triangle-index generation. Header-only, so this needs no GX/WebGPU link — which is the point:
   # the code it covers used to be static inside command_processor.cpp and therefore untestable.
   add_executable(gx_prim_index_tests gx_prim_index_test.cpp)

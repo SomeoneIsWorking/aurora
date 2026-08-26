@@ -19,6 +19,7 @@
 
 #include "input.hpp"
 #include "internal.hpp"
+#include "frame_readback_flight.hpp"
 #include "window.hpp"
 
 #include <SDL3/SDL_filesystem.h>
@@ -491,6 +492,14 @@ void end_frame_impl(bool replayEmission) noexcept {
     // Frame sink (aurora_set_frame_sink): an independent capture cadence, so an in-process
     // parity comparison can run alongside — or without — the file dumps.
     static int s_sinkCountdown = 0;
+    // Map callbacks are spontaneous and may lag arbitrarily far behind frame submission. Keep
+    // explicit lifecycle counts so the GPU flight recorder can distinguish an ordinary frame from
+    // a frame-dump burst that has accumulated readbacks. These are observations, not a guessed
+    // concurrency limit: the driver failure that motivated them happened with several copies/maps
+    // outstanding, but that does not by itself establish a safe magic threshold.
+    static FrameReadbackFlight s_dumpFlight;
+    uint32_t readbackQueuedThisSubmit = 0;
+    uint32_t readbackBytesThisSubmit = 0;
     if (s_dumpFramesLeft == -2) {
       s_dumpPath = std::getenv("SB_DUMP_FRAME");
       if (s_dumpPath && s_dumpPath[0]) {
@@ -513,11 +522,13 @@ void end_frame_impl(bool replayEmission) noexcept {
     // callback owns its job (shared_ptr capture), so any number of dumps can
     // be in flight without clobbering each other.
     for (auto& jobRef : s_dumpAwaitingMap) {
-      auto job = jobRef;
+      auto job = std::move(jobRef);
       const uint32_t bpr = ((job->width * 4 + 255) / 256) * 256;
       const uint64_t totalBytes = static_cast<uint64_t>(bpr) * job->height;
+      s_dumpFlight.map_requested();
       job->buffer.MapAsync(wgpu::MapMode::Read, 0, totalBytes, wgpu::CallbackMode::AllowSpontaneous,
                            [job](wgpu::MapAsyncStatus status, wgpu::StringView) {
+                             auto callback = s_dumpFlight.callback_started();
                              if (status != wgpu::MapAsyncStatus::Success) {
                                Log.error("SB_DUMP_FRAME map failed status={} ({})", static_cast<int>(status),
                                          job->path);
@@ -527,9 +538,11 @@ void end_frame_impl(bool replayEmission) noexcept {
                              const auto* mapped = static_cast<const uint8_t*>(
                                  job->buffer.GetConstMappedRange(0, static_cast<uint64_t>(bpr) * job->height));
                              if (!mapped) {
+                               job->buffer.Unmap();
                                Log.error("SB_DUMP_FRAME: GetConstMappedRange returned null ({})", job->path);
                                return;
                              }
+                             callback.mark_map_success();
                              if (job->sink != nullptr) {
                                // Repack into tightly-packed RGBA8: the mapped rows are padded to a
                                // 256-byte stride, which a consumer expecting width*4 would misread.
@@ -632,6 +645,8 @@ void end_frame_impl(bool replayEmission) noexcept {
       };
       const wgpu::Extent3D copySize{job->width, job->height, 1};
       encoder.CopyTextureToBuffer(&srcInfo, &dstInfo, &copySize);
+      ++readbackQueuedThisSubmit;
+      readbackBytesThisSubmit += static_cast<uint32_t>(bd.size);
       Log.info("SB_DUMP_FRAME: queued dump ({}x{}, bytesPerRow={}) -> {}", job->width, job->height, bytesPerRow,
                job->path);
       s_dumpAwaitingMap.push_back(std::move(job));
@@ -672,6 +687,8 @@ void end_frame_impl(bool replayEmission) noexcept {
       };
       const wgpu::Extent3D copySize{job->width, job->height, 1};
       encoder.CopyTextureToBuffer(&srcInfo, &dstInfo, &copySize);
+      ++readbackQueuedThisSubmit;
+      readbackBytesThisSubmit += static_cast<uint32_t>(bd.size);
       s_dumpAwaitingMap.push_back(std::move(job));
     }
     const bool headless = window::is_headless();
@@ -761,8 +778,14 @@ void end_frame_impl(bool replayEmission) noexcept {
     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
     const auto buffer = encoder.Finish(&cmdBufDescriptor);
     auto probe = submitProbe;
+    const FrameReadbackFlightSnapshot readbackFlight = s_dumpFlight.snapshot();
     probe.presentEnabled = presentationEnabled ? 1u : 0u;
     probe.headless = headless ? 1u : 0u;
+    probe.readbackQueuedThisSubmit = readbackQueuedThisSubmit;
+    probe.readbackBytesThisSubmit = readbackBytesThisSubmit;
+    probe.readbackMapsPending = readbackFlight.mapsPending;
+    probe.readbackMapsCompleted = readbackFlight.mapsCompleted;
+    probe.readbackMapsFailed = readbackFlight.mapsFailed;
     {
       ZoneScopedN("Queue Submit");
       webgpu::submit_command_buffer(buffer, probe);

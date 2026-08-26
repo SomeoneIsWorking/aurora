@@ -6,6 +6,7 @@
 
 #include "clear.hpp"
 #include "depth_peek.hpp"
+#include "gpu_submit_probe.hpp"
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
 #include "../webgpu/gpu_prof.hpp"
@@ -466,131 +467,141 @@ static StagingHighWater current_high_water(const FramePacket& frame) noexcept {
   };
 }
 
-template <typename T>
-static void probe_hash(Hasher& hasher, const T& value) {
-  hasher.update(&value, sizeof(value));
-}
-
-static void probe_hash_range(Hasher& hasher, const Range& range) {
-  probe_hash(hasher, range.offset);
-  probe_hash(hasher, range.size);
-}
-
-static PipelineRef probe_hash_draw(Hasher& commandHasher, const ShaderDrawCommand& draw) {
-  probe_hash(commandHasher, draw.type);
-  switch (draw.type) {
-  case ShaderType::Clear:
-    probe_hash(commandHasher, draw.clear.pipeline);
-    probe_hash(commandHasher, draw.clear.color);
-    probe_hash(commandHasher, draw.clear.depth);
-    probe_hash(commandHasher, draw.clear.rectEnabled);
-    probe_hash(commandHasher, draw.clear.rect);
-    return draw.clear.pipeline;
-  case ShaderType::GX:
-    probe_hash(commandHasher, draw.gx.pipeline);
-    probe_hash_range(commandHasher, draw.gx.vertRange);
-    probe_hash_range(commandHasher, draw.gx.idxRange);
-    probe_hash_range(commandHasher, draw.gx.uniformRange);
-    probe_hash(commandHasher, draw.gx.vtxCount);
-    probe_hash(commandHasher, draw.gx.indexCount);
-    probe_hash(commandHasher, draw.gx.instanceCount);
-    probe_hash(commandHasher, draw.gx.bindGroups);
-    probe_hash(commandHasher, draw.gx.dstAlpha);
-    probe_hash(commandHasher, draw.gx.tag);
-    probe_hash(commandHasher, draw.gx.pop);
-    probe_hash(commandHasher, draw.gx.exact);
-    probe_hash(commandHasher, draw.gx.vtxStride);
-    probe_hash(commandHasher, draw.gx.posOffset);
-    return draw.gx.pipeline;
-#ifdef AURORA_ENABLE_RMLUI
-  case ShaderType::Rml:
-    probe_hash(commandHasher, draw.rml.pipeline);
-    probe_hash_range(commandHasher, draw.rml.vertexRange);
-    probe_hash_range(commandHasher, draw.rml.indexRange);
-    probe_hash_range(commandHasher, draw.rml.uniformRange);
-    probe_hash(commandHasher, draw.rml.bindGroup1);
-    probe_hash(commandHasher, draw.rml.bindGroup2);
-    probe_hash(commandHasher, draw.rml.vertexCount);
-    probe_hash(commandHasher, draw.rml.indexCount);
-    probe_hash(commandHasher, draw.rml.stencilRef);
-    return draw.rml.pipeline;
-#endif
-  }
-  return 0;
-}
+static_assert(static_cast<uint8_t>(ShaderType::Clear) == AURORA_GPU_DRAW_CLEAR);
+static_assert(static_cast<uint8_t>(ShaderType::GX) == AURORA_GPU_DRAW_GX);
+static_assert(static_cast<uint8_t>(ShaderType::Rml) == AURORA_GPU_DRAW_RML);
 
 static AuroraGpuSubmitInfo build_submit_probe(const FramePacket& frame) {
-  AuroraGpuSubmitInfo info{};
-  info.structSize = sizeof(info);
-  info.version = 1;
-  info.kind = AURORA_GPU_SUBMIT_FRAME;
-  info.replayEmission = frame.replayEmission ? 1u : 0u;
-  info.frameId = frame.frameId;
-  info.frameIndex = frame.frameIndex;
-  info.passCount = static_cast<uint32_t>(frame.renderPasses.size());
-  info.recordedPassCount = std::min<uint32_t>(info.passCount, AURORA_GPU_PROBE_MAX_PASSES);
-  info.operationCount = static_cast<uint32_t>(frame.ops.size());
-  info.textureUploadCount = static_cast<uint32_t>(frame.textureUploads.size());
-  info.textureCopyCount = static_cast<uint32_t>(frame.textureCopies.size());
-  info.vertexBytes = static_cast<uint32_t>(frame.verts.size());
-  info.uniformBytes = static_cast<uint32_t>(frame.uniforms.size());
-  info.indexBytes = static_cast<uint32_t>(frame.indices.size());
-  info.storageBytes = static_cast<uint32_t>(frame.storage.size());
-  info.textureUploadBytes = static_cast<uint32_t>(frame.textureUpload.size());
   const auto textureCaches = gx::texture_cache_counts();
-  info.cachedTextureObjects = textureCaches.textureObjects;
-  info.cachedTlutObjects = textureCaches.tlutObjects;
-  info.cachedCopyTextures = textureCaches.copyTextures;
+  gpu_submit_probe::FrameInput input{
+      .replayEmission = frame.replayEmission ? 1u : 0u,
+      .frameId = frame.frameId,
+      .frameIndex = frame.frameIndex,
+      .passCount = static_cast<uint32_t>(frame.renderPasses.size()),
+      .operationCount = static_cast<uint32_t>(frame.ops.size()),
+      .textureUploadCount = static_cast<uint32_t>(frame.textureUploads.size()),
+      .textureCopyCount = static_cast<uint32_t>(frame.textureCopies.size()),
+      .vertexBytes = static_cast<uint32_t>(frame.verts.size()),
+      .uniformBytes = static_cast<uint32_t>(frame.uniforms.size()),
+      .indexBytes = static_cast<uint32_t>(frame.indices.size()),
+      .storageBytes = static_cast<uint32_t>(frame.storage.size()),
+      .textureUploadBytes = static_cast<uint32_t>(frame.textureUpload.size()),
+      .cachedTextureObjects = textureCaches.textureObjects,
+      .cachedTlutObjects = textureCaches.tlutObjects,
+      .cachedCopyTextures = textureCaches.copyTextures,
+      .persistentStorageEntries = static_cast<uint32_t>(persistent_storage_entries()),
+      .persistentStorageBytes = static_cast<uint32_t>(persistent_storage_used()),
+  };
   {
     std::lock_guard lock{g_bindGroupCacheMutex};
-    info.cachedBindGroups = static_cast<uint32_t>(g_cachedBindGroups.size());
+    input.cachedBindGroups = static_cast<uint32_t>(g_cachedBindGroups.size());
   }
-  info.persistentStorageEntries = static_cast<uint32_t>(persistent_storage_entries());
-  info.persistentStorageBytes = static_cast<uint32_t>(persistent_storage_used());
-
-  Hasher frameCommands;
-  Hasher framePipelines;
-  for (uint32_t passIndex = 0; passIndex < info.recordedPassCount; ++passIndex) {
-    const auto& pass = frame.renderPasses[passIndex];
-    auto& out = info.passes[passIndex];
-    out.labelHash = xxh3_hash_s(pass.label.data(), pass.label.size());
-    out.commandCount = static_cast<uint32_t>(pass.commands.size());
-    out.targetWidth = pass.targetSize.width;
-    out.targetHeight = pass.targetSize.height;
-    out.flags = (pass.observable ? 1u : 0u) | (pass.offscreen ? 1u << 1 : 0u) | (pass.resolveTarget ? 1u << 2 : 0u) |
-                (pass.hasDepth ? 1u << 3 : 0u) | (pass.clearColor ? 1u << 4 : 0u) | (pass.clearDepth ? 1u << 5 : 0u) |
-                ((pass.msaaSamples & 0xffu) << 8);
-
-    Hasher passCommands;
-    Hasher passPipelines;
+  gpu_submit_probe::Builder builder{input};
+  for (const auto& pass : frame.renderPasses) {
+    builder.begin_pass({
+        .label = pass.label,
+        .commandCount = static_cast<uint32_t>(pass.commands.size()),
+        .targetWidth = pass.targetSize.width,
+        .targetHeight = pass.targetSize.height,
+        .flags = (pass.observable ? 1u : 0u) | (pass.offscreen ? 1u << 1 : 0u) | (pass.resolveTarget ? 1u << 2 : 0u) |
+                 (pass.hasDepth ? 1u << 3 : 0u) | (pass.clearColor ? 1u << 4 : 0u) | (pass.clearDepth ? 1u << 5 : 0u) |
+                 ((pass.msaaSamples & 0xffu) << 8),
+    });
     for (const auto& command : pass.commands) {
-      probe_hash(passCommands, command.type);
       switch (command.type) {
       case CommandType::SetViewport:
-        probe_hash(passCommands, command.data.setViewport);
+        builder.add_viewport({
+            .x = command.data.setViewport.left,
+            .y = command.data.setViewport.top,
+            .width = command.data.setViewport.width,
+            .height = command.data.setViewport.height,
+            .minDepth = command.data.setViewport.znear,
+            .maxDepth = command.data.setViewport.zfar,
+        });
         break;
       case CommandType::SetScissor:
-        probe_hash(passCommands, command.data.setScissor);
+        builder.add_scissor({
+            .x = command.data.setScissor.x,
+            .y = command.data.setScissor.y,
+            .width = command.data.setScissor.width,
+            .height = command.data.setScissor.height,
+        });
         break;
-      case CommandType::Draw: {
-        const PipelineRef pipeline = probe_hash_draw(passCommands, command.data.draw);
-        probe_hash(passPipelines, pipeline);
-        ++out.drawCount;
-      } break;
+      case CommandType::Draw:
+        switch (command.data.draw.type) {
+        case ShaderType::Clear:
+          builder.add_draw({
+              .pipeline = command.data.draw.clear.pipeline,
+              .color = {command.data.draw.clear.color.r, command.data.draw.clear.color.g,
+                        command.data.draw.clear.color.b, command.data.draw.clear.color.a},
+              .depth = command.data.draw.clear.depth,
+              .rectEnabled = static_cast<uint8_t>(command.data.draw.clear.rectEnabled ? 1u : 0u),
+              .rectX = command.data.draw.clear.rect.x,
+              .rectY = command.data.draw.clear.rect.y,
+              .rectWidth = command.data.draw.clear.rect.width,
+              .rectHeight = command.data.draw.clear.rect.height,
+          });
+          break;
+        case ShaderType::GX:
+          builder.add_draw({
+              .pipeline = command.data.draw.gx.pipeline,
+              .vertexRange = {command.data.draw.gx.vertRange.offset, command.data.draw.gx.vertRange.size},
+              .indexRange = {command.data.draw.gx.idxRange.offset, command.data.draw.gx.idxRange.size},
+              .uniformRange = {command.data.draw.gx.uniformRange.offset, command.data.draw.gx.uniformRange.size},
+              .vertexCount = command.data.draw.gx.vtxCount,
+              .indexCount = command.data.draw.gx.indexCount,
+              .instanceCount = command.data.draw.gx.instanceCount,
+              .textureBindGroup = command.data.draw.gx.bindGroups.textureBindGroup,
+              .destinationAlpha = command.data.draw.gx.dstAlpha,
+              .tag = command.data.draw.gx.tag,
+              .population = command.data.draw.gx.pop,
+              .exact = command.data.draw.gx.exact,
+              .indexedPositionSample = command.data.draw.gx.indexedPosSample,
+              .positionArrayUniformOffset = command.data.draw.gx.posArrayUniformOffset,
+              .matrixPositionOffset = command.data.draw.gx.mtxPosOffset,
+              .matrixNormalOffset = command.data.draw.gx.mtxNrmOffset,
+              .orthographic = command.data.draw.gx.ortho,
+              .vertexStride = command.data.draw.gx.vtxStride,
+              .positionOffset = command.data.draw.gx.posOffset,
+              .positionF32Xyz = command.data.draw.gx.posF32XYZ,
+              .positionS16Xyz = command.data.draw.gx.posS16XYZ,
+              .positionFraction = command.data.draw.gx.posFrac,
+              .deformF32OffsetMask = command.data.draw.gx.deformF32OffsetMask,
+              .cameraTextureMatrixMask = command.data.draw.gx.texMtxCamMask,
+              .positionMatrixSlot = command.data.draw.gx.pnMtxSlot,
+          });
+          break;
+#ifdef AURORA_ENABLE_RMLUI
+        case ShaderType::Rml:
+          builder.add_draw({
+              .pipeline = command.data.draw.rml.pipeline,
+              .vertexRange = {command.data.draw.rml.vertexRange.offset, command.data.draw.rml.vertexRange.size},
+              .indexRange = {command.data.draw.rml.indexRange.offset, command.data.draw.rml.indexRange.size},
+              .uniformRange = {command.data.draw.rml.uniformRange.offset, command.data.draw.rml.uniformRange.size},
+              .bindGroup1 = command.data.draw.rml.bindGroup1,
+              .bindGroup2 = command.data.draw.rml.bindGroup2,
+              .bindGroup1DynamicOffset = command.data.draw.rml.bindGroup1DynamicOffset,
+              .bindGroup2DynamicOffset = command.data.draw.rml.bindGroup2DynamicOffset,
+              .dynamicBindGroupMask = command.data.draw.rml.dynamicBindGroupMask,
+              .drawKind = command.data.draw.rml.drawKind,
+              .vertexCount = command.data.draw.rml.vertexCount,
+              .indexCount = command.data.draw.rml.indexCount,
+              .stencilReference = command.data.draw.rml.stencilRef,
+              .blendConstant = command.data.draw.rml.blendConstant,
+              .hasBlendConstant = command.data.draw.rml.hasBlendConstant,
+          });
+          break;
+#endif
+        }
+        break;
       case CommandType::DebugMarker:
-        probe_hash(passCommands, command.data.debugMarkerIndex);
+        builder.add_debug_marker(command.data.debugMarkerIndex);
         break;
       }
     }
-    info.drawCount += out.drawCount;
-    out.commandHash = passCommands.digest();
-    out.pipelineHash = passPipelines.digest();
-    probe_hash(frameCommands, out.commandHash);
-    probe_hash(framePipelines, out.pipelineHash);
+    builder.end_pass();
   }
-  info.commandHash = frameCommands.digest();
-  info.pipelineHash = framePipelines.digest();
-  return info;
+  return builder.finish();
 }
 
 static FrameOp capture_frame_op(FramePacket& frame, FrameOpType type, uint32_t index) {

@@ -92,7 +92,36 @@ typedef enum {
   AURORA_GPU_SUBMIT_IMGUI_UPLOAD,
 } AuroraGpuSubmitKind;
 
+/* Values copied from Dawn's QueueWorkDoneStatus. BEGIN/RETURN records keep UNKNOWN; only SUCCESS
+ * is a completed-work watermark. CANCELLED and ERROR mean the callback ran without establishing
+ * that the submitted work completed successfully. */
+typedef enum {
+  AURORA_GPU_SUBMIT_STATUS_UNKNOWN = 0,
+  AURORA_GPU_SUBMIT_STATUS_SUCCESS = 1,
+  AURORA_GPU_SUBMIT_STATUS_CALLBACK_CANCELLED = 2,
+  AURORA_GPU_SUBMIT_STATUS_ERROR = 3,
+} AuroraGpuSubmitStatus;
+
 #define AURORA_GPU_PROBE_MAX_PASSES 16
+#define AURORA_GPU_PROBE_MAX_DRAWS 9
+#define AURORA_GPU_PROBE_VERSION 2
+
+/* Values stored in AuroraGpuDrawProbe::shaderType. Keep these synchronized with Aurora's
+ * internal ShaderType values; the fixed-width field keeps the flight record's ABI stable. */
+typedef enum {
+  AURORA_GPU_DRAW_CLEAR = 0,
+  AURORA_GPU_DRAW_GX = 1,
+  AURORA_GPU_DRAW_RML = 2,
+} AuroraGpuDrawKind;
+
+typedef enum {
+  AURORA_GPU_DRAW_FLAG_EXACT = 1u << 0,
+  AURORA_GPU_DRAW_FLAG_ORTHOGRAPHIC = 1u << 1,
+  AURORA_GPU_DRAW_FLAG_INDEXED_POSITION = 1u << 2,
+  AURORA_GPU_DRAW_FLAG_DEFORMING = 1u << 3,
+  AURORA_GPU_DRAW_FLAG_CAMERA_TEX_MATRIX = 1u << 4,
+  AURORA_GPU_DRAW_FLAG_DEST_ALPHA = 1u << 5,
+} AuroraGpuDrawProbeFlag;
 
 typedef struct {
   uint64_t labelHash;
@@ -104,6 +133,32 @@ typedef struct {
   uint32_t targetHeight;
   uint32_t flags;
 } AuroraGpuPassProbe;
+
+/* A compact tail of the semantic GX/Rml/Clear draws recorded in Aurora's gfx frame passes.
+ * drawHash fingerprints the complete recorded draw command, including counts and bindings that do
+ * not fit explicitly here. The byte ranges name the global staging-buffer regions consumed by the
+ * draw. End-frame host commands encoded later (readback copies, present blit, ImGui and profiler)
+ * are not members of this tail; their aggregate readback state is recorded separately below.
+ * This does not prove which draw the GPU was executing when it faulted: queue completion remains
+ * the only available boundary, and a fault may arise from an earlier draw in the same submit. */
+typedef struct {
+  uint64_t drawHash;
+  uint64_t pipelineId;
+  uint64_t tag;
+  uint32_t passIndex;
+  uint32_t commandIndex;
+  uint32_t drawIndex;
+  uint32_t vertexOffset;
+  uint32_t vertexBytes;
+  uint32_t indexOffset;
+  uint32_t indexBytes;
+  uint32_t uniformOffset;
+  uint32_t uniformBytes;
+  uint8_t shaderType;
+  uint8_t population;
+  uint8_t flags;
+  uint8_t reserved;
+} AuroraGpuDrawProbe;
 
 typedef struct {
   uint32_t structSize;
@@ -136,7 +191,28 @@ typedef struct {
   uint64_t commandHash;
   uint64_t pipelineHash;
   AuroraGpuPassProbe passes[AURORA_GPU_PROBE_MAX_PASSES];
+  /* draws[0..recordedDrawCount) is the chronological tail of the frame's draws. The first entry's
+   * frame-wide ordinal is firstRecordedDraw; drawIndex repeats it in each record so a corrupt or
+   * truncated incident file is self-checking. */
+  uint32_t recordedDrawCount;
+  uint32_t firstRecordedDraw;
+  /* Readback pressure at the point this command buffer is submitted. These counters are populated
+   * by the frame-dump path; zero is a real value only when structSize includes these fields. */
+  uint32_t readbackQueuedThisSubmit;
+  uint32_t readbackBytesThisSubmit;
+  uint32_t readbackMapsPending;
+  uint32_t readbackMapsCompleted;
+  uint32_t readbackMapsFailed;
+  AuroraGpuDrawProbe draws[AURORA_GPU_PROBE_MAX_DRAWS];
 } AuroraGpuSubmitInfo;
+
+#ifdef __cplusplus
+static_assert(sizeof(AuroraGpuDrawProbe) == 64, "GPU draw probe ABI changed");
+static_assert(sizeof(AuroraGpuSubmitInfo) <= 1536, "GPU submit probe exceeds the incident recorder slot");
+#else
+_Static_assert(sizeof(AuroraGpuDrawProbe) == 64, "GPU draw probe ABI changed");
+_Static_assert(sizeof(AuroraGpuSubmitInfo) <= 1536, "GPU submit probe exceeds the incident recorder slot");
+#endif
 
 typedef void (*AuroraGpuProbeCallback)(AuroraGpuProbePhase phase, const AuroraGpuSubmitInfo* info, const char* message,
                                        size_t messageLen, void* user);
