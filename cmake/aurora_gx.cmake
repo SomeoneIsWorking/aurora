@@ -1,6 +1,7 @@
 add_library(aurora_gx STATIC
         lib/gfx/clear.cpp
         lib/gfx/common.cpp
+        lib/gfx/debug_markers.cpp
         lib/gfx/gpu_submit_probe.cpp
         lib/gfx/depth_peek.cpp
         lib/gfx/indexed_interp.cpp
@@ -8,6 +9,7 @@ add_library(aurora_gx STATIC
         lib/gfx/pipeline_cache.cpp
         lib/gfx/persistent_upload.cpp
         lib/gfx/replay_draw_validation.cpp
+        lib/gfx/replay_lineage.cpp
         lib/gfx/render_worker.cpp
         lib/gfx/dds_io.cpp
         lib/gfx/tex_copy_conv.cpp

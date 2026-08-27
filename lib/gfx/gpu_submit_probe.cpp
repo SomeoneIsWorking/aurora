@@ -8,10 +8,12 @@ namespace {
 Module Log("aurora::gfx::gpu_submit_probe");
 
 enum class CommandKind : uint8_t {
+  PaletteConversion,
   Viewport,
   Scissor,
   Draw,
   DebugMarker,
+  Resolve,
 };
 
 template <typename T>
@@ -22,6 +24,16 @@ void hash_value(Hasher& hasher, const T& value) {
 void hash_range(Hasher& hasher, const RangeInput& range) {
   hash_value(hasher, range.offset);
   hash_value(hasher, range.size);
+}
+
+void hash_resource(Hasher& hasher, const TextureResourceInput& resource) {
+  hash_value(hasher, resource.generation);
+  hash_value(hasher, resource.width);
+  hash_value(hasher, resource.height);
+  hash_value(hasher, resource.depthOrArrayLayers);
+  hash_value(hasher, resource.format);
+  hash_value(hasher, resource.mipCount);
+  hash_value(hasher, resource.gxFormat);
 }
 
 void hash_draw_fields(Hasher& hasher, const ClearDrawInput& draw) {
@@ -132,6 +144,9 @@ Builder::Builder(const FrameInput& frame) {
   m_info.cachedBindGroups = frame.cachedBindGroups;
   m_info.persistentStorageEntries = frame.persistentStorageEntries;
   m_info.persistentStorageBytes = frame.persistentStorageBytes;
+  m_info.replaySourceFrameId = frame.replaySourceFrameId;
+  m_info.replaySourceCommandHash = frame.replaySourceCommandHash;
+  m_info.replaySourceUniformHash = frame.replaySourceUniformHash;
 }
 
 void Builder::begin_pass(const PassInput& pass) {
@@ -142,6 +157,14 @@ void Builder::begin_pass(const PassInput& pass) {
   m_passDrawCount = 0;
   m_passCommands = Hasher{};
   m_passPipelines = Hasher{};
+
+  const uint64_t labelSize = pass.label.size();
+  hash_value(m_passCommands, labelSize);
+  m_passCommands.update(pass.label.data(), pass.label.size());
+  hash_value(m_passCommands, pass.commandCount);
+  hash_value(m_passCommands, pass.targetWidth);
+  hash_value(m_passCommands, pass.targetHeight);
+  hash_value(m_passCommands, pass.flags);
 
   if (m_passIndex < m_info.recordedPassCount) {
     auto& out = m_info.passes[m_passIndex];
@@ -227,11 +250,38 @@ void Builder::add_draw(const RmlDrawInput& draw) {
                 0);
 }
 
-void Builder::add_debug_marker(uint64_t markerIndex) {
+void Builder::add_debug_marker(std::string_view label) {
   CHECK(m_passOpen, "GPU submit probe received debug marker outside a pass");
   hash_value(m_passCommands, CommandKind::DebugMarker);
-  hash_value(m_passCommands, markerIndex);
+  const uint64_t labelSize = label.size();
+  hash_value(m_passCommands, labelSize);
+  m_passCommands.update(label.data(), label.size());
   ++m_commandIndex;
+}
+
+void Builder::add_palette_conversion(const PaletteConversionInput& conversion) {
+  CHECK(m_passOpen, "GPU submit probe received palette conversion outside a pass");
+  hash_value(m_passCommands, CommandKind::PaletteConversion);
+  hash_value(m_passCommands, conversion.variant);
+  hash_resource(m_passCommands, conversion.source);
+  hash_resource(m_passCommands, conversion.destination);
+  hash_resource(m_passCommands, conversion.palette);
+}
+
+void Builder::add_resolve(const ResolveInput& resolve) {
+  CHECK(m_passOpen, "GPU submit probe received resolve outside a pass");
+  hash_value(m_passCommands, CommandKind::Resolve);
+  hash_value(m_passCommands, resolve.format);
+  hash_value(m_passCommands, resolve.rectX);
+  hash_value(m_passCommands, resolve.rectY);
+  hash_value(m_passCommands, resolve.rectWidth);
+  hash_value(m_passCommands, resolve.rectHeight);
+  hash_range(m_passCommands, resolve.uniformRange);
+  hash_resource(m_passCommands, resolve.source);
+  hash_resource(m_passCommands, resolve.destination);
+  hash_value(m_passCommands, resolve.sourceSamples);
+  hash_value(m_passCommands, resolve.path);
+  hash_value(m_passCommands, resolve.sourceIsDepth);
 }
 
 void Builder::end_pass() {

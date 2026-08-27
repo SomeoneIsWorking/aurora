@@ -5,6 +5,10 @@
 
 #include "common.hpp"
 
+namespace aurora::webgpu {
+uint64_t next_texture_generation() noexcept;
+}
+
 namespace aurora::gfx {
 struct TextureUpload {
   wgpu::TexelCopyBufferLayout layout;
@@ -41,6 +45,10 @@ struct TextureRef {
   wgpu::TextureFormat format;
   uint32_t mipCount;
   u32 gxFormat;
+  // Process-local lifetime identity. Handles copied into a replay keep this generation; a newly
+  // allocated resource cannot masquerade as the old destination merely because its dimensions
+  // and format happen to match.
+  uint64_t generation;
   bool hasArbitraryMips = false;
   bool isReplacement = false;
 
@@ -52,7 +60,8 @@ struct TextureRef {
   , size(size)
   , format(format)
   , mipCount(mipCount)
-  , gxFormat(gxFormat) {}
+  , gxFormat(gxFormat)
+  , generation(aurora::webgpu::next_texture_generation()) {}
 };
 
 TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,

@@ -6,6 +6,7 @@
 
 #include "clear.hpp"
 #include "depth_peek.hpp"
+#include "debug_markers.hpp"
 #include "gpu_submit_probe.hpp"
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
@@ -17,6 +18,7 @@
 #include "pipeline_cache.hpp"
 #include "persistent_upload.hpp"
 #include "replay_draw_validation.hpp"
+#include "replay_lineage.hpp"
 #include "render_worker.hpp"
 #include "tex_copy_conv.hpp"
 #include "tex_palette_conv.hpp"
@@ -53,7 +55,6 @@ using webgpu::g_queue;
 
 #ifdef AURORA_GFX_DEBUG_GROUPS
 std::vector<std::string> g_debugGroupStack;
-std::vector<std::string> g_debugMarkers;
 uint64_t g_debugGroupRevision = 0;
 #endif
 
@@ -111,7 +112,7 @@ struct Command {
     Viewport setViewport;
     ClipRect setScissor;
     ShaderDrawCommand draw;
-    size_t debugMarkerIndex;
+    DebugMarkers::Id debugMarker;
   } data;
 };
 } // namespace aurora::gfx
@@ -189,6 +190,10 @@ struct RenderPass {
   wgpu::Texture copySourceTexture;
   wgpu::TextureView copySourceView;
   wgpu::TextureView copySourceDepthView;
+  gpu_submit_probe::TextureResourceInput copySourceResource;
+  gpu_submit_probe::TextureResourceInput copySourceDepthResource;
+  uint32_t copySourceSamples = 1;
+  uint32_t copySourceDepthSamples = 1;
   wgpu::Extent3D targetSize;
   uint32_t msaaSamples = 1;
 
@@ -209,6 +214,7 @@ struct RenderPass {
 #ifdef AURORA_GFX_DEBUG_GROUPS
   DebugGroupSnapshots debugGroupSnapshots;
 #endif
+  DebugMarkers debugMarkers;
   CommandList commands;
   bool clearColor = true;
   bool clearDepth = true;
@@ -266,6 +272,12 @@ struct FramePacket {
   // the game drew. Below these offsets the packet's own staging holds nothing meaningful: the data
   // the copied draws read lives in the GLOBAL buffers, written by the first emission.
   StagingHighWater replayPrefix;
+  // Present on both emissions of a replay pair. On the first emission it names the untouched
+  // packet captured before interpolation; on the replay it is the source contract validated just
+  // before submission. The install hash comes from the exact source RAM payload supplied to the
+  // append at offset zero; mapped write-combined destination memory is deliberately never read.
+  std::optional<replay_lineage::Source> replaySource;
+  uint64_t replayExpectedUniformHash = 0;
 };
 
 static std::array<FramePacket, FrameSlotCount> g_framePackets;
@@ -274,6 +286,7 @@ static size_t g_recordingFrameSlot = 0;
 static uint64_t g_nextFrameId = 1;
 static render_worker::FrameSlotPool g_frameSlots{FrameSlotCount};
 static render_worker::FrameSlotPool g_stagingSlots{StagingBufferCount};
+static replay_lineage::WriterEpochs g_replayWriterEpochs;
 static u32 g_currentRenderPass = UINT32_MAX;
 static bool g_inOffscreen = false;
 static std::optional<RenderPass> g_suspendedEfbPass;
@@ -407,16 +420,34 @@ static void map_staging_buffer(size_t slot, bool releaseSlotOnCompletion = false
 }
 
 static void set_efb_targets(RenderPass& pass) {
+  const auto& colorSource =
+      webgpu::g_graphicsConfig.msaaSamples > 1 ? webgpu::g_frameBufferResolved : webgpu::g_frameBuffer;
   pass.colorView = webgpu::g_frameBuffer.view;
   pass.resolveView = webgpu::g_graphicsConfig.msaaSamples > 1 ? webgpu::g_frameBufferResolved.view : nullptr;
   pass.depthStencilView = webgpu::g_depthBuffer.view;
-  pass.copySourceTexture =
-      webgpu::g_graphicsConfig.msaaSamples > 1 ? webgpu::g_frameBufferResolved.texture : webgpu::g_frameBuffer.texture;
-  pass.copySourceView =
-      webgpu::g_graphicsConfig.msaaSamples > 1 ? webgpu::g_frameBufferResolved.view : webgpu::g_frameBuffer.view;
+  pass.copySourceTexture = colorSource.texture;
+  pass.copySourceView = colorSource.view;
   pass.copySourceDepthView = webgpu::g_depthBuffer.view;
   pass.targetSize = webgpu::g_frameBuffer.size;
   pass.msaaSamples = webgpu::g_graphicsConfig.msaaSamples;
+  pass.copySourceResource = {
+      .generation = colorSource.generation,
+      .width = colorSource.size.width,
+      .height = colorSource.size.height,
+      .depthOrArrayLayers = colorSource.size.depthOrArrayLayers,
+      .format = static_cast<uint32_t>(colorSource.format),
+      .mipCount = 1,
+  };
+  pass.copySourceDepthResource = {
+      .generation = webgpu::g_depthBuffer.generation,
+      .width = webgpu::g_depthBuffer.size.width,
+      .height = webgpu::g_depthBuffer.size.height,
+      .depthOrArrayLayers = webgpu::g_depthBuffer.size.depthOrArrayLayers,
+      .format = static_cast<uint32_t>(webgpu::g_depthBuffer.format),
+      .mipCount = 1,
+  };
+  pass.copySourceSamples = colorSource.sampleCount;
+  pass.copySourceDepthSamples = webgpu::g_depthBuffer.sampleCount;
   pass.hasDepth = true;
   pass.hasStencil = false;
 }
@@ -489,13 +520,32 @@ static std::array<gpu_submit_probe::RangeInput, gx::MaxIndexAttr> probe_indexed_
   return ranges;
 }
 
-static AuroraGpuSubmitInfo build_submit_probe(const FramePacket& frame) {
+static gpu_submit_probe::TextureResourceInput probe_texture_resource(const TextureHandle& texture) {
+  if (!texture) {
+    return {};
+  }
+  return {
+      .generation = texture->generation,
+      .width = texture->size.width,
+      .height = texture->size.height,
+      .depthOrArrayLayers = texture->size.depthOrArrayLayers,
+      .format = static_cast<uint32_t>(texture->format),
+      .mipCount = texture->mipCount,
+      .gxFormat = texture->gxFormat,
+  };
+}
+
+static AuroraGpuSubmitInfo build_submit_probe(const FramePacket& frame,
+                                              const replay_lineage::Source* sourceScope = nullptr) {
+  const size_t passCount = sourceScope != nullptr ? sourceScope->passCommandCounts.size() : frame.renderPasses.size();
+  CHECK(passCount <= frame.renderPasses.size(), "Replay source declares {} passes but the packet has only {}",
+        passCount, frame.renderPasses.size());
   const auto textureCaches = gx::texture_cache_counts();
   gpu_submit_probe::FrameInput input{
       .replayEmission = frame.replayEmission ? 1u : 0u,
       .frameId = frame.frameId,
       .frameIndex = frame.frameIndex,
-      .passCount = static_cast<uint32_t>(frame.renderPasses.size()),
+      .passCount = static_cast<uint32_t>(passCount),
       .operationCount = static_cast<uint32_t>(frame.ops.size()),
       .textureUploadCount = static_cast<uint32_t>(frame.textureUploads.size()),
       .textureCopyCount = static_cast<uint32_t>(frame.textureCopies.size()),
@@ -509,23 +559,41 @@ static AuroraGpuSubmitInfo build_submit_probe(const FramePacket& frame) {
       .cachedCopyTextures = textureCaches.copyTextures,
       .persistentStorageEntries = static_cast<uint32_t>(persistent_storage_entries()),
       .persistentStorageBytes = static_cast<uint32_t>(persistent_storage_used()),
+      .replaySourceFrameId = frame.replaySource ? frame.replaySource->frameId : 0,
+      .replaySourceCommandHash = frame.replaySource ? frame.replaySource->commandHash : 0,
+      .replaySourceUniformHash = frame.replaySource ? frame.replaySource->uniformHash : 0,
   };
   {
     std::lock_guard lock{g_bindGroupCacheMutex};
     input.cachedBindGroups = static_cast<uint32_t>(g_cachedBindGroups.size());
   }
   gpu_submit_probe::Builder builder{input};
-  for (const auto& pass : frame.renderPasses) {
+  for (size_t passIndex = 0; passIndex < passCount; ++passIndex) {
+    const auto& pass = frame.renderPasses[passIndex];
+    const size_t commandCount =
+        sourceScope != nullptr ? sourceScope->passCommandCounts[passIndex] : pass.commands.size();
+    CHECK(commandCount <= pass.commands.size(),
+          "Replay source pass {} declares {} commands but the replay packet has only {}", passIndex, commandCount,
+          pass.commands.size());
     builder.begin_pass({
         .label = pass.label,
-        .commandCount = static_cast<uint32_t>(pass.commands.size()),
+        .commandCount = static_cast<uint32_t>(commandCount),
         .targetWidth = pass.targetSize.width,
         .targetHeight = pass.targetSize.height,
         .flags = (pass.observable ? 1u : 0u) | (pass.offscreen ? 1u << 1 : 0u) | (pass.resolveTarget ? 1u << 2 : 0u) |
                  (pass.hasDepth ? 1u << 3 : 0u) | (pass.clearColor ? 1u << 4 : 0u) | (pass.clearDepth ? 1u << 5 : 0u) |
                  ((pass.msaaSamples & 0xffu) << 8),
     });
-    for (const auto& command : pass.commands) {
+    for (const auto& conversion : pass.paletteConvs) {
+      builder.add_palette_conversion({
+          .variant = static_cast<uint8_t>(conversion.variant),
+          .source = probe_texture_resource(conversion.src),
+          .destination = probe_texture_resource(conversion.dst),
+          .palette = probe_texture_resource(conversion.tlut),
+      });
+    }
+    for (size_t commandIndex = 0; commandIndex < commandCount; ++commandIndex) {
+      const auto& command = pass.commands[commandIndex];
       switch (command.type) {
       case CommandType::SetViewport:
         builder.add_viewport({
@@ -617,9 +685,30 @@ static AuroraGpuSubmitInfo build_submit_probe(const FramePacket& frame) {
         }
         break;
       case CommandType::DebugMarker:
-        builder.add_debug_marker(command.data.debugMarkerIndex);
+        builder.add_debug_marker(pass.debugMarkers.label(command.data.debugMarker));
         break;
       }
+    }
+    if (pass.resolveTarget) {
+      const bool sourceIsDepth = gx::is_depth_format(pass.resolveFormat);
+      const bool needsConversion = tex_copy_conv::needs_conversion(pass.resolveFormat);
+      const bool needsScaling = pass.resolveTarget->size.width != static_cast<uint32_t>(pass.resolveRect.width) ||
+                                pass.resolveTarget->size.height != static_cast<uint32_t>(pass.resolveRect.height);
+      builder.add_resolve({
+          .format = static_cast<uint32_t>(pass.resolveFormat),
+          .rectX = pass.resolveRect.x,
+          .rectY = pass.resolveRect.y,
+          .rectWidth = pass.resolveRect.width,
+          .rectHeight = pass.resolveRect.height,
+          .uniformRange = {pass.resolveUniformRange.offset, pass.resolveUniformRange.size},
+          .source = sourceIsDepth ? pass.copySourceDepthResource : pass.copySourceResource,
+          .destination = probe_texture_resource(pass.resolveTarget),
+          .sourceSamples = sourceIsDepth ? pass.copySourceDepthSamples : pass.copySourceSamples,
+          .path = needsConversion ? gpu_submit_probe::ResolvePath::FormatConversion
+                                  : (needsScaling ? gpu_submit_probe::ResolvePath::ScaleBlit
+                                                  : gpu_submit_probe::ResolvePath::DirectCopy),
+          .sourceIsDepth = static_cast<uint8_t>(sourceIsDepth ? 1u : 0u),
+      });
     }
     builder.end_pass();
   }
@@ -732,6 +821,7 @@ static void enqueue_pass(FramePacket& frame, size_t frameSlot, uint32_t passInde
 struct ReplaySnapshot {
   RenderPassList renderPasses;
   std::vector<uint8_t> uniforms;
+  replay_lineage::Source source;
   // High-water marks of the emission this snapshot was taken from, rounded up to the staging copy's
   // 4-byte granularity. A replay emission reserves these so anything it records lands ABOVE the
   // bytes its copied draws still point at. Rounded UP because copy_staging_buffer_range aligns its
@@ -978,6 +1068,20 @@ bool capture_replay_snapshot() {
   g_replaySnapshot.verts = static_cast<uint32_t>(AURORA_ALIGN(frame.verts.size(), 4));
   g_replaySnapshot.indices = static_cast<uint32_t>(AURORA_ALIGN(frame.indices.size(), 4));
   g_replaySnapshot.storage = static_cast<uint32_t>(AURORA_ALIGN(frame.storage.size(), 4));
+  std::vector<uint32_t> passCommandCounts;
+  passCommandCounts.reserve(frame.renderPasses.size());
+  for (const auto& pass : frame.renderPasses) {
+    passCommandCounts.push_back(static_cast<uint32_t>(pass.commands.size()));
+  }
+  const AuroraGpuSubmitInfo sourceProbe = build_submit_probe(frame);
+  g_replaySnapshot.source = replay_lineage::capture(frame.frameId, sourceProbe.commandHash, g_replaySnapshot.uniforms,
+                                                    std::move(passCommandCounts),
+                                                    {
+                                                        .vertices = g_replaySnapshot.verts,
+                                                        .indices = g_replaySnapshot.indices,
+                                                        .storage = g_replaySnapshot.storage,
+                                                    });
+  frame.replaySource = g_replaySnapshot.source;
   g_replaySnapshot.valid = true;
   return true;
 }
@@ -1003,6 +1107,7 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
         "function is about to overwrite.");
     return false;
   }
+  auto& frame = *g_recordingFrame;
   // The attribution numbers in interp::report() are only worth reading if the discriminator behind
   // them actually discriminates. Prove that once, on synthetic input, before it is ever pointed at
   // the game — a self-test that nobody runs is the same bug one level up.
@@ -1026,7 +1131,6 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
   if (snapping) {
     alpha = 1.0f;
   }
-  auto& frame = *g_recordingFrame;
   const auto& snap = g_replaySnapshot.uniforms;
 
   // A TEMPORAL FEEDBACK copy must happen exactly ONCE per game tick, so drop it from THIS emission
@@ -1306,6 +1410,13 @@ bool interpolate_recorded_frame(float alpha, bool resampling) {
     interp::report();
     indexed_interp::report();
   }
+  if (frame.replayEmission && frame.replaySource) {
+    CHECK(frame.replaySource->uniformBytes <= frame.uniforms.size(),
+          "Replay source declares {} uniform bytes but the packet has only {} after interpolation",
+          frame.replaySource->uniformBytes, frame.uniforms.size());
+    frame.replayExpectedUniformHash =
+        replay_lineage::hash_uniforms({frame.uniforms.data(), static_cast<size_t>(frame.replaySource->uniformBytes)});
+  }
   return true;
 }
 
@@ -1322,7 +1433,7 @@ bool install_replay_snapshot(bool consume) {
     return false;
   }
   auto& frame = *g_recordingFrame;
-  ASSERT(frame.uniforms.size() == 0,
+  ASSERT(frame.uniforms.empty(),
          "Replay packet already holds {} uniform bytes; the snapshot must land at offset 0 or every "
          "copied uniformRange.offset is wrong",
          frame.uniforms.size());
@@ -1333,6 +1444,17 @@ bool install_replay_snapshot(bool consume) {
   frame.uniforms.append(g_replaySnapshot.uniforms.data(), uniformSize);
   ASSERT(frame.uniforms.size() == uniformSize, "Replay uniform block landed at {} bytes, expected {}",
          frame.uniforms.size(), uniformSize);
+  const replay_lineage::Installation installation = replay_lineage::observe_installation(
+      build_submit_probe(frame, &g_replaySnapshot.source).commandHash, g_replaySnapshot.uniforms);
+  const replay_lineage::ValidationStatus installationStatus =
+      replay_lineage::validate_installation(&g_replaySnapshot.source, installation);
+  CHECK(replay_lineage::passed(installationStatus),
+        "Replay source changed between capture and install: {} command expected={:#018x} installed={:#018x} "
+        "uniforms expected={:#018x} installed={:#018x}",
+        replay_lineage::status_name(installationStatus), g_replaySnapshot.source.commandHash, installation.commandHash,
+        g_replaySnapshot.source.uniformHash, installation.uniformHash);
+  frame.replaySource = consume ? std::move(g_replaySnapshot.source) : g_replaySnapshot.source;
+  frame.replayExpectedUniformHash = installation.uniformHash;
   // RESERVE the first emission's staging, so an overlay recorded into this packet appends above the
   // game's bytes instead of over them, and seed `copied` to the same mark so the reserved prefix —
   // this packet's own staging buffer, holding some other frame's leftovers — is never copied down
@@ -1354,6 +1476,27 @@ bool install_replay_snapshot(bool consume) {
     g_replaySnapshot = {};
   }
   frame.replayEmission = true;
+  const size_t frameSlot = g_recordingFrameSlot;
+  const replay_lineage::Source replaySource = *frame.replaySource;
+  // Observe the installed packet on the render worker itself, before any pass is encoded. The
+  // retained-sample interpolation path synchronizes this queue before making its intentional
+  // mutations, so this reads the exact commands and source uniform prefix that the worker receives,
+  // rather than trusting game-thread scalars captured during installation.
+  render_worker::enqueue_work([frameSlot, replaySource] {
+    const auto& packet = g_framePackets[frameSlot];
+    CHECK(replaySource.uniformBytes <= packet.uniforms.size(),
+          "Replay source declares {} uniform bytes but the worker packet has only {}", replaySource.uniformBytes,
+          packet.uniforms.size());
+    const replay_lineage::Installation observed =
+        replay_lineage::observe_installation(build_submit_probe(packet, &replaySource).commandHash,
+                                             {packet.uniforms.data(), static_cast<size_t>(replaySource.uniformBytes)});
+    const replay_lineage::ValidationStatus status = replay_lineage::validate_installation(&replaySource, observed);
+    CHECK(replay_lineage::passed(status),
+          "Render worker received a changed replay source before encode: {} source frame={} command "
+          "expected={:#018x} observed={:#018x} uniforms expected={:#018x} observed={:#018x}",
+          replay_lineage::status_name(status), replaySource.frameId, replaySource.commandHash, observed.commandHash,
+          replaySource.uniformHash, observed.uniformHash);
+  });
   // Nothing further may be recorded into this packet: finish() must find no open pass, because
   // enqueueing a pass a second time would encode it twice.
   g_currentRenderPass = UINT32_MAX;
@@ -1601,6 +1744,10 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
       .copySourceTexture = prevPass.copySourceTexture,
       .copySourceView = prevPass.copySourceView,
       .copySourceDepthView = prevPass.copySourceDepthView,
+      .copySourceResource = prevPass.copySourceResource,
+      .copySourceDepthResource = prevPass.copySourceDepthResource,
+      .copySourceSamples = prevPass.copySourceSamples,
+      .copySourceDepthSamples = prevPass.copySourceDepthSamples,
       .targetSize = prevPass.targetSize,
       .msaaSamples = msaaSamples,
       .clearColorValue = clearColorValue,
@@ -1686,6 +1833,8 @@ static OffscreenCacheEntry get_offscreen_textures(uint32_t width, uint32_t heigh
       .view = std::move(colorView),
       .size = size,
       .format = colorFormat,
+      .generation = webgpu::next_texture_generation(),
+      .sampleCount = 1,
   };
   const auto depthFormat = webgpu::g_graphicsConfig.depthFormat;
   const wgpu::TextureDescriptor depthDesc{
@@ -1704,6 +1853,8 @@ static OffscreenCacheEntry get_offscreen_textures(uint32_t width, uint32_t heigh
       .view = std::move(depthView),
       .size = size,
       .format = depthFormat,
+      .generation = webgpu::next_texture_generation(),
+      .sampleCount = 1,
   };
   OffscreenCacheEntry entry{
       .color = std::move(color),
@@ -1745,6 +1896,26 @@ void begin_offscreen(uint32_t width, uint32_t height) {
       .copySourceTexture = g_offscreenColor.texture,
       .copySourceView = g_offscreenColor.view,
       .copySourceDepthView = g_offscreenDepth.view,
+      .copySourceResource =
+          {
+              .generation = g_offscreenColor.generation,
+              .width = g_offscreenColor.size.width,
+              .height = g_offscreenColor.size.height,
+              .depthOrArrayLayers = g_offscreenColor.size.depthOrArrayLayers,
+              .format = static_cast<uint32_t>(g_offscreenColor.format),
+              .mipCount = 1,
+          },
+      .copySourceDepthResource =
+          {
+              .generation = g_offscreenDepth.generation,
+              .width = g_offscreenDepth.size.width,
+              .height = g_offscreenDepth.size.height,
+              .depthOrArrayLayers = g_offscreenDepth.size.depthOrArrayLayers,
+              .format = static_cast<uint32_t>(g_offscreenDepth.format),
+              .mipCount = 1,
+          },
+      .copySourceSamples = g_offscreenColor.sampleCount,
+      .copySourceDepthSamples = g_offscreenDepth.sampleCount,
       .targetSize = {width, height, 1},
       .msaaSamples = 1,
       .clearColorValue = {0.f, 0.f, 0.f, 0.f},
@@ -2373,43 +2544,59 @@ void end_frame(EndFrameCallback callback) {
     ++g_debugGroupRevision;
   }
 
-  if (g_debugMarkers.size() > 0) {
-    g_debugMarkers.clear();
-  }
 #endif
 
   const size_t stagingSlot = frame.stagingBuffer;
   const AuroraGpuSubmitInfo submitProbe = build_submit_probe(frame);
+  const auto replaySource = frame.replaySource;
+  const uint64_t replayExpectedUniformHash = frame.replayExpectedUniformHash;
   // A replay emission pushes no verts/indices/storage and records no draws, so publishing its
   // stats would make every second sample read zero — Tracy plots and the imgui overlay would
   // alternate real/zero and read exactly like a frame-dropping defect. The numbers the user cares
   // about belong to the frame the game actually drew, so leave the last real publish standing.
   const bool publishStats = !frame.replayEmission;
-  render_worker::enqueue_end_frame(
-      frameId, [frameSlot, stagingSlot, publishStats, submitProbe, callback = std::move(callback)]() mutable {
-        auto& packet = g_framePackets[frameSlot];
-        g_stagingBuffers[stagingSlot].Unmap();
-        s_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
-        auto encoder = std::move(packet.encoder);
-        const auto stats = packet.stats;
-        packet = {};
-        if (publishStats) {
-          g_stats.drawCallCount = stats.drawCallCount;
-          g_stats.mergedDrawCallCount = stats.mergedDrawCallCount;
-          g_stats.lastVertSize = stats.lastVertSize;
-          g_stats.lastUniformSize = stats.lastUniformSize;
-          g_stats.lastIndexSize = stats.lastIndexSize;
-          g_stats.lastStorageSize = stats.lastStorageSize;
-          g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
-        }
-        if (callback) {
-          callback(encoder, submitProbe);
-        }
-        g_frameSlots.release(frameSlot);
-        expire_cached_bind_groups();
-        map_staging_buffer(stagingSlot, true);
-        process_events();
-      });
+  render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, publishStats, submitProbe, replaySource,
+                                             replayExpectedUniformHash, callback = std::move(callback)]() mutable {
+    auto& packet = g_framePackets[frameSlot];
+    g_stagingBuffers[stagingSlot].Unmap();
+    s_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
+    auto encoder = std::move(packet.encoder);
+    const auto stats = packet.stats;
+    if (submitProbe.replayEmission != 0 && replaySource) {
+      CHECK(replaySource->uniformBytes <= packet.uniforms.size(),
+            "Replay source declares {} uniform bytes but the pre-submit packet has only {}", replaySource->uniformBytes,
+            packet.uniforms.size());
+      const std::span<const uint8_t> uniformPrefix{packet.uniforms.data(), replaySource->uniformBytes};
+      const replay_lineage::ValidationStatus uniformStatus =
+          replay_lineage::validate_uniforms(replayExpectedUniformHash, uniformPrefix);
+      CHECK(replay_lineage::passed(uniformStatus),
+            "Replay uniform prefix changed after its final intentional interpolation: {} source frame={} "
+            "expected={:#018x} observed={:#018x}",
+            replay_lineage::status_name(uniformStatus), replaySource->frameId, replayExpectedUniformHash,
+            replay_lineage::hash_uniforms(uniformPrefix));
+      const replay_lineage::ValidationStatus writerStatus =
+          replay_lineage::validate_writers(&*replaySource, g_replayWriterEpochs.snapshot());
+      CHECK(replay_lineage::passed(writerStatus), "Replay source writer validation failed before submit: {} frame={}",
+            replay_lineage::status_name(writerStatus), replaySource->frameId);
+    }
+    packet = {};
+    if (publishStats) {
+      g_stats.drawCallCount = stats.drawCallCount;
+      g_stats.mergedDrawCallCount = stats.mergedDrawCallCount;
+      g_stats.lastVertSize = stats.lastVertSize;
+      g_stats.lastUniformSize = stats.lastUniformSize;
+      g_stats.lastIndexSize = stats.lastIndexSize;
+      g_stats.lastStorageSize = stats.lastStorageSize;
+      g_stats.lastTextureUploadSize = stats.lastTextureUploadSize;
+    }
+    if (callback) {
+      callback(encoder, submitProbe);
+    }
+    g_frameSlots.release(frameSlot);
+    expire_cached_bind_groups();
+    map_staging_buffer(stagingSlot, true);
+    process_events();
+  });
 }
 
 uint32_t current_frame() noexcept { return g_frameIndex; }
@@ -2439,7 +2626,8 @@ static constexpr uint64_t TextureUploadStagingOffset = StorageStagingOffset + St
 static constexpr uint32_t align_down_copy_offset(uint32_t value) noexcept { return value & ~3u; }
 
 static void copy_staging_buffer_range(wgpu::CommandEncoder& cmd, const FramePacket& frame, uint32_t& copied,
-                                      uint32_t highWater, uint64_t stagingOffset, const wgpu::Buffer& dst) {
+                                      uint32_t highWater, uint64_t stagingOffset, const wgpu::Buffer& dst,
+                                      std::optional<replay_lineage::Buffer> lineageBuffer = std::nullopt) {
   if (highWater <= copied) {
     return;
   }
@@ -2447,6 +2635,9 @@ static void copy_staging_buffer_range(wgpu::CommandEncoder& cmd, const FramePack
   const uint32_t copyEnd = AURORA_ALIGN(highWater, 4);
   cmd.CopyBufferToBuffer(g_stagingBuffers[frame.stagingBuffer], stagingOffset + copyStart, dst, copyStart,
                          copyEnd - copyStart);
+  if (lineageBuffer) {
+    g_replayWriterEpochs.note_write(*lineageBuffer, frame.frameId, copyStart, copyEnd);
+  }
   copied = highWater;
 }
 
@@ -2468,11 +2659,14 @@ static void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& f
   }
   const webgpu::gpu_prof::Zone zone{cmd, "Staging copies"};
   const auto& highWater = op.highWater;
-  copy_staging_buffer_range(cmd, frame, frame.copied.verts, highWater.verts, VertexStagingOffset, g_vertexBuffer);
+  copy_staging_buffer_range(cmd, frame, frame.copied.verts, highWater.verts, VertexStagingOffset, g_vertexBuffer,
+                            replay_lineage::Buffer::Vertices);
   copy_staging_buffer_range(cmd, frame, frame.copied.uniforms, highWater.uniforms, UniformStagingOffset,
                             g_uniformBuffer);
-  copy_staging_buffer_range(cmd, frame, frame.copied.indices, highWater.indices, IndexStagingOffset, g_indexBuffer);
-  copy_staging_buffer_range(cmd, frame, frame.copied.storage, highWater.storage, StorageStagingOffset, g_storageBuffer);
+  copy_staging_buffer_range(cmd, frame, frame.copied.indices, highWater.indices, IndexStagingOffset, g_indexBuffer,
+                            replay_lineage::Buffer::Indices);
+  copy_staging_buffer_range(cmd, frame, frame.copied.storage, highWater.storage, StorageStagingOffset, g_storageBuffer,
+                            replay_lineage::Buffer::Storage);
 
   if constexpr (UseTextureBuffer) {
     for (size_t i = frame.copied.textureUploadCount; i < op.textureUploads.size(); ++i) {
@@ -2794,7 +2988,7 @@ static void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame,
     } break;
     case CommandType::DebugMarker: {
 #if defined(AURORA_GFX_DEBUG_GROUPS)
-      pass.InsertDebugMarker(wgpu::StringView(g_debugMarkers[cmd.data.debugMarkerIndex]));
+      pass.InsertDebugMarker(wgpu::StringView(passInfo.debugMarkers.label(cmd.data.debugMarker)));
 #endif
     } break;
     }
@@ -3035,9 +3229,11 @@ uint32_t align_uniform(uint32_t value) { return AURORA_ALIGN(value, g_cachedLimi
 
 void insert_debug_marker(std::string label) {
 #if defined(AURORA_GFX_DEBUG_GROUPS)
-  auto idx = g_debugMarkers.size();
-  g_debugMarkers.emplace_back(std::move(label));
-  push_command(CommandType::DebugMarker, {.debugMarkerIndex = idx});
+  CHECK(g_currentRenderPass != UINT32_MAX && g_currentRenderPass < current_render_passes().size(),
+        "Debug marker recorded outside a render pass");
+  auto& pass = current_render_passes()[g_currentRenderPass];
+  const DebugMarkers::Id marker = pass.debugMarkers.record(std::move(label));
+  push_command(CommandType::DebugMarker, {.debugMarker = marker});
 #endif
 }
 

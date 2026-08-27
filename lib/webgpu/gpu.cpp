@@ -62,6 +62,7 @@ static wgpu::RenderPipeline g_ResamplePipeline;
 static wgpu::Buffer g_ResampleUniformBuffer;
 static TextureWithSampler g_resampledFrameBuffer;
 static std::atomic_uint64_t g_submitId = 1;
+static std::atomic_uint64_t g_textureGeneration = 1;
 
 static wgpu::Adapter g_adapter;
 wgpu::Instance g_instance;
@@ -353,6 +354,8 @@ void submit_command_buffer(const wgpu::CommandBuffer& buffer, AuroraGpuSubmitInf
   }
 }
 
+uint64_t next_texture_generation() noexcept { return g_textureGeneration.fetch_add(1, std::memory_order_relaxed); }
+
 TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled) {
   const wgpu::Extent3D size{
       .width = width,
@@ -406,6 +409,8 @@ TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool m
       .size = size,
       .format = format,
       .sampler = std::move(sampler),
+      .generation = next_texture_generation(),
+      .sampleCount = sampleCount,
   };
 }
 
@@ -541,6 +546,8 @@ static TextureWithSampler create_depth_texture(uint32_t width, uint32_t height) 
       .size = size,
       .format = format,
       .sampler = std::move(sampler),
+      .generation = next_texture_generation(),
+      .sampleCount = g_graphicsConfig.msaaSamples,
   };
 }
 

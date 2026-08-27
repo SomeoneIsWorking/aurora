@@ -153,6 +153,36 @@ if (AURORA_ENABLE_GX)
   )
   gtest_discover_tests(gpu_submit_probe_tests)
 
+  add_executable(replay_lineage_tests
+    replay_lineage_test.cpp
+    os_test_globals.cpp
+    ../lib/gfx/gpu_submit_probe.cpp
+    ../lib/gfx/replay_lineage.cpp
+    ../lib/logging.cpp
+  )
+  target_include_directories(replay_lineage_tests PRIVATE ../include ../lib)
+  target_compile_definitions(replay_lineage_tests PRIVATE AURORA TARGET_PC WEBGPU_DAWN)
+  target_link_libraries(replay_lineage_tests PRIVATE
+    gtest
+    gtest_main
+    fmt::fmt
+    xxhash
+    dawn::dawncpp_headers
+    TracyClient
+  )
+  gtest_discover_tests(replay_lineage_tests)
+
+  add_executable(debug_markers_tests
+    debug_markers_test.cpp
+    os_test_globals.cpp
+    ../lib/gfx/debug_markers.cpp
+    ../lib/logging.cpp
+  )
+  target_include_directories(debug_markers_tests PRIVATE ../include ../lib)
+  target_compile_definitions(debug_markers_tests PRIVATE AURORA TARGET_PC)
+  target_link_libraries(debug_markers_tests PRIVATE gtest gtest_main fmt::fmt TracyClient)
+  gtest_discover_tests(debug_markers_tests)
+
   add_executable(debug_group_snapshots_tests debug_group_snapshots_test.cpp)
   target_link_libraries(debug_group_snapshots_tests PRIVATE gtest gtest_main)
   gtest_discover_tests(debug_group_snapshots_tests)
