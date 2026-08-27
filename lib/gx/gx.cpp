@@ -255,7 +255,7 @@ gfx::TextureHandle resolve_dynamic_palette_texture(const GXTexObj_& obj, const G
   if (!entry.handle) {
     // Use source size instead of target (logical) size
     entry.handle = gfx::new_conv_texture(source.handle->size.width, source.handle->size.height, GX_TF_RGBA8,
-                                         "GX Dynamic Palette Texture");
+                                         "GX Dynamic Palette Texture", gfx::TextureReadback::Unsupported);
   }
   if (entry.sourceRevision != source.revision || entry.tlutDataVersion != tlut.tlutDataVersion) {
     gfx::queue_palette_conv({

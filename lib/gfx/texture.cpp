@@ -182,7 +182,8 @@ TextureHandle new_dynamic_texture_2d(uint32_t width, uint32_t height, uint32_t m
                                       mips, gxFormat);
 }
 
-TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {
+TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label,
+                                 TextureReadback readback) noexcept {
   ZoneScoped;
 
   const auto wgpuFormat = webgpu::g_graphicsConfig.surfaceConfiguration.format;
@@ -193,7 +194,9 @@ TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, 
   };
   const wgpu::TextureDescriptor textureDescriptor{
       .label = label,
-      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::RenderAttachment,
+      .usage = with_texture_readback(wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst |
+                                         wgpu::TextureUsage::RenderAttachment,
+                                     readback),
       .dimension = wgpu::TextureDimension::e2D,
       .size = size,
       .format = wgpuFormat,
@@ -215,7 +218,8 @@ TextureHandle new_render_texture(uint32_t width, uint32_t height, u32 gxFormat, 
                                       std::move(attachmentTextureView), size, wgpuFormat, 1, gxFormat);
 }
 
-TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label) noexcept {
+TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, const char* label,
+                               TextureReadback readback) noexcept {
   ZoneScoped;
 
   const auto wgpuFormat = to_wgpu(gxFormat);
@@ -226,7 +230,8 @@ TextureHandle new_conv_texture(uint32_t width, uint32_t height, u32 gxFormat, co
   };
   const wgpu::TextureDescriptor textureDescriptor{
       .label = label,
-      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::RenderAttachment,
+      .usage =
+          with_texture_readback(wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::RenderAttachment, readback),
       .dimension = wgpu::TextureDimension::e2D,
       .size = size,
       .format = wgpuFormat,

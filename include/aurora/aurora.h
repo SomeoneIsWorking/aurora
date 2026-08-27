@@ -290,6 +290,12 @@ const AuroraEvent* aurora_update();
 bool aurora_begin_frame();
 void aurora_end_frame();
 
+/* Pause Aurora's background pipeline compiler and wait for an already-running compilation to
+ * finish. Hosts that create a second graphics device use this around that device's initialization
+ * so two Vulkan implementations do not concurrently enter loader/debug-utils device setup. */
+void aurora_pause_pipeline_compilation();
+void aurora_resume_pipeline_compilation();
+
 /* Select whether Aurora owns operating-system presentation. Disabling presentation releases its
  * WSI surface while preserving FIFO consumption, offscreen rendering, and frame-sink readback so
  * Aurora can serve as an oracle beside a host-owned presenter. */
@@ -335,6 +341,35 @@ void aurora_fifo_replay(const uint8_t* data, uint32_t size, int bigEndian);
  */
 typedef void (*AuroraFrameSink)(const uint8_t* rgba, uint32_t width, uint32_t height, void* user);
 void aurora_set_frame_sink(AuroraFrameSink fn, void* user, int everyNFrames);
+
+/* Versioned metadata for an asynchronous frame-sink delivery. `frameId` identifies the exact
+ * Aurora packet whose presented pixels were copied; it does not identify the later present during
+ * which MapAsync happened to deliver them. A replay emission has its own frameId and names the
+ * packet it replays separately through replaySourceFrameId. */
+#define AURORA_FRAME_SINK_INFO_VERSION 1
+typedef struct {
+  uint32_t structSize;
+  uint32_t version;
+  uint64_t frameId;
+  uint64_t replaySourceFrameId;
+  uint32_t replayEmission;
+  uint32_t reserved;
+} AuroraFrameSinkInfo;
+
+#ifdef __cplusplus
+static_assert(sizeof(AuroraFrameSinkInfo) == 32, "Frame sink info ABI changed");
+#else
+_Static_assert(sizeof(AuroraFrameSinkInfo) == 32, "Frame sink info ABI changed");
+#endif
+
+typedef void (*AuroraFrameSinkWithInfo)(const uint8_t* rgba, uint32_t width, uint32_t height,
+                                        const AuroraFrameSinkInfo* info, void* user);
+/* The informed and legacy sinks are mutually exclusive: setting either one replaces the other. */
+void aurora_set_frame_sink_with_info(AuroraFrameSinkWithInfo fn, void* user, int everyNFrames);
+/* Return the exact active packet ID when the configured sink will capture this emission, or zero
+ * when no packet is open or this emission is outside the configured cadence. The query is
+ * non-consuming: repeated calls before aurora_end_frame return the same answer. */
+uint64_t aurora_frame_sink_capture_frame_id(void);
 
 /* Stamp a short role label onto subsequent SB_DUMP_FRAME filenames (e.g. "main", "sub").
  * A runtime that issues more than one kind of present per tick otherwise produces a dump

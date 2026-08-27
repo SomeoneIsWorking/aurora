@@ -114,9 +114,15 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
   };
   auto it = g_gxState.copyTextureCache.find(key);
   if (it == g_gxState.copyTextureCache.end()) {
+    // Only the display copy can become Aurora's present source. Frame dumps and the in-process
+    // frame sink read that source with CopyTextureToBuffer, so its descriptor must advertise
+    // CopySrc. Ordinary EFB-copy textures stay narrower because they are only rendered into and
+    // sampled by the emulated GX pipeline.
+    const auto readback =
+        dest == kDisplayCopyDest ? gfx::TextureReadback::Supported : gfx::TextureReadback::Unsupported;
     gfx::TextureHandle handle;
     if (gfx::tex_copy_conv::needs_conversion(texCopyFmt)) {
-      handle = gfx::new_conv_texture(dstWidth, dstHeight, texCopyFmt, "Copy Conv Texture");
+      handle = gfx::new_conv_texture(dstWidth, dstHeight, texCopyFmt, "Copy Conv Texture", readback);
     } else {
       // Configure the texture swizzle to use alpha 1.0 if targeting RGB565 or
       // EFB doesn't have alpha. The display copy is also alpha-less: the real
@@ -127,7 +133,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
                                g_gxState.pixelFmt == GX_PF_RGB565_Z16 || dest == kDisplayCopyDest
                            ? GX_TF_RGB565
                            : GX_TF_RGBA8;
-      handle = gfx::new_render_texture(dstWidth, dstHeight, fmt, "Resolved Texture");
+      handle = gfx::new_render_texture(dstWidth, dstHeight, fmt, "Resolved Texture", readback);
     }
     it = g_gxState.copyTextureCache.emplace(key, GXState::CopyTextureRef{.handle = handle, .revision = 0}).first;
   }

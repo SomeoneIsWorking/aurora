@@ -473,6 +473,8 @@ static FramePacket& current_frame_packet() {
   return *g_recordingFrame;
 }
 
+uint64_t recording_frame_id() noexcept { return g_recordingFrame != nullptr ? g_recordingFrame->frameId : 0; }
+
 static RenderPassList& current_render_passes() { return current_frame_packet().renderPasses; }
 
 static void sb_log_pass_boundary(const char* kind) {
