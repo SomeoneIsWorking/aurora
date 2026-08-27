@@ -23,6 +23,10 @@ struct TextureWithSampler {
   wgpu::Extent3D size;
   wgpu::TextureFormat format;
   wgpu::Sampler sampler;
+  // Stable process-local identity for diagnostics. A copied handle keeps the same generation;
+  // recreating a texture with identical dimensions and format receives a new one.
+  uint64_t generation = 0;
+  uint32_t sampleCount = 1;
 };
 struct Viewport {
   float left;
@@ -67,6 +71,7 @@ void invalidate_surface() noexcept;
 bool surface_available() noexcept;
 bool refresh_surface(bool recreate = true);
 void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight, bool force = false);
+uint64_t next_texture_generation() noexcept;
 TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled);
 TextureWithSampler present_source() noexcept;
 wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source);

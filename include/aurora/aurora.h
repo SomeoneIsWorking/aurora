@@ -107,7 +107,7 @@ typedef enum {
 #define AURORA_GPU_PROBE_MAX_PASSES 16
 #define AURORA_GPU_PROBE_MAX_DRAWS 9
 #define AURORA_GPU_PROBE_MAX_MESSAGE 432
-#define AURORA_GPU_PROBE_VERSION 2
+#define AURORA_GPU_PROBE_VERSION 3
 
 /* Values stored in AuroraGpuDrawProbe::shaderType. Keep these synchronized with Aurora's
  * internal ShaderType values; the fixed-width field keeps the flight record's ABI stable. */
@@ -191,6 +191,11 @@ typedef struct {
   uint32_t presentEnabled;
   uint32_t headless;
   uint32_t status;
+  /* Selected pass-stream fingerprint: pass metadata, palette conversions, recorded commands and
+   * post-pass resolves (including source/destination resource generations, actual source sample
+   * count and selected resolve path). Standalone texture-copy FrameOps, attachment load/store and
+   * clear values, stencil clear, buffer contents, and host-added present/readback/ImGui commands
+   * are outside this hash. */
   uint64_t commandHash;
   uint64_t pipelineHash;
   AuroraGpuPassProbe passes[AURORA_GPU_PROBE_MAX_PASSES];
@@ -207,14 +212,20 @@ typedef struct {
   uint32_t readbackMapsCompleted;
   uint32_t readbackMapsFailed;
   AuroraGpuDrawProbe draws[AURORA_GPU_PROBE_MAX_DRAWS];
+  /* v3 append-only replay-source lineage. The ordinary commandHash may differ on the first
+   * emission because interpolation intentionally rewrites it; these fields identify and
+   * fingerprint the untouched source packet from which the replay emission was installed. */
+  uint64_t replaySourceFrameId;
+  uint64_t replaySourceCommandHash;
+  uint64_t replaySourceUniformHash;
 } AuroraGpuSubmitInfo;
 
 #ifdef __cplusplus
 static_assert(sizeof(AuroraGpuDrawProbe) == 64, "GPU draw probe ABI changed");
-static_assert(sizeof(AuroraGpuSubmitInfo) <= 1536, "GPU submit probe exceeds the incident recorder slot");
+static_assert(sizeof(AuroraGpuSubmitInfo) == 1536, "GPU submit probe v3 ABI changed");
 #else
 _Static_assert(sizeof(AuroraGpuDrawProbe) == 64, "GPU draw probe ABI changed");
-_Static_assert(sizeof(AuroraGpuSubmitInfo) <= 1536, "GPU submit probe exceeds the incident recorder slot");
+_Static_assert(sizeof(AuroraGpuSubmitInfo) == 1536, "GPU submit probe v3 ABI changed");
 #endif
 
 typedef void (*AuroraGpuProbeCallback)(AuroraGpuProbePhase phase, const AuroraGpuSubmitInfo* info, const char* message,

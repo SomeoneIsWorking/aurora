@@ -131,6 +131,57 @@ TEST(GpuSubmitProbe, DestinationAlphaFlagUsesTheDisabledSentinel) {
   EXPECT_NE(enabledZero.draws[0].flags & AURORA_GPU_DRAW_FLAG_DEST_ALPHA, 0u);
 }
 
+TEST(GpuSubmitProbe, DebugMarkerHashCoversOwnedLabelBytes) {
+  const auto finish = [](std::string_view label) {
+    Builder builder{FrameInput{.passCount = 1}};
+    builder.begin_pass(PassInput{.label = "debug-marker", .commandCount = 1});
+    builder.add_debug_marker(label);
+    builder.end_pass();
+    return builder.finish();
+  };
+
+  EXPECT_NE(finish("original long marker label").commandHash, finish("mutated long marker label").commandHash);
+}
+
+TEST(GpuSubmitProbe, CommandHashCoversPaletteAndResolveOperationsOutsideDrawList) {
+  const TextureResourceInput source{.generation = 1, .width = 640, .height = 528, .format = 1, .mipCount = 1};
+  const TextureResourceInput destination{.generation = 2, .width = 320, .height = 264, .format = 2, .mipCount = 1};
+  const TextureResourceInput palette{.generation = 3, .width = 256, .height = 1, .format = 3, .mipCount = 1};
+  const auto finish = [&](uint64_t sourceGeneration, uint64_t destinationGeneration, int32_t rectWidth,
+                          uint32_t sourceSamples) {
+    Builder builder{FrameInput{.passCount = 1}};
+    builder.begin_pass(PassInput{.label = "hidden-operations", .commandCount = 0});
+    auto changedSource = source;
+    changedSource.generation = sourceGeneration;
+    auto changedDestination = destination;
+    changedDestination.generation = destinationGeneration;
+    builder.add_palette_conversion({
+        .variant = 1,
+        .source = source,
+        .destination = changedDestination,
+        .palette = palette,
+    });
+    builder.add_resolve({
+        .format = 6,
+        .rectWidth = rectWidth,
+        .rectHeight = 264,
+        .uniformRange = {256, 16},
+        .source = changedSource,
+        .destination = changedDestination,
+        .sourceSamples = sourceSamples,
+        .path = ResolvePath::ScaleBlit,
+    });
+    builder.end_pass();
+    return builder.finish();
+  };
+
+  const uint64_t baseline = finish(source.generation, destination.generation, 320, 1).commandHash;
+  EXPECT_NE(baseline, finish(source.generation, 99, 320, 1).commandHash);
+  EXPECT_NE(baseline, finish(source.generation, destination.generation, 319, 1).commandHash);
+  EXPECT_NE(baseline, finish(99, destination.generation, 320, 1).commandHash);
+  EXPECT_NE(baseline, finish(source.generation, destination.generation, 320, 4).commandHash);
+}
+
 #undef EXPECT_HASH_CHANGE
 
 } // namespace

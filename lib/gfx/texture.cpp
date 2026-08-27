@@ -20,6 +20,7 @@
 #include <webgpu/webgpu_cpp.h>
 
 namespace aurora::gfx {
+
 using webgpu::g_device;
 using webgpu::g_queue;
 

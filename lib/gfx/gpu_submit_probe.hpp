@@ -93,6 +93,9 @@ struct FrameInput {
   uint32_t cachedBindGroups = 0;
   uint32_t persistentStorageEntries = 0;
   uint32_t persistentStorageBytes = 0;
+  uint64_t replaySourceFrameId = 0;
+  uint64_t replaySourceCommandHash = 0;
+  uint64_t replaySourceUniformHash = 0;
 };
 
 struct PassInput {
@@ -101,6 +104,43 @@ struct PassInput {
   uint32_t targetWidth = 0;
   uint32_t targetHeight = 0;
   uint32_t flags = 0;
+};
+
+struct TextureResourceInput {
+  uint64_t generation = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t depthOrArrayLayers = 0;
+  uint32_t format = 0;
+  uint32_t mipCount = 0;
+  uint32_t gxFormat = 0;
+};
+
+struct PaletteConversionInput {
+  uint8_t variant = 0;
+  TextureResourceInput source;
+  TextureResourceInput destination;
+  TextureResourceInput palette;
+};
+
+enum class ResolvePath : uint8_t {
+  DirectCopy,
+  ScaleBlit,
+  FormatConversion,
+};
+
+struct ResolveInput {
+  uint32_t format = 0;
+  int32_t rectX = 0;
+  int32_t rectY = 0;
+  int32_t rectWidth = 0;
+  int32_t rectHeight = 0;
+  RangeInput uniformRange;
+  TextureResourceInput source;
+  TextureResourceInput destination;
+  uint32_t sourceSamples = 0;
+  ResolvePath path = ResolvePath::DirectCopy;
+  uint8_t sourceIsDepth = 0;
 };
 
 struct ViewportInput {
@@ -133,7 +173,9 @@ public:
   void add_draw(const ClearDrawInput& draw);
   void add_draw(const GxDrawInput& draw);
   void add_draw(const RmlDrawInput& draw);
-  void add_debug_marker(uint64_t markerIndex);
+  void add_debug_marker(std::string_view label);
+  void add_palette_conversion(const PaletteConversionInput& conversion);
+  void add_resolve(const ResolveInput& resolve);
   void end_pass();
   AuroraGpuSubmitInfo finish();
 

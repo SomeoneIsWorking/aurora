@@ -21,7 +21,6 @@ inline bool sb_copy_dbg_chan() {
 }
 } // namespace
 
-
 // Frame ordinal for SB_COPY_DBG_AFTER. Provided by the runtime (sms-boot's frame seam, or the
 // recomp's present counter); weak so aurora still links standalone, where it reads 0 and the
 // window simply opens immediately.
@@ -30,7 +29,9 @@ extern "C" unsigned VIGetRetraceCount(void) __attribute__((weak));
 // each copy puts copies and draws on ONE timeline, which is the only way to see whether a
 // render-to-texture grab happens before or after the draw that samples it - the difference
 // between a feedback loop with no gain and one that compounds.
-namespace aurora::gx::fifo { extern long g_sbPushedDrawCount; }
+namespace aurora::gx::fifo {
+extern long g_sbPushedDrawCount;
+}
 static unsigned sb_gx_vi_retrace_count() { return (&VIGetRetraceCount) ? VIGetRetraceCount() : 0; }
 
 namespace {
@@ -193,7 +194,8 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
       }
     }
     s_useForced = s_on;
-    if (s_on) s_forced = s_col;
+    if (s_on)
+      s_forced = s_col;
   }
   // Name this copy's destination for the pass about to take the resolve. Interpolated 60fps decides
   // from the frame's own sample ORDER whether it is cross-frame feedback; the display copy is never
@@ -224,6 +226,8 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
           .size = handle.handle->size,
           .format = handle.handle->format,
           .sampler = webgpu::g_frameBuffer.sampler,
+          .generation = handle.handle->generation,
+          .sampleCount = 1,
       };
     }
   }
@@ -237,6 +241,8 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
         .size = handle.handle->size,
         .format = handle.handle->format,
         .sampler = webgpu::g_frameBuffer.sampler,
+        .generation = handle.handle->generation,
+        .sampleCount = 1,
     };
   }
   ++handle.revision;
@@ -271,10 +277,8 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
                    // The copy's alpha is what a sampling draw's TEXA reads, and with a
                    // src-alpha blend that value sets the gain of any feedback loop through
                    // this copy. It is invisible in every other diagnostic.
-                   static_cast<int>(g_gxState.dstAlpha), g_gxState.alphaUpdate ? 1 : 0,
-                   g_gxState.colorUpdate ? 1 : 0, static_cast<int>(g_gxState.pixelFmt),
-                   aurora::gx::fifo::g_sbPushedDrawCount,
-                   sb_gx_last_marker());
+                   static_cast<int>(g_gxState.dstAlpha), g_gxState.alphaUpdate ? 1 : 0, g_gxState.colorUpdate ? 1 : 0,
+                   static_cast<int>(g_gxState.pixelFmt), aurora::gx::fifo::g_sbPushedDrawCount, sb_gx_last_marker());
     } else if (windowOpen) {
       ++n;
     }
@@ -417,8 +421,8 @@ void GXSetCopyClear(GXColor color, u32 depth) {
   // the game sets different colors for different copies within a frame.
   if (sb_copy_dbg_chan()) {
     static long n = 0;
-    std::fprintf(stderr, "[copy-clear-set] n=%ld rgba=(%u,%u,%u,%u) z=%06x\n", ++n, color.r, color.g, color.b,
-                 color.a, depth);
+    std::fprintf(stderr, "[copy-clear-set] n=%ld rgba=(%u,%u,%u,%u) z=%06x\n", ++n, color.r, color.g, color.b, color.a,
+                 depth);
   }
   // BP 0x4F: clear color R + A
   u32 reg0 = 0;
