@@ -4399,6 +4399,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   }
   // Build pipeline, bind groups, and push draw command
   BindGroupRanges ranges{};
+  uint32_t indexedArrayUsedMask = 0;
   static int s_arrDbg = -1;
   if (s_arrDbg < 0) {
     const char* e = std::getenv("SB_ARR_DBG");
@@ -4408,6 +4409,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) {
       continue;
     }
+    indexedArrayUsedMask |= 1u << static_cast<uint32_t>(i - GX_VA_POS);
     auto& array = g_gxState.arrays[i];
     // SB_NO_ARRCACHE=1 (diagnostic): re-upload every indexed array on every
     // draw — bisects "GPU reads a stale cached array upload" (content changed
@@ -4885,6 +4887,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .deformF32OffsetMask = deformF32OffsetMask,
       .texMtxCamMask = texMtxCamMask,
       .pnMtxSlot = static_cast<uint8_t>(g_gxState.currentPnMtx),
+      .indexedArrayUsedMask = indexedArrayUsedMask,
+      .indexedArrayRanges = ranges.vaRanges,
   });
   // ONE-SHOT, unlike the tag. A tag identifies an OBJECT and legitimately covers every draw that
   // object emits; "present this exactly" is a property of ONE primitive, and the function that

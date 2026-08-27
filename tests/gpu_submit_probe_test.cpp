@@ -59,6 +59,15 @@ TEST(GpuSubmitProbe, GxHashCoversEverySemanticField) {
   EXPECT_HASH_CHANGE(draw, deformF32OffsetMask, 1);
   EXPECT_HASH_CHANGE(draw, cameraTextureMatrixMask, 1);
   EXPECT_HASH_CHANGE(draw, positionMatrixSlot, 1);
+  EXPECT_HASH_CHANGE(draw, indexedArrayUsedMask, 1);
+  for (size_t attribute = 0; attribute < draw.indexedArrayRanges.size(); ++attribute) {
+    expect_hash_change(
+        draw, [attribute](auto& changed) { changed.indexedArrayRanges[attribute].offset = 1; },
+        "indexedArrayRanges.offset");
+    expect_hash_change(
+        draw, [attribute](auto& changed) { changed.indexedArrayRanges[attribute].size = 1; },
+        "indexedArrayRanges.size");
+  }
 }
 
 TEST(GpuSubmitProbe, RmlHashCoversEverySemanticField) {
@@ -83,6 +92,8 @@ TEST(GpuSubmitProbe, RmlHashCoversEverySemanticField) {
     expect_hash_change(draw, [component](auto& changed) { changed.blendConstant[component] = 1.0f; }, "blendConstant");
   }
   EXPECT_HASH_CHANGE(draw, hasBlendConstant, 1);
+  EXPECT_HASH_CHANGE(draw, bindGroup1DynamicExtent, 1);
+  EXPECT_HASH_CHANGE(draw, bindGroup2DynamicExtent, 1);
 }
 
 TEST(GpuSubmitProbe, DrawTailIsBoundedAndChronological) {

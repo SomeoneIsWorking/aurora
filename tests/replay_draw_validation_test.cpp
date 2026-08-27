@@ -31,20 +31,30 @@ struct ValidGxFixture {
       .mtxPosOffset = 128,
       .mtxNrmOffset = 1088,
       .vtxStride = 16,
+      .indexedArrayUsedMask = 1,
   };
 
   ValidGxFixture() {
     const uint32_t persistentOffset = static_cast<uint32_t>(aurora::gfx::StorageBufferSize);
     std::memcpy(uniforms.data() + draw.uniformRange.offset + draw.posArrayUniformOffset, &persistentOffset,
                 sizeof(persistentOffset));
+    draw.indexedArrayRanges[0] = {persistentOffset, 16};
   }
 };
 
 TEST(ReplayDrawValidation, AcceptsBoundaryRangesBackedByReplayPrefix) {
   ValidGxFixture fixture;
-  const auto result = validation::validate_gx(fixture.draw, fixture.uniforms, fixture.bounds);
-  EXPECT_EQ(result.unchecked,
-            validation::UncheckedGxStorageRangeExtents | validation::UncheckedGxPersistentRangeExtents);
+  validation::validate_gx(fixture.draw, fixture.uniforms, fixture.bounds);
+}
+
+TEST(ReplayDrawValidation, AcceptsIndexedRangeAtStartOfPerFrameStorage) {
+  ValidGxFixture fixture;
+  const uint32_t perFrameOffset = 0;
+  std::memcpy(fixture.uniforms.data() + fixture.draw.uniformRange.offset + fixture.draw.posArrayUniformOffset,
+              &perFrameOffset, sizeof(perFrameOffset));
+  fixture.draw.indexedArrayRanges[0] = {0, 16};
+  fixture.bounds.storage.highWater = 16;
+  validation::validate_gx(fixture.draw, fixture.uniforms, fixture.bounds);
 }
 
 TEST(ReplayDrawValidation, RejectsVertexRangePastOperationHighWater) {
@@ -95,10 +105,35 @@ TEST(ReplayDrawValidation, RejectsStorageOffsetWithoutCapturedOwner) {
   std::memcpy(fixture.uniforms.data() + fixture.draw.uniformRange.offset + fixture.draw.posArrayUniformOffset,
               &invalidOffset, sizeof(invalidOffset));
   EXPECT_DEATH(validation::validate_gx(fixture.draw, fixture.uniforms, fixture.bounds),
-               "indexed attribute 0 names storage offset 64 outside per-frame high-water 0");
+               "indexed attribute 0 shader-visible storage offset 64 disagrees with retained range start");
 }
 
-TEST(ReplayDrawValidation, RmlReturnsUncheckedDynamicBindingExtent) {
+TEST(ReplayDrawValidation, RejectsPersistentIndexedRangePastArenaEnd) {
+  ValidGxFixture fixture;
+  fixture.draw.indexedArrayRanges[0].size += 1;
+  EXPECT_DEATH(validation::validate_gx(fixture.draw, fixture.uniforms, fixture.bounds),
+               "indexed attribute 0 persistent storage range.*exceeds arena end");
+}
+
+TEST(ReplayDrawValidation, RejectsPerFrameIndexedRangePastOperationHighWater) {
+  ValidGxFixture fixture;
+  const uint32_t perFrameOffset = 0;
+  std::memcpy(fixture.uniforms.data() + fixture.draw.uniformRange.offset + fixture.draw.posArrayUniformOffset,
+              &perFrameOffset, sizeof(perFrameOffset));
+  fixture.draw.indexedArrayRanges[0] = {0, 17};
+  fixture.bounds.storage.highWater = 16;
+  EXPECT_DEATH(validation::validate_gx(fixture.draw, fixture.uniforms, fixture.bounds),
+               "indexed attribute 0 per-frame storage range.*exceeds encode-operation high-water mark");
+}
+
+TEST(ReplayDrawValidation, RejectsUsedIndexedArrayWithoutExtent) {
+  ValidGxFixture fixture;
+  fixture.draw.indexedArrayRanges[0].size = 0;
+  EXPECT_DEATH(validation::validate_gx(fixture.draw, fixture.uniforms, fixture.bounds),
+               "indexed attribute 0 has an empty retained storage range");
+}
+
+TEST(ReplayDrawValidation, RmlAcceptsBoundedDynamicBindingExtent) {
   const validation::FrameBounds bounds{
       .vertices = {40, 40, static_cast<uint32_t>(aurora::gfx::VertexBufferSize)},
       .uniforms = {256, 0, static_cast<uint32_t>(aurora::gfx::UniformBufferSize)},
@@ -119,16 +154,30 @@ TEST(ReplayDrawValidation, RmlReturnsUncheckedDynamicBindingExtent) {
       .indexCount = 3,
       .vertexStride = 20,
       .requiredUniformSize = 80,
+      .bindGroup1DynamicExtent = 80,
   };
-  const auto result = validation::validate_rml(draw, bounds);
-  EXPECT_EQ(result.unchecked, validation::UncheckedRmlDynamicGroup1BindingExtent);
+  validation::validate_rml(draw, bounds);
 }
 
-TEST(ReplayDrawValidation, RecordsUncheckedCoverageForShippingReplay) {
-  const uint32_t coverage = validation::UncheckedGxStorageRangeExtents | validation::UncheckedGxPersistentRangeExtents |
-                            validation::UncheckedRmlDynamicGroup1BindingExtent;
-  validation::record_unchecked({.unchecked = coverage});
-  EXPECT_EQ(validation::observed_unchecked() & coverage, coverage);
+TEST(ReplayDrawValidation, RejectsRmlDynamicBindingPastUniformHighWater) {
+  const validation::FrameBounds bounds{
+      .vertices = {0, 0, static_cast<uint32_t>(aurora::gfx::VertexBufferSize)},
+      .uniforms = {256, 0, static_cast<uint32_t>(aurora::gfx::UniformBufferSize)},
+      .indices = {0, 0, static_cast<uint32_t>(aurora::gfx::IndexBufferSize)},
+      .storage = {0, 0, static_cast<uint32_t>(aurora::gfx::StorageBufferSize)},
+      .persistentStorageEnd = static_cast<uint32_t>(aurora::gfx::StorageBufferSize),
+      .uniformOffsetAlignment = 256,
+  };
+  const validation::RmlDrawReferences draw{
+      .bindGroup2 = 1,
+      .bindGroup2DynamicOffset = 256,
+      .dynamicBindGroupMask = 1u << 2u,
+      .drawKind = 1,
+      .vertexCount = 3,
+      .bindGroup2DynamicExtent = 1,
+  };
+  EXPECT_DEATH(validation::validate_rml(draw, bounds),
+               "Replay Rml dynamic group 2 range.*exceeds encode-operation high-water mark");
 }
 
 TEST(ReplayDrawValidation, RejectsRmlVertexCountToByteMismatch) {

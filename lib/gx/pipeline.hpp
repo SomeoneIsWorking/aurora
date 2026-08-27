@@ -79,6 +79,13 @@ struct DrawData {
   // position-sourced texture matrix. Only meaningful when the mask is non-zero, which the
   // record-time gate only allows for draws whose matrix index is NOT per-vertex.
   uint8_t pnMtxSlot;
+  // Exact storage-buffer ownership retained at record time for indexed vertex attributes.
+  // The shader reads the starts from the uniform block; replay validation cross-checks those
+  // values against these ranges before encoding and proves every used range end against its
+  // per-frame or persistent arena. The mask distinguishes an unused zero from a valid range
+  // beginning at storage offset zero.
+  uint32_t indexedArrayUsedMask;
+  std::array<gfx::Range, MaxIndexAttr> indexedArrayRanges;
 };
 
 constexpr uint32_t GXPipelineConfigVersion = 13;

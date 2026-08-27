@@ -481,6 +481,14 @@ static_assert(static_cast<uint8_t>(ShaderType::Clear) == AURORA_GPU_DRAW_CLEAR);
 static_assert(static_cast<uint8_t>(ShaderType::GX) == AURORA_GPU_DRAW_GX);
 static_assert(static_cast<uint8_t>(ShaderType::Rml) == AURORA_GPU_DRAW_RML);
 
+static std::array<gpu_submit_probe::RangeInput, gx::MaxIndexAttr> probe_indexed_array_ranges(const gx::DrawData& draw) {
+  std::array<gpu_submit_probe::RangeInput, gx::MaxIndexAttr> ranges{};
+  for (size_t index = 0; index < ranges.size(); ++index) {
+    ranges[index] = {draw.indexedArrayRanges[index].offset, draw.indexedArrayRanges[index].size};
+  }
+  return ranges;
+}
+
 static AuroraGpuSubmitInfo build_submit_probe(const FramePacket& frame) {
   const auto textureCaches = gx::texture_cache_counts();
   gpu_submit_probe::FrameInput input{
@@ -579,6 +587,8 @@ static AuroraGpuSubmitInfo build_submit_probe(const FramePacket& frame) {
               .deformF32OffsetMask = command.data.draw.gx.deformF32OffsetMask,
               .cameraTextureMatrixMask = command.data.draw.gx.texMtxCamMask,
               .positionMatrixSlot = command.data.draw.gx.pnMtxSlot,
+              .indexedArrayUsedMask = command.data.draw.gx.indexedArrayUsedMask,
+              .indexedArrayRanges = probe_indexed_array_ranges(command.data.draw.gx),
           });
           break;
 #ifdef AURORA_ENABLE_RMLUI
@@ -599,6 +609,8 @@ static AuroraGpuSubmitInfo build_submit_probe(const FramePacket& frame) {
               .stencilReference = command.data.draw.rml.stencilRef,
               .blendConstant = command.data.draw.rml.blendConstant,
               .hasBlendConstant = command.data.draw.rml.hasBlendConstant,
+              .bindGroup1DynamicExtent = command.data.draw.rml.bindGroup1DynamicExtent,
+              .bindGroup2DynamicExtent = command.data.draw.rml.bindGroup2DynamicExtent,
           });
           break;
 #endif
@@ -2503,13 +2515,12 @@ static void validate_replay_draws(const FramePacket& frame, const FrameOp& op) {
     case ShaderType::Clear:
       break;
     case ShaderType::GX:
-      replay_draw_validation::record_unchecked(
-          replay_draw_validation::validate_gx(command.data.draw.gx, uniforms, bounds));
+      replay_draw_validation::validate_gx(command.data.draw.gx, uniforms, bounds);
       break;
 #ifdef AURORA_ENABLE_RMLUI
     case ShaderType::Rml: {
       const auto& draw = command.data.draw.rml;
-      replay_draw_validation::record_unchecked(replay_draw_validation::validate_rml(
+      replay_draw_validation::validate_rml(
           {
               .vertexRange = draw.vertexRange,
               .indexRange = draw.indexRange,
@@ -2524,8 +2535,10 @@ static void validate_replay_draws(const FramePacket& frame, const FrameOp& op) {
               .indexCount = draw.indexCount,
               .vertexStride = sizeof(Rml::Vertex),
               .requiredUniformSize = sizeof(rmlui::UniformBlock),
+              .bindGroup1DynamicExtent = draw.bindGroup1DynamicExtent,
+              .bindGroup2DynamicExtent = draw.bindGroup2DynamicExtent,
           },
-          bounds));
+          bounds);
       break;
     }
 #endif
