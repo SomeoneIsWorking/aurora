@@ -85,6 +85,10 @@ struct DrawData {
   uint32_t stencilRef = 0;
   std::array<float, 4> blendConstant{};
   uint32_t hasBlendConstant = 0;
+  // Logical byte extents paired with the dynamic offsets above. These are the bytes populated for
+  // this draw, retained because the cached Dawn bind-group handle alone cannot recover them later.
+  uint32_t bindGroup1DynamicExtent = 0;
+  uint32_t bindGroup2DynamicExtent = 0;
 };
 static_assert(std::is_trivially_copyable_v<DrawData>);
 

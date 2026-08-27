@@ -3,7 +3,6 @@
 #include "../gx/pipeline.hpp"
 #include "../internal.hpp"
 
-#include <atomic>
 #include <cstring>
 
 namespace aurora::gfx::replay_draw_validation {
@@ -15,7 +14,6 @@ constexpr uint32_t RmlFullscreen = 1;
 constexpr uint32_t RmlDynamicGroup1 = 1u << 1u;
 constexpr uint32_t RmlDynamicGroup2 = 1u << 2u;
 constexpr uint32_t RmlDynamicGroups = RmlDynamicGroup1 | RmlDynamicGroup2;
-std::atomic_uint32_t ObservedUnchecked = UncheckedNone;
 
 void validate_window(const char* name, const BufferWindow& window) {
   CHECK(window.replayPrefix <= window.highWater,
@@ -57,9 +55,46 @@ void validate_relative_span(const char* name, uint32_t offset, uint64_t size, ui
         "Replay GX {} span [{}..{}) exceeds draw uniform size {}", name, offset, static_cast<uint64_t>(offset) + size,
         uniformSize);
 }
+
+void validate_indexed_array_range(uint32_t attribute, uint32_t shaderOffset, bool used, const Range& retainedRange,
+                                  const FrameBounds& bounds) {
+  if (!used) {
+    CHECK(shaderOffset == 0, "Replay GX unused indexed attribute {} has shader-visible storage offset {}", attribute,
+          shaderOffset);
+    CHECK(retainedRange.offset == 0 && retainedRange.size == 0,
+          "Replay GX unused indexed attribute {} retains storage range [{}..{})", attribute, retainedRange.offset,
+          static_cast<uint64_t>(retainedRange.offset) + retainedRange.size);
+    return;
+  }
+
+  CHECK(retainedRange.size != 0, "Replay GX indexed attribute {} has an empty retained storage range", attribute);
+  CHECK(shaderOffset == retainedRange.offset,
+        "Replay GX indexed attribute {} shader-visible storage offset {} disagrees with retained range start {}",
+        attribute, shaderOffset, retainedRange.offset);
+
+  if (retainedRange.offset < StorageBufferSize) {
+    CHECK(retainedRange.offset <= bounds.storage.highWater &&
+              retainedRange.size <= bounds.storage.highWater - retainedRange.offset,
+          "Replay GX indexed attribute {} per-frame storage range [{}..{}) exceeds encode-operation high-water mark {}",
+          attribute, retainedRange.offset, static_cast<uint64_t>(retainedRange.offset) + retainedRange.size,
+          bounds.storage.highWater);
+    CHECK(retainedRange.offset <= bounds.storage.capacity &&
+              retainedRange.size <= bounds.storage.capacity - retainedRange.offset,
+          "Replay GX indexed attribute {} per-frame storage range [{}..{}) exceeds buffer capacity {}", attribute,
+          retainedRange.offset, static_cast<uint64_t>(retainedRange.offset) + retainedRange.size,
+          bounds.storage.capacity);
+    return;
+  }
+
+  CHECK(retainedRange.offset < bounds.persistentStorageEnd &&
+            retainedRange.size <= bounds.persistentStorageEnd - retainedRange.offset,
+        "Replay GX indexed attribute {} persistent storage range [{}..{}) exceeds arena end {}", attribute,
+        retainedRange.offset, static_cast<uint64_t>(retainedRange.offset) + retainedRange.size,
+        bounds.persistentStorageEnd);
+}
 } // namespace
 
-Result validate_gx(const gx::DrawData& draw, std::span<const uint8_t> uniformBytes, const FrameBounds& bounds) {
+void validate_gx(const gx::DrawData& draw, std::span<const uint8_t> uniformBytes, const FrameBounds& bounds) {
   validate_bounds(bounds);
   validate_range("GX", "vertex", draw.vertRange, bounds.vertices, 4);
   validate_range("GX", "index", draw.idxRange, bounds.indices, 4);
@@ -102,50 +137,39 @@ Result validate_gx(const gx::DrawData& draw, std::span<const uint8_t> uniformByt
         gx::MaxPnMtx);
 
   const uint8_t* arrayOffsets = uniformBytes.data() + draw.uniformRange.offset + draw.posArrayUniformOffset;
+  constexpr uint32_t IndexedArrayBits = (1u << gx::MaxIndexAttr) - 1u;
+  CHECK((draw.indexedArrayUsedMask & ~IndexedArrayBits) == 0,
+        "Replay GX indexed-array used mask {:#x} has bits outside [0, {})", draw.indexedArrayUsedMask,
+        gx::MaxIndexAttr);
   for (uint32_t attribute = 0; attribute < gx::MaxIndexAttr; ++attribute) {
     uint32_t storageOffset = 0;
     std::memcpy(&storageOffset, arrayOffsets + attribute * sizeof(storageOffset), sizeof(storageOffset));
-    const bool unusedOrFirstPerFrameRange = storageOffset == 0;
-    const bool perFrameRange = storageOffset < bounds.storage.highWater;
-    const bool persistentRange = storageOffset >= StorageBufferSize && storageOffset < bounds.persistentStorageEnd;
-    CHECK(unusedOrFirstPerFrameRange || perFrameRange || persistentRange,
-          "Replay GX indexed attribute {} names storage offset {} outside per-frame high-water {} and persistent "
-          "arena [{}, {})",
-          attribute, storageOffset, bounds.storage.highWater, StorageBufferSize, bounds.persistentStorageEnd);
+    validate_indexed_array_range(attribute, storageOffset, (draw.indexedArrayUsedMask & (1u << attribute)) != 0,
+                                 draw.indexedArrayRanges[attribute], bounds);
   }
-
-  // DrawData retains each indexed array's start offset but neither its byte extent nor a used-slot
-  // mask. Offset ownership is checked above; proving either per-frame or persistent range END needs
-  // those missing fields at the command-processor -> DrawData boundary.
-  return {.unchecked = UncheckedGxStorageRangeExtents | UncheckedGxPersistentRangeExtents};
 }
 
-Result validate_rml(const RmlDrawReferences& draw, const FrameBounds& bounds) {
+void validate_rml(const RmlDrawReferences& draw, const FrameBounds& bounds) {
   validate_bounds(bounds);
   CHECK((draw.dynamicBindGroupMask & ~RmlDynamicGroups) == 0,
         "Replay Rml DrawData has unknown dynamic bind-group mask bits {:#x}",
         draw.dynamicBindGroupMask & ~RmlDynamicGroups);
 
-  uint32_t unchecked = UncheckedNone;
-  const auto validate_dynamic_offset = [&](uint32_t groupBit, uint64_t bindGroup, uint32_t offset,
-                                           uint32_t uncheckedBit) {
+  const auto validate_dynamic_offset = [&](const char* groupName, uint32_t groupBit, uint64_t bindGroup,
+                                           uint32_t offset, uint32_t extent) {
     if ((draw.dynamicBindGroupMask & groupBit) == 0) {
+      CHECK(extent == 0, "Replay Rml {} has dynamic extent {} without a dynamic-group bit", groupName, extent);
       return;
     }
-    CHECK(bindGroup != 0, "Replay Rml dynamic group bit {:#x} has no bind group", groupBit);
-    CHECK(offset % bounds.uniformOffsetAlignment == 0,
-          "Replay Rml dynamic group bit {:#x} offset {} is not aligned to {} bytes", groupBit, offset,
-          bounds.uniformOffsetAlignment);
-    CHECK(offset < bounds.uniforms.highWater,
-          "Replay Rml dynamic group bit {:#x} offset {} is not below uniform high-water mark {}", groupBit, offset,
-          bounds.uniforms.highWater);
-    unchecked |= uncheckedBit;
+    CHECK(bindGroup != 0, "Replay Rml {} dynamic-group bit has no bind group", groupName);
+    CHECK(extent != 0, "Replay Rml {} dynamic binding has an empty byte extent", groupName);
+    validate_range("Rml", groupName, {offset, extent}, bounds.uniforms, bounds.uniformOffsetAlignment);
   };
 
-  validate_dynamic_offset(RmlDynamicGroup1, draw.bindGroup1, draw.bindGroup1DynamicOffset,
-                          UncheckedRmlDynamicGroup1BindingExtent);
-  validate_dynamic_offset(RmlDynamicGroup2, draw.bindGroup2, draw.bindGroup2DynamicOffset,
-                          UncheckedRmlDynamicGroup2BindingExtent);
+  validate_dynamic_offset("dynamic group 1", RmlDynamicGroup1, draw.bindGroup1, draw.bindGroup1DynamicOffset,
+                          draw.bindGroup1DynamicExtent);
+  validate_dynamic_offset("dynamic group 2", RmlDynamicGroup2, draw.bindGroup2, draw.bindGroup2DynamicOffset,
+                          draw.bindGroup2DynamicExtent);
 
   switch (draw.drawKind) {
   case RmlGeometry: {
@@ -174,14 +198,6 @@ Result validate_rml(const RmlDrawReferences& draw, const FrameBounds& bounds) {
   default:
     FATAL("Replay Rml DrawData has unknown draw kind {}", draw.drawKind);
   }
-
-  // A dynamic offset identifies only the start. The cached bind-group record does not retain its
-  // buffer binding size, so offset+binding-size cannot be proven here.
-  return {.unchecked = unchecked};
 }
-
-void record_unchecked(Result result) { ObservedUnchecked.fetch_or(result.unchecked, std::memory_order_relaxed); }
-
-uint32_t observed_unchecked() { return ObservedUnchecked.load(std::memory_order_relaxed); }
 
 } // namespace aurora::gfx::replay_draw_validation

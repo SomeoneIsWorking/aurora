@@ -802,6 +802,7 @@ void WebGPURenderInterface::DrawFullscreenTexture(gfx::BindGroupRef bindGroup, g
       .stencilRef = m_stencilRef,
       .blendConstant = blendConstant,
       .hasBlendConstant = hasBlendConstant ? 1u : 0u,
+      .bindGroup2DynamicExtent = extraBindGroup != 0 && extraBindGroupHasDynamicOffset ? extraUniformRange.size : 0u,
   });
 }
 
@@ -1465,6 +1466,7 @@ void WebGPURenderInterface::RenderShader(Rml::CompiledShaderHandle shader, Rml::
       .stencilRef = m_stencilRef,
       .blendConstant = {0.f, 0.f, 0.f, 0.f},
       .hasBlendConstant = 1,
+      .bindGroup1DynamicExtent = shaderRange.size,
   });
 }
 

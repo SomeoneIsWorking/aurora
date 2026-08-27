@@ -65,6 +65,10 @@ void hash_draw_fields(Hasher& hasher, const GxDrawInput& draw) {
   hash_value(hasher, draw.deformF32OffsetMask);
   hash_value(hasher, draw.cameraTextureMatrixMask);
   hash_value(hasher, draw.positionMatrixSlot);
+  hash_value(hasher, draw.indexedArrayUsedMask);
+  for (const RangeInput& range : draw.indexedArrayRanges) {
+    hash_range(hasher, range);
+  }
 }
 
 void hash_draw_fields(Hasher& hasher, const RmlDrawInput& draw) {
@@ -86,6 +90,8 @@ void hash_draw_fields(Hasher& hasher, const RmlDrawInput& draw) {
     hash_value(hasher, component);
   }
   hash_value(hasher, draw.hasBlendConstant);
+  hash_value(hasher, draw.bindGroup1DynamicExtent);
+  hash_value(hasher, draw.bindGroup2DynamicExtent);
 }
 
 template <typename Draw>

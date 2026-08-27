@@ -50,6 +50,8 @@ struct GxDrawInput {
   uint64_t deformF32OffsetMask = 0;
   uint32_t cameraTextureMatrixMask = 0;
   uint8_t positionMatrixSlot = 0;
+  uint32_t indexedArrayUsedMask = 0;
+  std::array<RangeInput, 12> indexedArrayRanges{};
 };
 
 struct RmlDrawInput {
@@ -68,6 +70,8 @@ struct RmlDrawInput {
   uint32_t stencilReference = 0;
   std::array<float, 4> blendConstant{};
   uint32_t hasBlendConstant = 0;
+  uint32_t bindGroup1DynamicExtent = 0;
+  uint32_t bindGroup2DynamicExtent = 0;
 };
 
 struct FrameInput {
