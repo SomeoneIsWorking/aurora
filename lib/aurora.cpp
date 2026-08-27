@@ -4,6 +4,7 @@
 
 #ifdef AURORA_ENABLE_GX
 #include "gfx/common.hpp"
+#include "gfx/pipeline_cache.hpp"
 #include "gfx/render_worker.hpp"
 #include "gx/command_processor.hpp"
 #include "gx/fifo.hpp"
@@ -20,11 +21,13 @@
 #include "input.hpp"
 #include "internal.hpp"
 #include "frame_readback_flight.hpp"
+#include "frame_sink_schedule.hpp"
 #include "window.hpp"
 
 #include <SDL3/SDL_filesystem.h>
 #include <magic_enum.hpp>
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <atomic>
@@ -42,11 +45,12 @@ extern "C" __attribute__((weak)) void aurora_replay_sample(float alpha, unsigned
 
 namespace aurora {
 static AuroraFrameSink g_frameSink = nullptr;
+static AuroraFrameSinkWithInfo g_frameSinkWithInfo = nullptr;
 static void* g_frameSinkUser = nullptr;
-static int g_frameSinkEvery = 0;
+static FrameSinkSchedule g_frameSinkSchedule;
 // aurora_set_dump_tag: a short role label the caller stamps onto the next dump's filename, so a
 // dump series is self-describing rather than needing its files identified by inference.
-static char g_dumpTag[32] = {0};
+static std::array<char, 32> g_dumpTag{};
 
 AuroraConfig g_config;
 uint32_t g_sdlCustomEventsStart;
@@ -59,6 +63,17 @@ Module Log("aurora");
 static uint32_t g_presentAspectW = 640;
 static uint32_t g_presentAspectH = 480;
 static std::atomic_bool g_presentationEnabled = true;
+
+uint64_t frame_sink_capture_frame_id_impl() noexcept {
+#ifdef AURORA_ENABLE_GX
+  if ((g_frameSink == nullptr && g_frameSinkWithInfo == nullptr) || !g_frameSinkSchedule.will_capture()) {
+    return 0;
+  }
+  return gfx::recording_frame_id();
+#else
+  return 0;
+#endif
+}
 
 void set_present_aspect(uint32_t width, uint32_t height) {
   if (width == 0 || height == 0) {
@@ -444,9 +459,21 @@ void end_frame_impl(bool replayEmission) noexcept {
   }
 #endif
 
+  // The worker builds the dump path asynchronously. Snapshot this emission's label on the calling
+  // thread just like presentSource above; rereading the global in the worker lets the next retained
+  // sample overwrite the primary emission's role before its path is assembled.
+  const auto dumpTag = g_dumpTag;
+  // Select the sink job on the calling thread while this exact packet is still open. MapAsync may
+  // deliver several presents later or out of order, so neither callback-time globals nor a worker
+  // countdown can establish which native frame these pixels belong to.
+  const bool frameSinkSelected = g_frameSinkSchedule.consume();
+  const uint64_t frameSinkExpectedId = frameSinkSelected ? gfx::recording_frame_id() : 0;
+  const AuroraFrameSink frameSink = frameSinkSelected ? g_frameSink : nullptr;
+  const AuroraFrameSinkWithInfo frameSinkWithInfo = frameSinkSelected ? g_frameSinkWithInfo : nullptr;
+  void* const frameSinkUser = frameSinkSelected ? g_frameSinkUser : nullptr;
   gfx::end_frame([presentSource, rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
-                  imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder,
-                                                            const AuroraGpuSubmitInfo& submitProbe) mutable {
+                  imguiDrawData = std::move(imguiDrawData), dumpTag, frameSinkExpectedId, frameSink, frameSinkWithInfo,
+                  frameSinkUser](wgpu::CommandEncoder& encoder, const AuroraGpuSubmitInfo& submitProbe) mutable {
     // SB_DUMP_FRAME=/path/to.raw : one-shot raw dump of the framebuffer, taken
     // SB_DUMP_FRAME_AFTER frames in (default 60). The OUTPUT is always normalized
     // to true RGBA8 (R,G,B,A byte order) regardless of the host surface format, so
@@ -466,7 +493,9 @@ void end_frame_impl(bool replayEmission) noexcept {
       bool swapRB = false; // surface is BGRA8 -> swap R/B to emit RGBA8
       std::string path;    // empty => deliver to the frame sink instead of a file
       AuroraFrameSink sink = nullptr;
+      AuroraFrameSinkWithInfo sinkWithInfo = nullptr;
       void* sinkUser = nullptr;
+      AuroraFrameSinkInfo sinkInfo{};
     };
     static int s_dumpFramesLeft = -2;
     static const char* s_dumpPath = nullptr;
@@ -489,9 +518,6 @@ void end_frame_impl(bool replayEmission) noexcept {
     // lets a run capture a few CONSECUTIVE presents instead, which is a comparison inside one run
     // at one moment and cannot drift that way. 0 or unset = unbounded, as before.
     static int s_dumpCount = -1;
-    // Frame sink (aurora_set_frame_sink): an independent capture cadence, so an in-process
-    // parity comparison can run alongside — or without — the file dumps.
-    static int s_sinkCountdown = 0;
     // Map callbacks are spontaneous and may lag arbitrarily far behind frame submission. Keep
     // explicit lifecycle counts so the GPU flight recorder can distinguish an ordinary frame from
     // a frame-dump burst that has accumulated readbacks. These are observations, not a guessed
@@ -526,76 +552,80 @@ void end_frame_impl(bool replayEmission) noexcept {
       const uint32_t bpr = ((job->width * 4 + 255) / 256) * 256;
       const uint64_t totalBytes = static_cast<uint64_t>(bpr) * job->height;
       s_dumpFlight.map_requested();
-      job->buffer.MapAsync(wgpu::MapMode::Read, 0, totalBytes, wgpu::CallbackMode::AllowSpontaneous,
-                           [job](wgpu::MapAsyncStatus status, wgpu::StringView) {
-                             auto callback = s_dumpFlight.callback_started();
-                             if (status != wgpu::MapAsyncStatus::Success) {
-                               Log.error("SB_DUMP_FRAME map failed status={} ({})", static_cast<int>(status),
-                                         job->path);
-                               return;
-                             }
-                             const uint32_t bpr = ((job->width * 4 + 255) / 256) * 256;
-                             const auto* mapped = static_cast<const uint8_t*>(
-                                 job->buffer.GetConstMappedRange(0, static_cast<uint64_t>(bpr) * job->height));
-                             if (!mapped) {
-                               job->buffer.Unmap();
-                               Log.error("SB_DUMP_FRAME: GetConstMappedRange returned null ({})", job->path);
-                               return;
-                             }
-                             callback.mark_map_success();
-                             if (job->sink != nullptr) {
-                               // Repack into tightly-packed RGBA8: the mapped rows are padded to a
-                               // 256-byte stride, which a consumer expecting width*4 would misread.
-                               const uint32_t rowBytes = static_cast<uint32_t>(job->width) * 4;
-                               std::vector<uint8_t> frame(static_cast<size_t>(rowBytes) * job->height);
-                               for (uint32_t y = 0; y < job->height; ++y) {
-                                 const uint8_t* src = mapped + static_cast<size_t>(y) * bpr;
-                                 uint8_t* dst = frame.data() + static_cast<size_t>(y) * rowBytes;
-                                 if (job->swapRB) {
-                                   for (uint32_t p = 0; p < rowBytes; p += 4) {
-                                     dst[p + 0] = src[p + 2];
-                                     dst[p + 1] = src[p + 1];
-                                     dst[p + 2] = src[p + 0];
-                                     dst[p + 3] = src[p + 3];
-                                   }
-                                 } else {
-                                   std::memcpy(dst, src, rowBytes);
-                                 }
-                               }
-                               job->sink(frame.data(), job->width, job->height, job->sinkUser);
-                               job->buffer.Unmap();
-                               return;
-                             }
-                             FILE* f = std::fopen(job->path.c_str(), "wb");
-                             if (!f) {
-                               Log.error("SB_DUMP_FRAME: fopen failed {}", job->path);
-                             } else {
-                               const uint32_t rowBytes = static_cast<size_t>(job->width) * 4;
-                               std::vector<uint8_t> row; // scratch for optional R/B swap
-                               if (job->swapRB)
-                                 row.resize(rowBytes);
-                               for (uint32_t y = 0; y < job->height; ++y) {
-                                 const uint8_t* src = mapped + static_cast<size_t>(y) * bpr;
-                                 if (job->swapRB) {
-                                   // BGRA8 -> RGBA8 (swap bytes 0<->2 of each pixel)
-                                   for (uint32_t p = 0; p < rowBytes; p += 4) {
-                                     row[p + 0] = src[p + 2]; // R <- B
-                                     row[p + 1] = src[p + 1]; // G
-                                     row[p + 2] = src[p + 0]; // B <- R
-                                     row[p + 3] = src[p + 3]; // A
-                                   }
-                                   std::fwrite(row.data(), 1, rowBytes, f);
-                                 } else {
-                                   std::fwrite(src, 1, rowBytes, f);
-                                 }
-                               }
-                               std::fclose(f);
-                               Log.info("SB_DUMP_FRAME: wrote {}x{} RGBA8{} to {} ({} bytes)", job->width, job->height,
-                                        job->swapRB ? " (swapped from BGRA8)" : "", job->path,
-                                        static_cast<size_t>(job->width) * job->height * 4);
-                             }
-                             job->buffer.Unmap();
-                           });
+      job->buffer.MapAsync(
+          wgpu::MapMode::Read, 0, totalBytes, wgpu::CallbackMode::AllowSpontaneous,
+          [job](wgpu::MapAsyncStatus status, wgpu::StringView) {
+            auto callback = s_dumpFlight.callback_started();
+            if (status != wgpu::MapAsyncStatus::Success) {
+              Log.error("SB_DUMP_FRAME map failed status={} ({})", static_cast<int>(status), job->path);
+              return;
+            }
+            const uint32_t bpr = ((job->width * 4 + 255) / 256) * 256;
+            const auto* mapped = static_cast<const uint8_t*>(
+                job->buffer.GetConstMappedRange(0, static_cast<uint64_t>(bpr) * job->height));
+            if (!mapped) {
+              job->buffer.Unmap();
+              Log.error("SB_DUMP_FRAME: GetConstMappedRange returned null ({})", job->path);
+              return;
+            }
+            callback.mark_map_success();
+            if (job->sink != nullptr || job->sinkWithInfo != nullptr) {
+              // Repack into tightly-packed RGBA8: the mapped rows are padded to a
+              // 256-byte stride, which a consumer expecting width*4 would misread.
+              const uint32_t rowBytes = static_cast<uint32_t>(job->width) * 4;
+              std::vector<uint8_t> frame(static_cast<size_t>(rowBytes) * job->height);
+              for (uint32_t y = 0; y < job->height; ++y) {
+                const uint8_t* src = mapped + static_cast<size_t>(y) * bpr;
+                uint8_t* dst = frame.data() + static_cast<size_t>(y) * rowBytes;
+                if (job->swapRB) {
+                  for (uint32_t p = 0; p < rowBytes; p += 4) {
+                    dst[p + 0] = src[p + 2];
+                    dst[p + 1] = src[p + 1];
+                    dst[p + 2] = src[p + 0];
+                    dst[p + 3] = src[p + 3];
+                  }
+                } else {
+                  std::memcpy(dst, src, rowBytes);
+                }
+              }
+              if (job->sinkWithInfo != nullptr) {
+                job->sinkWithInfo(frame.data(), job->width, job->height, &job->sinkInfo, job->sinkUser);
+              } else {
+                job->sink(frame.data(), job->width, job->height, job->sinkUser);
+              }
+              job->buffer.Unmap();
+              return;
+            }
+            FILE* f = std::fopen(job->path.c_str(), "wb");
+            if (!f) {
+              Log.error("SB_DUMP_FRAME: fopen failed {}", job->path);
+            } else {
+              const uint32_t rowBytes = static_cast<size_t>(job->width) * 4;
+              std::vector<uint8_t> row; // scratch for optional R/B swap
+              if (job->swapRB)
+                row.resize(rowBytes);
+              for (uint32_t y = 0; y < job->height; ++y) {
+                const uint8_t* src = mapped + static_cast<size_t>(y) * bpr;
+                if (job->swapRB) {
+                  // BGRA8 -> RGBA8 (swap bytes 0<->2 of each pixel)
+                  for (uint32_t p = 0; p < rowBytes; p += 4) {
+                    row[p + 0] = src[p + 2]; // R <- B
+                    row[p + 1] = src[p + 1]; // G
+                    row[p + 2] = src[p + 0]; // B <- R
+                    row[p + 3] = src[p + 3]; // A
+                  }
+                  std::fwrite(row.data(), 1, rowBytes, f);
+                } else {
+                  std::fwrite(src, 1, rowBytes, f);
+                }
+              }
+              std::fclose(f);
+              Log.info("SB_DUMP_FRAME: wrote {}x{} RGBA8{} to {} ({} bytes)", job->width, job->height,
+                       job->swapRB ? " (swapped from BGRA8)" : "", job->path,
+                       static_cast<size_t>(job->width) * job->height * 4);
+            }
+            job->buffer.Unmap();
+          });
     }
     s_dumpAwaitingMap.clear();
     if (s_dumpFramesLeft > 0) {
@@ -622,9 +652,9 @@ void end_frame_impl(bool replayEmission) noexcept {
       // artifact self-describing, and removes the join between "dump index" and "what the runtime
       // was doing", which is exactly the kind of cross-instrument ordinal join that has produced
       // false findings in this project before.
-      if (g_dumpTag[0] != '\0') {
+      if (dumpTag[0] != '\0') {
         job->path += ".";
-        job->path += g_dumpTag;
+        job->path += dumpTag.data();
       }
       const uint32_t bytesPerRow = ((job->width * 4 + 255) / 256) * 256;
       const wgpu::BufferDescriptor bd{
@@ -659,15 +689,19 @@ void end_frame_impl(bool replayEmission) noexcept {
         Log.info("SB_DUMP_FRAME: series complete after {} dumps (SB_DUMP_FRAME_COUNT)", s_dumpSeq);
       }
     }
-    if (g_frameSink != nullptr && g_frameSinkEvery > 0 && --s_sinkCountdown <= 0) {
-      s_sinkCountdown = g_frameSinkEvery;
+    if (frameSink != nullptr || frameSinkWithInfo != nullptr) {
+      CHECK(frameSinkExpectedId != 0 && submitProbe.frameId == frameSinkExpectedId,
+            "Frame sink selected packet {} on the calling thread but render worker submitted {}", frameSinkExpectedId,
+            submitProbe.frameId);
       const auto& src = presentSource;
       auto job = std::make_shared<SbDumpJob>();
       job->width = src.size.width;
       job->height = src.size.height;
       job->swapRB = (webgpu::g_graphicsConfig.surfaceConfiguration.format == wgpu::TextureFormat::BGRA8Unorm);
-      job->sink = g_frameSink;
-      job->sinkUser = g_frameSinkUser; // path stays empty: routed to the sink
+      job->sink = frameSink;
+      job->sinkWithInfo = frameSinkWithInfo;
+      job->sinkUser = frameSinkUser; // path stays empty: routed to the sink
+      job->sinkInfo = make_frame_sink_info(submitProbe);
       const uint32_t bytesPerRow = ((job->width * 4 + 255) / 256) * 256;
       const wgpu::BufferDescriptor bd{
           .label = "frame sink readback",
@@ -914,6 +948,16 @@ double aurora_display_refresh_rate() { return aurora::window::display_refresh_ra
 const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(); }
 void aurora_end_frame() { aurora::end_frame(); }
+void aurora_pause_pipeline_compilation() {
+#ifdef AURORA_ENABLE_GX
+  aurora::gfx::pause_pipeline_compilation();
+#endif
+}
+void aurora_resume_pipeline_compilation() {
+#ifdef AURORA_ENABLE_GX
+  aurora::gfx::resume_pipeline_compilation();
+#endif
+}
 void aurora_set_presentation_enabled(bool enabled) { aurora::set_presentation_enabled(enabled); }
 void aurora_set_present_aspect(uint32_t width, uint32_t height) { aurora::set_present_aspect(width, height); }
 
@@ -939,15 +983,23 @@ const AuroraBackend* aurora_get_available_backends(size_t* count) {
 }
 void aurora_set_frame_sink(AuroraFrameSink fn, void* user, int everyNFrames) {
   aurora::g_frameSink = fn;
+  aurora::g_frameSinkWithInfo = nullptr;
   aurora::g_frameSinkUser = user;
-  aurora::g_frameSinkEvery = (fn != nullptr) ? everyNFrames : 0;
+  aurora::g_frameSinkSchedule.configure((fn != nullptr) ? everyNFrames : 0);
 }
+void aurora_set_frame_sink_with_info(AuroraFrameSinkWithInfo fn, void* user, int everyNFrames) {
+  aurora::g_frameSink = nullptr;
+  aurora::g_frameSinkWithInfo = fn;
+  aurora::g_frameSinkUser = user;
+  aurora::g_frameSinkSchedule.configure((fn != nullptr) ? everyNFrames : 0);
+}
+uint64_t aurora_frame_sink_capture_frame_id(void) { return aurora::frame_sink_capture_frame_id_impl(); }
 void aurora_set_dump_tag(const char* tag) {
   if (tag == nullptr) {
     aurora::g_dumpTag[0] = '\0';
     return;
   }
-  std::snprintf(aurora::g_dumpTag, sizeof(aurora::g_dumpTag), "%s", tag);
+  std::snprintf(aurora::g_dumpTag.data(), aurora::g_dumpTag.size(), "%s", tag);
 }
 void aurora_set_log_level(AuroraLogLevel level) { aurora::g_config.logLevel = level; }
 void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusLost = value; }

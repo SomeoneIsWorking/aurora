@@ -1,5 +1,7 @@
 #include "pipeline_cache.hpp"
 
+#include "pipeline_worker_gate.hpp"
+
 #include "clear.hpp"
 #include "../fs_helper.hpp"
 #include "../gx/pipeline.hpp"
@@ -69,6 +71,7 @@ static std::thread g_pipelineThread;
 static std::atomic_bool g_pipelineThreadEnd = false;
 static std::condition_variable g_pipelineQueueCv;
 static std::condition_variable g_pipelineReadyCv;
+static PipelineWorkerGate g_pipelineWorkerGate;
 static absl::flat_hash_map<PipelineRef, CachedPipeline> g_pipelines;
 static std::deque<PendingPipeline> g_pipelineQueue;
 static std::deque<PendingPipeline> g_backgroundPipelineQueue;
@@ -987,7 +990,11 @@ static void pipeline_worker() {
       pending = std::move(source.front());
       source.pop_front();
     }
-    auto result = pending.create();
+    wgpu::RenderPipeline result;
+    {
+      auto work = g_pipelineWorkerGate.enter_work();
+      result = pending.create();
+    }
     {
       std::lock_guard lock{g_pipelineMutex};
       g_pipelines.try_emplace(pending.hash, CachedPipeline{
@@ -1156,7 +1163,14 @@ void initialize_pipeline_cache() {
   }
 }
 
+void pause_pipeline_compilation() { g_pipelineWorkerGate.pause_and_wait(); }
+
+void resume_pipeline_compilation() { g_pipelineWorkerGate.resume(); }
+
 void shutdown_pipeline_cache() {
+  // A host may be unwinding after pausing the worker for another graphics API's startup. Never
+  // leave the pipeline thread asleep behind the gate while shutdown waits to join it.
+  g_pipelineWorkerGate.resume();
   if (g_hasPipelineThread) {
     g_pipelineThreadEnd = true;
     g_pipelineQueueCv.notify_all();

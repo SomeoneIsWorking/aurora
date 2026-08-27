@@ -297,6 +297,8 @@ void initialize();
 void shutdown();
 
 bool begin_frame();
+// Exact ID of the packet currently being recorded, or zero outside a begin/end frame pair.
+uint64_t recording_frame_id() noexcept;
 void finish();
 void end_frame(EndFrameCallback callback);
 

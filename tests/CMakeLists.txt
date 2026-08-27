@@ -135,6 +135,21 @@ if (AURORA_ENABLE_GX)
   target_link_libraries(frame_readback_flight_tests PRIVATE gtest gtest_main)
   gtest_discover_tests(frame_readback_flight_tests)
 
+  add_executable(frame_sink_schedule_tests frame_sink_schedule_test.cpp)
+  target_include_directories(frame_sink_schedule_tests PRIVATE ../include ../lib)
+  target_link_libraries(frame_sink_schedule_tests PRIVATE gtest gtest_main)
+  gtest_discover_tests(frame_sink_schedule_tests)
+
+  add_executable(texture_usage_tests texture_usage_test.cpp)
+  target_include_directories(texture_usage_tests PRIVATE ../lib)
+  target_link_libraries(texture_usage_tests PRIVATE gtest gtest_main dawn::dawncpp_headers)
+  gtest_discover_tests(texture_usage_tests)
+
+  add_executable(pipeline_worker_gate_tests pipeline_worker_gate_test.cpp)
+  target_include_directories(pipeline_worker_gate_tests PRIVATE ../lib)
+  target_link_libraries(pipeline_worker_gate_tests PRIVATE gtest gtest_main)
+  gtest_discover_tests(pipeline_worker_gate_tests)
+
   add_executable(gpu_submit_probe_tests
     gpu_submit_probe_test.cpp
     os_test_globals.cpp
