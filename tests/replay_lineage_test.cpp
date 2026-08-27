@@ -87,6 +87,13 @@ TEST(ReplayLineage, PreSubmitUniformCheckReobservesTheFinalBytes) {
   EXPECT_EQ(validate_uniforms(expected, interpolatedUniforms), ValidationStatus::UniformMismatch);
 }
 
+TEST(ReplayLineage, PreSubmitCommandCheckReobservesTheFinalStream) {
+  const uint64_t expected = command_hash({1, 2, 3});
+
+  EXPECT_EQ(validate_command(expected, command_hash({1, 2, 3})), ValidationStatus::Valid);
+  EXPECT_EQ(validate_command(expected, command_hash({1, 99, 3})), ValidationStatus::CommandMismatch);
+}
+
 TEST(ReplayLineage, MutatedMiddleDrawOutsideBoundedTailFails) {
   std::vector<uint64_t> pipelines(12);
   for (size_t index = 0; index < pipelines.size(); ++index) {

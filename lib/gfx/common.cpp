@@ -536,11 +536,11 @@ static gpu_submit_probe::TextureResourceInput probe_texture_resource(const Textu
 }
 
 static AuroraGpuSubmitInfo build_submit_probe(const FramePacket& frame,
-                                              const replay_lineage::Source* sourceScope = nullptr) {
+                                              const replay_lineage::Source* sourceScope = nullptr,
+                                              bool includeRuntimeState = true) {
   const size_t passCount = sourceScope != nullptr ? sourceScope->passCommandCounts.size() : frame.renderPasses.size();
   CHECK(passCount <= frame.renderPasses.size(), "Replay source declares {} passes but the packet has only {}",
         passCount, frame.renderPasses.size());
-  const auto textureCaches = gx::texture_cache_counts();
   gpu_submit_probe::FrameInput input{
       .replayEmission = frame.replayEmission ? 1u : 0u,
       .frameId = frame.frameId,
@@ -554,16 +554,17 @@ static AuroraGpuSubmitInfo build_submit_probe(const FramePacket& frame,
       .indexBytes = static_cast<uint32_t>(frame.indices.size()),
       .storageBytes = static_cast<uint32_t>(frame.storage.size()),
       .textureUploadBytes = static_cast<uint32_t>(frame.textureUpload.size()),
-      .cachedTextureObjects = textureCaches.textureObjects,
-      .cachedTlutObjects = textureCaches.tlutObjects,
-      .cachedCopyTextures = textureCaches.copyTextures,
-      .persistentStorageEntries = static_cast<uint32_t>(persistent_storage_entries()),
-      .persistentStorageBytes = static_cast<uint32_t>(persistent_storage_used()),
       .replaySourceFrameId = frame.replaySource ? frame.replaySource->frameId : 0,
       .replaySourceCommandHash = frame.replaySource ? frame.replaySource->commandHash : 0,
       .replaySourceUniformHash = frame.replaySource ? frame.replaySource->uniformHash : 0,
   };
-  {
+  if (includeRuntimeState) {
+    const auto textureCaches = gx::texture_cache_counts();
+    input.cachedTextureObjects = textureCaches.textureObjects;
+    input.cachedTlutObjects = textureCaches.tlutObjects;
+    input.cachedCopyTextures = textureCaches.copyTextures;
+    input.persistentStorageEntries = static_cast<uint32_t>(persistent_storage_entries());
+    input.persistentStorageBytes = static_cast<uint32_t>(persistent_storage_used());
     std::lock_guard lock{g_bindGroupCacheMutex};
     input.cachedBindGroups = static_cast<uint32_t>(g_cachedBindGroups.size());
   }
@@ -1488,7 +1489,7 @@ bool install_replay_snapshot(bool consume) {
           "Replay source declares {} uniform bytes but the worker packet has only {}", replaySource.uniformBytes,
           packet.uniforms.size());
     const replay_lineage::Installation observed =
-        replay_lineage::observe_installation(build_submit_probe(packet, &replaySource).commandHash,
+        replay_lineage::observe_installation(build_submit_probe(packet, &replaySource, false).commandHash,
                                              {packet.uniforms.data(), static_cast<size_t>(replaySource.uniformBytes)});
     const replay_lineage::ValidationStatus status = replay_lineage::validate_installation(&replaySource, observed);
     CHECK(replay_lineage::passed(status),
@@ -2549,6 +2550,8 @@ void end_frame(EndFrameCallback callback) {
   const size_t stagingSlot = frame.stagingBuffer;
   const AuroraGpuSubmitInfo submitProbe = build_submit_probe(frame);
   const auto replaySource = frame.replaySource;
+  const uint64_t replayExpectedCommandHash =
+      replaySource ? build_submit_probe(frame, &*replaySource, false).commandHash : 0;
   const uint64_t replayExpectedUniformHash = frame.replayExpectedUniformHash;
   // A replay emission pushes no verts/indices/storage and records no draws, so publishing its
   // stats would make every second sample read zero — Tracy plots and the imgui overlay would
@@ -2556,13 +2559,18 @@ void end_frame(EndFrameCallback callback) {
   // about belong to the frame the game actually drew, so leave the last real publish standing.
   const bool publishStats = !frame.replayEmission;
   render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, publishStats, submitProbe, replaySource,
-                                             replayExpectedUniformHash, callback = std::move(callback)]() mutable {
+                                             replayExpectedCommandHash, replayExpectedUniformHash,
+                                             callback = std::move(callback)]() mutable {
     auto& packet = g_framePackets[frameSlot];
-    g_stagingBuffers[stagingSlot].Unmap();
-    s_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
-    auto encoder = std::move(packet.encoder);
-    const auto stats = packet.stats;
     if (submitProbe.replayEmission != 0 && replaySource) {
+      const uint64_t observedCommandHash = build_submit_probe(packet, &*replaySource, false).commandHash;
+      const replay_lineage::ValidationStatus commandStatus =
+          replay_lineage::validate_command(replayExpectedCommandHash, observedCommandHash);
+      CHECK(replay_lineage::passed(commandStatus),
+            "Replay command stream changed after its final intentional interpolation: {} source frame={} "
+            "expected={:#018x} observed={:#018x}",
+            replay_lineage::status_name(commandStatus), replaySource->frameId, replayExpectedCommandHash,
+            observedCommandHash);
       CHECK(replaySource->uniformBytes <= packet.uniforms.size(),
             "Replay source declares {} uniform bytes but the pre-submit packet has only {}", replaySource->uniformBytes,
             packet.uniforms.size());
@@ -2579,6 +2587,10 @@ void end_frame(EndFrameCallback callback) {
       CHECK(replay_lineage::passed(writerStatus), "Replay source writer validation failed before submit: {} frame={}",
             replay_lineage::status_name(writerStatus), replaySource->frameId);
     }
+    g_stagingBuffers[stagingSlot].Unmap();
+    s_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
+    auto encoder = std::move(packet.encoder);
+    const auto stats = packet.stats;
     packet = {};
     if (publishStats) {
       g_stats.drawCallCount = stats.drawCallCount;

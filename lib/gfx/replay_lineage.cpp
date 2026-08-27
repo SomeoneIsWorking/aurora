@@ -65,6 +65,10 @@ ValidationStatus validate_installation(const Source* source, const Installation&
   return ValidationStatus::Valid;
 }
 
+ValidationStatus validate_command(uint64_t expectedHash, uint64_t observedHash) noexcept {
+  return observedHash == expectedHash ? ValidationStatus::Valid : ValidationStatus::CommandMismatch;
+}
+
 ValidationStatus validate_uniforms(uint64_t expectedHash, std::span<const uint8_t> uniforms) {
   return hash_uniforms(uniforms) == expectedHash ? ValidationStatus::Valid : ValidationStatus::UniformMismatch;
 }

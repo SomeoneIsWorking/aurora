@@ -74,6 +74,7 @@ struct Installation {
 [[nodiscard]] uint64_t hash_uniforms(std::span<const uint8_t> uniforms);
 [[nodiscard]] Installation observe_installation(uint64_t commandHash, std::span<const uint8_t> uniforms);
 [[nodiscard]] ValidationStatus validate_installation(const Source* source, const Installation& installation) noexcept;
+[[nodiscard]] ValidationStatus validate_command(uint64_t expectedHash, uint64_t observedHash) noexcept;
 [[nodiscard]] ValidationStatus validate_uniforms(uint64_t expectedHash, std::span<const uint8_t> uniforms);
 [[nodiscard]] ValidationStatus validate_writers(const Source* source, const WriterSnapshot& writers) noexcept;
 [[nodiscard]] Source capture(uint64_t frameId, uint64_t commandHash, std::span<const uint8_t> uniforms,
